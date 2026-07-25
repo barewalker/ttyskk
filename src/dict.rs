@@ -62,6 +62,12 @@ pub struct Dict {
     /// 消し合ってしまう。保存時にディスクの内容を読み直し、この記録だけを
     /// 順に重ねることで、他のペインの学習を残したまま書ける。
     changes: Vec<Change>,
+    /// 共有辞書の見出し語を並べ替えたもの。前方一致を二分探索で取り出す。
+    ///
+    /// 17 万語を毎回舐めると一回 5〜7 ms かかり、打鍵ごとに引く用途には重い。
+    /// 送りありの見出し語は補完の対象外なので最初から除いてある。共有辞書は
+    /// 読み込み後に変わらないので、索引も一度作れば足りる。
+    system_sorted: Vec<String>,
 }
 
 /// 利用者辞書への変更。順に適用するので、覚え直しと削除が入り混じっても筋が通る。
@@ -141,12 +147,20 @@ impl Dict {
             }
         }
 
+        let mut system_sorted: Vec<String> = system
+            .keys()
+            .filter(|k| !is_okuri_ari(k))
+            .cloned()
+            .collect();
+        system_sorted.sort_unstable();
+
         Ok(Dict {
             system,
             user,
             user_path,
             import_path,
             changes: Vec::new(),
+            system_sorted,
         })
     }
 
@@ -180,18 +194,27 @@ impl Dict {
         if prefix.is_empty() {
             return Vec::new();
         }
-        let pick = |map: &HashMap<String, Vec<Candidate>>| {
-            let mut v: Vec<String> = map
-                .keys()
-                .filter(|k| k.len() > prefix.len() && k.starts_with(prefix) && !is_okuri_ari(k))
-                .cloned()
-                .collect();
-            v.sort_by(|a, b| a.chars().count().cmp(&b.chars().count()).then(a.cmp(b)));
-            v
-        };
-        let mut out = pick(&self.user);
+        let order =
+            |a: &String, b: &String| a.chars().count().cmp(&b.chars().count()).then(a.cmp(b));
+
+        // 利用者辞書は数千語なので素直に舐める (学習で増減するため索引を持たない)
+        let mut out: Vec<String> = self
+            .user
+            .keys()
+            .filter(|k| k.len() > prefix.len() && k.starts_with(prefix) && !is_okuri_ari(k))
+            .cloned()
+            .collect();
+        out.sort_by(&order);
         out.truncate(limit);
-        for k in pick(&self.system) {
+
+        let mut rest: Vec<String> = self
+            .system_prefix_range(prefix)
+            .iter()
+            .filter(|k| k.len() > prefix.len())
+            .cloned()
+            .collect();
+        rest.sort_by(&order);
+        for k in rest {
             if out.len() >= limit {
                 break;
             }
@@ -200,6 +223,14 @@ impl Dict {
             }
         }
         out
+    }
+
+    /// 共有辞書の索引から、前方一致する範囲を切り出す。
+    fn system_prefix_range(&self, prefix: &str) -> &[String] {
+        let v = &self.system_sorted;
+        let lo = v.partition_point(|k| k.as_str() < prefix);
+        let hi = v.partition_point(|k| k.as_str() < prefix || k.starts_with(prefix));
+        &v[lo..hi]
     }
 
     /// 確定した候補を利用者辞書の先頭に移す (学習)。
@@ -355,12 +386,16 @@ mod tests {
         );
         let mut user = HashMap::new();
         load_into(&mut user, "かんきょう /環境/\nかんぱい /乾杯/\n");
+        let mut system_sorted: Vec<String> =
+            sys.keys().filter(|k| !is_okuri_ari(k)).cloned().collect();
+        system_sorted.sort_unstable();
         let d = Dict {
             system: sys,
             user,
             user_path: PathBuf::from("/dev/null"),
             import_path: None,
             changes: Vec::new(),
+            system_sorted,
         };
         // 利用者辞書のものが先、そのあと共有辞書。同じ長さなら辞書順。
         assert_eq!(
