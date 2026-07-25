@@ -281,7 +281,11 @@ fn main() -> Result<()> {
     let raw = RawGuard::new()?;
     let mut stdout = std::io::stdout();
     request_cursor_report(&mut stdout);
-    let (origin, typeahead) = read_cursor_report(Duration::from_millis(300));
+    // 応答が来るまで待つ。mosh や遅い経路では往復に時間がかかり、300ms では
+    // 取りこぼす。取りこぼすと控えの原点がずれ、重ね描きの消去が無関係のセルを
+    // 潰したうえ、物理カーソルも誤った場所へ動くのでシェルの出力までそこへ落ちる。
+    // 答えが来た時点で戻るので、速い端末では待ち時間にならない。
+    let (origin, typeahead) = read_cursor_report(Duration::from_millis(1500));
 
     let mut screen = Screen::new(rows as usize, cols as usize);
     match origin {
@@ -395,6 +399,12 @@ fn main() -> Result<()> {
     let mut mid_sequence = false;
     // 尋ねたカーソル位置の報告を待っているか
     let mut awaiting_report = false;
+    // 一度でもカーソル位置の報告を受け取れたか。
+    //
+    // 受け取れていないと控えの原点が当てずっぽうになる。その状態で重ね描きすると
+    // 無関係のセルを空白で潰し、物理カーソルも誤った場所へ動くのでシェルの出力まで
+    // そこへ落ちる。**壊すくらいなら描かない。** 位置が分かった時点で描き始める。
+    let mut anchored = origin.is_some();
     let show_cursor_color = std::env::var_os("TTYSKK_NO_CURSOR").is_none();
 
     // 端末に何か書いたか。何も書いていなければ後片付けも要らない (完全透過を保つ)。
@@ -431,7 +441,7 @@ fn main() -> Result<()> {
                 // 子が描き直したので、待っていた位置報告はもう古い
                 awaiting_report = false;
                 let preedit = skk.preedit();
-                if !preedit.is_empty() && !mid_sequence {
+                if !preedit.is_empty() && !mid_sequence && anchored {
                     out.extend(overlay.draw(&screen, &preedit));
                     out.extend(Overlay::restore_terminal(&screen));
                     touched = true;
@@ -446,6 +456,7 @@ fn main() -> Result<()> {
                 if awaiting_report && let Some((pos, rest)) = input::take_cursor_report(&data) {
                     screen.set_cursor(pos.0, pos.1);
                     awaiting_report = false;
+                    anchored = true;
                     data = rest;
                 }
                 let mut to_child = Vec::new();
@@ -467,7 +478,7 @@ fn main() -> Result<()> {
                     touched = true;
                 }
                 let preedit = skk.preedit();
-                if !preedit.is_empty() && !mid_sequence {
+                if !preedit.is_empty() && !mid_sequence && anchored {
                     out.extend(overlay.draw(&screen, &preedit));
                     out.extend(Overlay::restore_terminal(&screen));
                     touched = true;
