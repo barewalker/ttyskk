@@ -56,12 +56,21 @@ pub struct Dict {
     user: HashMap<String, Vec<Candidate>>,
     user_path: PathBuf,
     import_path: Option<PathBuf>,
-    /// この起動で覚えたことを、起きた順に記録する。
+    /// この起動で辞書に加えた変更を、起きた順に記録する。
     ///
     /// 丸ごと書き出すと、herdr で複数のペインを開いているときに互いの学習を
     /// 消し合ってしまう。保存時にディスクの内容を読み直し、この記録だけを
-    /// 重ねることで、他のペインの学習を残したまま書ける。
-    learned: Vec<(String, Candidate)>,
+    /// 順に重ねることで、他のペインの学習を残したまま書ける。
+    changes: Vec<Change>,
+}
+
+/// 利用者辞書への変更。順に適用するので、覚え直しと削除が入り混じっても筋が通る。
+#[derive(Clone, Debug)]
+enum Change {
+    /// 確定した候補を先頭へ移す
+    Learn(String, Candidate),
+    /// 候補を取り除く
+    Purge(String, String),
 }
 
 /// 一行を「見出し語」と「候補列」に分ける。
@@ -137,7 +146,7 @@ impl Dict {
             user,
             user_path,
             import_path,
-            learned: Vec::new(),
+            changes: Vec::new(),
         })
     }
 
@@ -196,12 +205,29 @@ impl Dict {
     /// 確定した候補を利用者辞書の先頭に移す (学習)。
     pub fn learn(&mut self, key: &str, cand: &Candidate) {
         move_to_front(self.user.entry(key.to_string()).or_default(), cand);
-        self.learned.push((key.to_string(), cand.clone()));
+        self.changes
+            .push(Change::Learn(key.to_string(), cand.clone()));
+    }
+
+    /// 候補を利用者辞書から取り除く。
+    ///
+    /// 手元に無くても記録は残す。別のペインが覚えた分がディスクにある場合、
+    /// 保存時にそちらから消す必要があるため。共有辞書には手を触れないので、
+    /// そちら由来の候補は次も出る (学習による先頭への繰り上がりだけが消える)。
+    pub fn purge(&mut self, key: &str, text: &str) {
+        if let Some(v) = self.user.get_mut(key) {
+            v.retain(|c| c.text != text);
+            if v.is_empty() {
+                self.user.remove(key);
+            }
+        }
+        self.changes
+            .push(Change::Purge(key.to_string(), text.to_string()));
     }
 
     /// 利用者辞書を書き出す。覚えたことがなければ何もしない。
     pub fn save(&mut self) -> Result<()> {
-        if self.learned.is_empty() {
+        if self.changes.is_empty() {
             return Ok(());
         }
         // ディスクの現状を読み直してから、この起動で覚えたことを重ねる
@@ -213,8 +239,20 @@ impl Dict {
         {
             load_into(&mut merged, &read_jisyo(src)?);
         }
-        for (key, cand) in &self.learned {
-            move_to_front(merged.entry(key.clone()).or_default(), cand);
+        for change in &self.changes {
+            match change {
+                Change::Learn(key, cand) => {
+                    move_to_front(merged.entry(key.clone()).or_default(), cand)
+                }
+                Change::Purge(key, text) => {
+                    if let Some(v) = merged.get_mut(key) {
+                        v.retain(|c| c.text != *text);
+                        if v.is_empty() {
+                            merged.remove(key);
+                        }
+                    }
+                }
+            }
         }
 
         if let Some(dir) = self.user_path.parent() {
@@ -240,7 +278,7 @@ impl Dict {
             }
         }
         fs::rename(&tmp, &self.user_path)?;
-        self.learned.clear();
+        self.changes.clear();
         Ok(())
     }
 }
@@ -322,7 +360,7 @@ mod tests {
             user,
             user_path: PathBuf::from("/dev/null"),
             import_path: None,
-            learned: Vec::new(),
+            changes: Vec::new(),
         };
         // 利用者辞書のものが先、そのあと共有辞書。同じ長さなら辞書順。
         assert_eq!(
@@ -335,6 +373,34 @@ mod tests {
         assert_eq!(d.complete("かん", 2).len(), 2, "上限が効く");
         assert!(d.complete("", 10).is_empty());
         assert!(d.complete("ぬ", 10).is_empty());
+    }
+
+    #[test]
+    fn purge_survives_the_merge_with_disk() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-purge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("user.dict");
+        std::fs::write(
+            &path,
+            ";; okuri-ari entries.\n;; okuri-nasi entries.\nかんじ /幹事/漢字/\n",
+        )
+        .unwrap();
+
+        let mut d = Dict::load(&[], path.clone(), None).unwrap();
+        d.purge("かんじ", "幹事");
+        assert_eq!(d.lookup("かんじ").len(), 1);
+        d.save().unwrap();
+
+        // 読み直しても消えたまま
+        let d2 = Dict::load(&[], path.clone(), None).unwrap();
+        assert_eq!(
+            d2.lookup("かんじ")
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            ["漢字"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub struct Config {
     pub complete: Vec<Key>,
     /// 前の補完候補へ
     pub complete_previous: Vec<Key>,
+    /// ▼ の候補を利用者辞書から取り除く
+    pub purge: Vec<Key>,
     /// 候補一覧から選ぶキー。並び順がそのまま一覧の並び順になる
     pub select: Vec<char>,
     /// 一覧を出さずに一つずつ送る候補数
@@ -68,6 +70,7 @@ impl Default for Config {
             previous: vec![Key::Char('x')],
             complete: vec![Key::Tab],
             complete_previous: vec![Key::Raw(b"\x1b[Z".to_vec())],
+            purge: vec![Key::Char('X')],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
@@ -112,6 +115,7 @@ impl Config {
                     "previous" => &mut cfg.previous,
                     "complete" => &mut cfg.complete,
                     "complete_previous" => &mut cfg.complete_previous,
+                    "purge" => &mut cfg.purge,
                     "select" => {
                         cfg.select = parse_select(value)?;
                         continue;

@@ -742,6 +742,10 @@ impl Skk {
                 let text = self.commit_candidate();
                 Response::text(&text)
             }
+            k if self.cfg.purge.contains(&k) => {
+                self.purge_candidate();
+                Response::default()
+            }
             k if self.cfg.convert.contains(&k) => {
                 if self.next_candidate() {
                     // 候補を出し切ったので辞書登録へ
@@ -832,6 +836,25 @@ impl Skk {
             .max(self.cfg.inline_candidates);
         if start == self.cfg.inline_candidates {
             self.cand_index = self.cfg.inline_candidates - 1;
+        }
+    }
+
+    /// いま選んでいる候補を利用者辞書から取り除く。
+    ///
+    /// 候補が尽きたら ▽ に戻す。共有辞書には触れないので、そちら由来の候補は
+    /// 次の変換でまた出る — 消えるのは学習による先頭への繰り上がりだけ。
+    fn purge_candidate(&mut self) {
+        let Some(cand) = self.current_candidate().cloned() else {
+            return;
+        };
+        let key = self.dict_key.clone();
+        self.dict.purge(&key, &cand.text);
+        self.candidates.retain(|c| c.text != cand.text);
+        if self.candidates.is_empty() {
+            self.phase = Phase::Composing;
+            self.cand_index = 0;
+        } else if self.cand_index >= self.candidates.len() {
+            self.cand_index = self.candidates.len() - 1;
         }
     }
 
@@ -1163,6 +1186,38 @@ mod tests {
         assert_eq!(skk.handle(Key::Tab).to_child, vec![0x09]);
         skk.handle(Key::Ctrl(0x0a));
         assert_eq!(skk.handle(Key::Tab).to_child, vec![0x09]);
+    }
+
+    #[test]
+    fn purge_removes_the_learned_candidate() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/幹事/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        // 一度「幹事」を確定して学習させる
+        typed(&mut skk, "Kanji  \n");
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼幹事", "学習で先頭に来ている");
+
+        // X で取り除くと次の候補に移る
+        typed(&mut skk, "X");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        // 学習による繰り上がりが消え、共有辞書の並びに戻る
+        typed(&mut skk, "\n");
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+    }
+
+    #[test]
+    fn purging_the_last_candidate_returns_to_the_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        // 登録した語をひとつだけ持つ状態にする
+        typed(&mut skk, "Tegaki ");
+        typed(&mut skk, "lXY\r");
+        typed(&mut skk, "\nTegaki ");
+        assert_eq!(preedit_text(&skk), "▼XY");
+        // 唯一の候補を消すと ▽ に戻る
+        typed(&mut skk, "X");
+        assert_eq!(preedit_text(&skk), "▽てがき");
     }
 
     #[test]
