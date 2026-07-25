@@ -46,6 +46,7 @@ ttyskk — 端末の中で完結する SKK 日本語入力
     TTYSKK_CONFIG      設定ファイルのパス (既定 ~/.config/ttyskk/config.toml)
     TTYSKK_NO_CURSOR   モードに応じたカーソルの形・色の変更をやめる
     TTYSKK_ACTIVE      ttyskk の中にいる印。あるときは包まずに子をそのまま起こす
+    TTYSKK_DEBUG       不具合を追う記録の書き出し先
 
 キー操作 (かなモード):
     C-j        かなモードへ入る / 入力中のローマ字を確定する
@@ -209,6 +210,35 @@ const CURSOR_RESET: &[u8] = b"\x1b[0 q\x1b]112\x07";
 /// すでに ttyskk の中にいることを子へ知らせる目印。
 const ACTIVE_ENV: &str = "TTYSKK_ACTIVE";
 
+/// 不具合を追うための記録。`TTYSKK_DEBUG` にパスを渡したときだけ書く。
+///
+/// 重ね描きは「控えのカーソル位置」に全面的に依存する。ずれた瞬間を後から
+/// 突き止められるよう、位置と描いた範囲を追えるようにしておく。
+struct Trace(Option<std::fs::File>);
+
+impl Trace {
+    fn new() -> Self {
+        Trace(std::env::var_os("TTYSKK_DEBUG").and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+        }))
+    }
+
+    fn log(&mut self, args: std::fmt::Arguments) {
+        if let Some(f) = self.0.as_mut() {
+            let _ = writeln!(f, "{args}");
+            let _ = f.flush();
+        }
+    }
+
+    fn on(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 fn main() -> Result<()> {
     // 最初の引数だけを見て、それ以降は丸ごと子のコマンド行として扱う
     let mut iter = std::env::args().skip(1);
@@ -286,6 +316,12 @@ fn main() -> Result<()> {
     // 潰したうえ、物理カーソルも誤った場所へ動くのでシェルの出力までそこへ落ちる。
     // 答えが来た時点で戻るので、速い端末では待ち時間にならない。
     let (origin, typeahead) = read_cursor_report(Duration::from_millis(1500));
+
+    let mut trace = Trace::new();
+    trace.log(format_args!(
+        "--- 起動 画面 {rows}x{cols} 位置の報告 {origin:?} 先走り {} バイト",
+        typeahead.len()
+    ));
 
     let mut screen = Screen::new(rows as usize, cols as usize);
     match origin {
@@ -427,10 +463,26 @@ fn main() -> Result<()> {
                 let had_overlay = !overlay.is_empty();
                 // 消去は直前の切れ目 (安全な位置) で行う
                 let mut out = overlay.erase(&screen);
+                if !out.is_empty() {
+                    // 書き戻しはカーソルと表示属性を動かす。子は自分が居た場所に
+                    // 書くつもりなので、出力を流す前に必ず戻す。戻さないと子の
+                    // 文字が一つずれた場所に落ち、控えと画面が食い違っていく。
+                    out.extend(Overlay::restore_terminal(&screen));
+                }
                 parser.advance(&mut screen, &data);
                 out.extend_from_slice(&data);
                 // 出力が列の途中で切れているあいだは割り込まない
                 mid_sequence = tracker.feed(&data);
+                if trace.on() {
+                    trace.log(format_args!(
+                        "子 {:3} バイト → 控え ({},{}) 途中={} {:?}",
+                        data.len(),
+                        screen.row,
+                        screen.col,
+                        mid_sequence,
+                        String::from_utf8_lossy(&data[..data.len().min(60)])
+                    ));
+                }
                 // 子がカーソルの形や色を変えたら、モードの合図を塗り直す。
                 // 列の途中では割り込めないので、書けるようになるまで持ち越す。
                 cursor_dirty |= screen.take_cursor_style_touched();
@@ -478,6 +530,20 @@ fn main() -> Result<()> {
                     touched = true;
                 }
                 let preedit = skk.preedit();
+                if trace.on() {
+                    trace.log(format_args!(
+                        "鍵 → 控え ({},{}) 錨={} 子へ {:?} 重ね描き {:?}",
+                        screen.row,
+                        screen.col,
+                        anchored,
+                        String::from_utf8_lossy(&to_child),
+                        preedit
+                            .at_cursor
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<String>()
+                    ));
+                }
                 if !preedit.is_empty() && !mid_sequence && anchored {
                     out.extend(overlay.draw(&screen, &preedit));
                     out.extend(Overlay::restore_terminal(&screen));
