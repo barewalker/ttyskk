@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// 同梱する補助辞書。どの標準辞書にも入っていないが、無いと困るものを持つ。
+/// いまは丸数字 (①〜㊿) だけ。バイナリに埋め込むので、置き場所の設定が要らない。
+const BUILTIN: &str = include_str!("../dict/SKK-JISYO.ttyskk");
+
 /// 候補ひとつ。`;` 以降の注釈は分けて持つ。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -20,7 +24,10 @@ pub struct Candidate {
 
 impl Candidate {
     fn parse(s: &str) -> Option<Self> {
-        if s.is_empty() {
+        // 空、または半角の空白だけの候補は捨てる。SKK では意味を持たないうえ、
+        // 利用者辞書に紛れ込むと共有辞書の正しい候補を覆い隠す (登録に失敗した
+        // 跡としてしばしば残っている)。全角空白は正当な候補なので残す。
+        if s.trim_matches([' ', '\t']).is_empty() {
             return None;
         }
         match s.split_once(';') {
@@ -111,6 +118,8 @@ impl Dict {
                 load_into(&mut system, &read_jisyo(p)?);
             }
         }
+        // 同梱の補助辞書は最後に重ねる。共有辞書に同じ見出し語があればそちらが先。
+        load_into(&mut system, BUILTIN);
 
         let import_path = import.map(|p| p.to_path_buf());
         let mut user = HashMap::new();
@@ -230,6 +239,39 @@ fn write_entry(f: &mut fs::File, key: &str, cands: &[Candidate]) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_covers_the_circled_numbers() {
+        let mut m = HashMap::new();
+        load_into(&mut m, BUILTIN);
+        assert_eq!(m.len(), 50, "まる1 〜 まる50 の 50 個");
+        for (key, want) in [
+            ("まる1", "①"),
+            ("まる20", "⑳"),
+            ("まる21", "㉑"),
+            ("まる35", "㉟"),
+            ("まる36", "㊱"),
+            ("まる50", "㊿"),
+        ] {
+            assert_eq!(m[key][0].text, want, "{key}");
+        }
+    }
+
+    #[test]
+    fn blank_candidates_are_dropped() {
+        // 登録に失敗した跡。共有辞書の正しい候補を覆い隠すので拾わない。
+        assert!(parse_line("まる1 / /").is_none());
+        assert!(parse_line("あ ///").is_none());
+        // 空候補が混じっていても、まともな候補は残る
+        let (_, c) = parse_line("あ /亜// /唖/").unwrap();
+        assert_eq!(
+            c.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(),
+            ["亜", "唖"]
+        );
+        // 全角空白は正当な候補
+        let (_, c) = parse_line("すぺーす /　/").unwrap();
+        assert_eq!(c[0].text, "　");
+    }
 
     #[test]
     fn parses_entries() {
