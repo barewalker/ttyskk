@@ -39,7 +39,7 @@ ttyskk — 端末の中で完結する SKK 日本語入力
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
     TTYSKK_USER_JISYO  利用者辞書のパス
-    TTYSKK_NO_CURSOR   モードに応じたカーソル色の変更をやめる
+    TTYSKK_NO_CURSOR   モードに応じたカーソルの形・色の変更をやめる
 
 キー操作 (かなモード):
     C-j        かなモードへ入る / 入力中のローマ字を確定する
@@ -174,14 +174,18 @@ fn read_cursor_report(timeout: Duration) -> (Option<(usize, usize)>, Vec<u8>) {
 /// モードを表すカーソルの見た目。形 (DECSCUSR) と色 (OSC 12/112) の組。
 ///
 /// 起動している間はどのモードでも設定するので、「カーソルの形が普段と違う」こと
-/// 自体が ttyskk が動いている合図になる。ASCII は下線、かな系はブロック。
-/// 色は ASCII だけ端末の既定へ戻し、他はモードごとに変える。
+/// 自体が ttyskk が動いている合図になる。
+///
+/// **色だけに頼らず、形だけでモードが分かるようにしてある。** 端末多重化器を
+/// 挟むと OSC 12 が途中で吸われて色が変わらないことがある (herdr が実際にそう)。
+/// DECSCUSR は 3 つの形と点滅の有無しか持たないので、よく使う 3 つのモードに
+/// 形を割り当て、めったに使わない全角英数だけ点滅で区別する。
 fn cursor_indicator(mode: Mode) -> &'static str {
     match mode {
-        Mode::Ascii => "\x1b[4 q\x1b]112\x07",
-        Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07",
-        Mode::Katakana => "\x1b[2 q\x1b]12;#5fd7ff\x07",
-        Mode::ZenkakuAscii => "\x1b[2 q\x1b]12;#d787ff\x07",
+        Mode::Ascii => "\x1b[4 q\x1b]112\x07",           // 固定の下線
+        Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07", // 固定のブロック
+        Mode::Katakana => "\x1b[6 q\x1b]12;#5fd7ff\x07", // 固定のバー
+        Mode::ZenkakuAscii => "\x1b[1 q\x1b]12;#d787ff\x07", // 点滅するブロック
     }
 }
 
