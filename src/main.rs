@@ -44,6 +44,7 @@ ttyskk — 端末の中で完結する SKK 日本語入力
     TTYSKK_USER_JISYO  利用者辞書のパス
     TTYSKK_CONFIG      設定ファイルのパス (既定 ~/.config/ttyskk/config.toml)
     TTYSKK_NO_CURSOR   モードに応じたカーソルの形・色の変更をやめる
+    TTYSKK_ACTIVE      ttyskk の中にいる印。あるときは包まずに子をそのまま起こす
 
 キー操作 (かなモード):
     C-j        かなモードへ入る / 入力中のローマ字を確定する
@@ -198,6 +199,9 @@ fn cursor_indicator(mode: Mode) -> &'static str {
 /// カーソルを端末の既定へ戻す (形・色とも)。
 const CURSOR_RESET: &[u8] = b"\x1b[0 q\x1b]112\x07";
 
+/// すでに ttyskk の中にいることを子へ知らせる目印。
+const ACTIVE_ENV: &str = "TTYSKK_ACTIVE";
+
 fn main() -> Result<()> {
     // 最初の引数だけを見て、それ以降は丸ごと子のコマンド行として扱う
     let mut iter = std::env::args().skip(1);
@@ -229,6 +233,20 @@ fn main() -> Result<()> {
     }
     if command.is_empty() {
         command.push(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
+    }
+
+    // すでに ttyskk の中にいるなら、包み直さず子をそのまま起こす。
+    //
+    // 外側が先にキーを取るので内側は永久に ASCII のままで一度も働かず、辞書を
+    // もう一部抱えるだけになる (常駐が倍)。exec で自分自身を置き換えるので、
+    // 余分なプロセスも残らない。承知のうえで入れ子にしたいときは
+    // `env -u TTYSKK_ACTIVE ttyskk ...` と唱える。
+    if std::env::var_os(ACTIVE_ENV).is_some() {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .exec();
+        return Err(anyhow::Error::new(err).context(format!("{} を起こせない", command[0])));
     }
 
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
@@ -282,6 +300,8 @@ fn main() -> Result<()> {
     for (k, v) in std::env::vars_os() {
         cmd.env(k, v);
     }
+    // 子の中でうっかり ttyskk を起こしても包み直さないための目印
+    cmd.env(ACTIVE_ENV, "1");
     if let Ok(cwd) = std::env::current_dir() {
         cmd.cwd(cwd);
     }
