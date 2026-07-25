@@ -62,6 +62,12 @@ pub struct Config {
     pub inline_candidates: usize,
     /// 候補一覧の出し方
     pub layout: Layout,
+    /// カーソルのそばにモードの印を出すか。
+    ///
+    /// 端末多重化器を挟むとカーソルの色 (OSC 12) が途中で吸われる (herdr が実際に
+    /// そう)。文字として書いた色はそのまま届くので、色でモードを見分けたい場合は
+    /// これを使う。ASCII モードでは何も描かないので、そのときの完全透過は保つ。
+    pub mode_marker: bool,
     /// 接頭辞・接尾辞に続けて確定した語を、繋げて辞書に覚えるか。
     ///
     /// 「さい>」→再 のあと「りよう」→利用 と確定したら `さいりよう /再利用/` を
@@ -96,6 +102,7 @@ impl Default for Config {
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
             layout: Layout::Inline,
+            mode_marker: true,
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
         }
@@ -164,6 +171,11 @@ impl Config {
                             toml::Value::Array(a) if a.is_empty() => Vec::new(),
                             v => parse_keys("ascii_keys", v)?,
                         }
+                    }
+                    "mode_marker" => {
+                        cfg.mode_marker = value
+                            .as_bool()
+                            .ok_or_else(|| anyhow::anyhow!("behavior.mode_marker は真偽値"))?
                     }
                     "learn_combined" => {
                         cfg.learn_combined = value

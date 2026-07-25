@@ -64,6 +64,11 @@ pub enum Style {
     ListItem,
     /// 候補一覧で選択中の項目
     ListSelected,
+    /// モードの印。色でモードを表すので、モードごとに分かれている。
+    ModeHiragana,
+    ModeKatakana,
+    ModeHankaku,
+    ModeZenkaku,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,6 +336,23 @@ impl Skk {
                 }
             }
         }
+        // モードの印は末尾に置く。カーソルは重ね描きの先頭に戻るので、
+        // 印は打ち込み中の文字より後ろに出て邪魔になりにくい。
+        if self.cfg.mode_marker
+            && let Some((style, text)) = match self.mode {
+                Mode::Ascii => None,
+                Mode::Hiragana => Some((Style::ModeHiragana, "あ")),
+                Mode::Katakana => Some((Style::ModeKatakana, "ア")),
+                Mode::HankakuKatakana => Some((Style::ModeHankaku, "半")),
+                Mode::ZenkakuAscii => Some((Style::ModeZenkaku, "Ａ")),
+            }
+        {
+            segs.push(Segment {
+                style,
+                text: text.to_string(),
+            });
+        }
+
         Preedit {
             at_cursor: segs,
             floating,
@@ -1124,11 +1146,39 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    /// 打ち込み中の内容だけ。モードの印は編集の対象ではないので外す。
     fn preedit_text(skk: &Skk) -> String {
         let p = skk.preedit();
         p.at_cursor
             .into_iter()
             .chain(p.floating)
+            .filter(|s| {
+                !matches!(
+                    s.style,
+                    Style::ModeHiragana
+                        | Style::ModeKatakana
+                        | Style::ModeHankaku
+                        | Style::ModeZenkaku
+                )
+            })
+            .map(|s| s.text)
+            .collect()
+    }
+
+    /// モードの印だけ。
+    fn mode_marker(skk: &Skk) -> String {
+        skk.preedit()
+            .at_cursor
+            .into_iter()
+            .filter(|s| {
+                matches!(
+                    s.style,
+                    Style::ModeHiragana
+                        | Style::ModeKatakana
+                        | Style::ModeHankaku
+                        | Style::ModeZenkaku
+                )
+            })
             .map(|s| s.text)
             .collect()
     }
@@ -1607,13 +1657,13 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         typed(&mut skk, "Ai     ");
         let p = skk.preedit();
-        // 行内は ▼ だけ。一覧は浮かせる側へ。
+        // 行内は ▼ とモードの印だけ。一覧は浮かせる側へ。
         assert_eq!(
             p.at_cursor
                 .iter()
                 .map(|s| s.text.as_str())
                 .collect::<String>(),
-            "▼挨"
+            "▼挨あ"
         );
         assert!(p.floating.iter().any(|s| s.text.contains("挨")));
         assert!(!p.floating.is_empty());
@@ -1636,6 +1686,47 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         typed(&mut skk, "Ai     ");
         assert!(preedit_text(&skk).contains("[残り 3]"));
+    }
+
+    #[test]
+    fn mode_marker_appears_except_in_ascii() {
+        let mut skk = skk_with(&[]);
+        // ASCII では何も描かない (完全透過を保つ)
+        assert_eq!(mode_marker(&skk), "");
+        assert!(skk.preedit().is_empty());
+
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(mode_marker(&skk), "あ");
+        skk.handle(Key::Char('q'));
+        assert_eq!(mode_marker(&skk), "ア");
+        skk.handle(Key::Ctrl(0x11));
+        assert_eq!(mode_marker(&skk), "半");
+        skk.handle(Key::Ctrl(0x11));
+        skk.handle(Key::Char('L'));
+        assert_eq!(mode_marker(&skk), "Ａ");
+
+        // 印は打ち込み中の内容より後ろに出る
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        let texts: Vec<String> = skk
+            .preedit()
+            .at_cursor
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(texts.last().map(|s| s.as_str()), Some("あ"));
+    }
+
+    #[test]
+    fn mode_marker_can_be_turned_off() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[behavior]\nmode_marker = false\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(mode_marker(&skk), "");
+        assert!(
+            skk.preedit().is_empty(),
+            "何も打っていなければ描くものが無い"
+        );
     }
 
     #[test]

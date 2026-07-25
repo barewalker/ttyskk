@@ -19,6 +19,13 @@ fn style_sgr(style: Style) -> &'static str {
         Style::Candidate => "\x1b[0;1;4;31m",
         Style::ListItem => "\x1b[0;2m",
         Style::ListSelected => "\x1b[0;7m",
+        // モードの印。反転させて色を地にすることで、小さくても目に入る。
+        // カーソルの色 (OSC 12) と同じ配色にしてあるが、こちらは文字なので
+        // 端末多重化器を挟んでも届く。
+        Style::ModeHiragana => "\x1b[0;7;38;2;127;215;95m",
+        Style::ModeKatakana => "\x1b[0;7;38;2;95;215;255m",
+        Style::ModeHankaku => "\x1b[0;7;38;2;95;175;175m",
+        Style::ModeZenkaku => "\x1b[0;7;38;2;215;135;255m",
     }
 }
 
