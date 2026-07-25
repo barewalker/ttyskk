@@ -7,7 +7,7 @@
 use unicode_width::UnicodeWidthChar;
 
 use crate::screen::Screen;
-use crate::skk::{Preedit, Segment, Style};
+use crate::skk::{Preedit, Segment, Style, Tint};
 
 fn style_sgr(style: Style) -> &'static str {
     match style {
@@ -86,11 +86,11 @@ impl Overlay {
     /// 文字は控えのものをそのまま使う。書き換えるのは見た目だけなので、
     /// 下にある文字が消えたり位置がずれたりしない。カーソルが行末の空きセルに
     /// あるときは色の付いた箱に見え、カーソルそのものが色付いたように読める。
-    fn draw_tint(&mut self, screen: &Screen, tint: Option<(Style, usize)>, out: &mut String) {
-        let Some((style, offset)) = tint else {
+    fn draw_tint(&mut self, screen: &Screen, tint: Option<Tint>, out: &mut String) {
+        let Some(t) = tint else {
             return;
         };
-        let col = screen.col + offset;
+        let col = screen.col + t.offset;
         if col >= screen.cols {
             return;
         }
@@ -99,12 +99,16 @@ impl Overlay {
             // 全角の後続セルの上には敷かない (前半を断ち切ってしまう)
             return;
         }
-        let w = (cell.width as usize).max(1);
+        // 記号を指定されていればそれを、無ければ控えの文字をそのまま出す
+        let (ch, w) = match t.glyph {
+            Some(g) => (g, 1),
+            None => (cell.ch, (cell.width as usize).max(1)),
+        };
         flush_line(
             out,
             screen.row,
             col,
-            &format!("{}{}", style_sgr(style), cell.ch),
+            &format!("{}{}", style_sgr(t.style), ch),
             w,
         );
         self.painted.push((screen.row, col, w));

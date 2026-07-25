@@ -193,7 +193,7 @@ fn cursor_indicator(mode: Mode, marker: Marker) -> &'static str {
     match marker {
         // カーソルの真下に色を敷く方式では、ブロックのカーソルがその色を覆う。
         // 形は下線に固定し、モードは色だけで表す (形 = 動いている合図)。
-        Marker::Cell => "\x1b[4 q\x1b]112\x07",
+        Marker::Cell | Marker::Symbol => "\x1b[4 q\x1b]112\x07",
         // 右隣に色の箱を置く方式では、カーソル自体には色を付けない。
         // 付けると色付きのものが二つ並んで見えて紛らわしい。色は箱が担い、
         // カーソルは形だけでモードを表す。

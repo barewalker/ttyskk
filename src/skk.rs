@@ -77,6 +77,16 @@ pub struct Segment {
     pub text: String,
 }
 
+/// カーソルのそばに敷く色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tint {
+    pub style: Style,
+    /// カーソルからの桁のずれ
+    pub offset: usize,
+    /// 敷く文字。`None` なら控えの文字をそのまま使う (下の文字を隠さない)。
+    pub glyph: Option<char>,
+}
+
 /// 重ね描きするもの。
 ///
 /// 候補一覧を浮かせる設定では、一覧だけがカーソルから離れた行に出る。
@@ -87,8 +97,8 @@ pub struct Preedit {
     pub at_cursor: Vec<Segment>,
     /// 別の行に一行で浮かせる (空なら無し)
     pub floating: Vec<Segment>,
-    /// セルに敷く色と、カーソルからの桁のずれ。文字は控えのものをそのまま使う。
-    pub cursor_tint: Option<(Style, usize)>,
+    /// セルに敷く色。
+    pub cursor_tint: Option<Tint>,
 }
 
 impl Preedit {
@@ -355,11 +365,23 @@ impl Skk {
             Marker::Off => {}
             // カーソル位置のセルに色を敷く。文字を足さないので邪魔にならない。
             // 打ち込み中の文字がある間はその先頭が同じ場所に来るので出さない。
-            Marker::Cell | Marker::Beside => {
+            Marker::Cell | Marker::Symbol | Marker::Beside => {
                 // 打ち込み中の文字がある間はその先頭が同じ場所に来るので出さない
                 if segs.is_empty() {
                     let offset = usize::from(self.cfg.mode_marker == Marker::Beside);
-                    cursor_tint = mode_style.map(|s| (s, offset));
+                    // 記号を出す方式では、色に頼らずモードが分かるようにする
+                    let glyph =
+                        (self.cfg.mode_marker == Marker::Symbol).then_some(match self.mode {
+                            Mode::Hiragana => 'H',
+                            Mode::Katakana => 'K',
+                            Mode::HankakuKatakana => 'k',
+                            _ => 'A',
+                        });
+                    cursor_tint = mode_style.map(|style| Tint {
+                        style,
+                        offset,
+                        glyph,
+                    });
                 }
             }
             // 印を末尾に置く。カーソルは重ね描きの先頭に戻るので、
@@ -1726,12 +1748,22 @@ mod tests {
 
         skk.handle(Key::Ctrl(0x0a));
         let p = skk.preedit();
-        assert_eq!(p.cursor_tint, Some((Style::ModeHiragana, 0)));
+        assert_eq!(
+            p.cursor_tint,
+            Some(Tint {
+                style: Style::ModeHiragana,
+                offset: 0,
+                glyph: None
+            })
+        );
         assert!(p.at_cursor.is_empty(), "文字は足さない");
         assert!(!p.is_empty(), "色を敷くので描くものはある");
 
         skk.handle(Key::Char('q'));
-        assert_eq!(skk.preedit().cursor_tint, Some((Style::ModeKatakana, 0)));
+        assert_eq!(
+            skk.preedit().cursor_tint.map(|t| t.style),
+            Some(Style::ModeKatakana)
+        );
 
         // 打ち込み中はその先頭が同じ場所に来るので敷かない
         skk.handle(Key::Char('q'));
@@ -1748,8 +1780,36 @@ mod tests {
         skk.set_config(Config::parse("[behavior]\nmode_marker = \"beside\"\n").unwrap());
         assert!(skk.preedit().cursor_tint.is_none(), "ASCII では何もしない");
         skk.handle(Key::Ctrl(0x0a));
-        assert_eq!(skk.preedit().cursor_tint, Some((Style::ModeHiragana, 1)));
+        assert_eq!(
+            skk.preedit().cursor_tint,
+            Some(Tint {
+                style: Style::ModeHiragana,
+                offset: 1,
+                glyph: None
+            })
+        );
         assert!(skk.preedit().at_cursor.is_empty(), "文字は足さない");
+    }
+
+    #[test]
+    fn symbol_marker_shows_a_halfwidth_letter() {
+        // 色に頼らずモードが分かる。幅は 1 桁なので見た目も崩れない。
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[behavior]\nmode_marker = \"symbol\"\n").unwrap());
+        assert!(skk.preedit().cursor_tint.is_none(), "ASCII では何もしない");
+        for (key, glyph) in [
+            (Key::Ctrl(0x0a), 'H'),
+            (Key::Char('q'), 'K'),
+            (Key::Ctrl(0x11), 'k'),
+        ] {
+            skk.handle(key);
+            let t = skk.preedit().cursor_tint.expect("印が出る");
+            assert_eq!(t.glyph, Some(glyph));
+            assert_eq!(t.offset, 0, "カーソルの真上");
+        }
+        skk.handle(Key::Ctrl(0x11));
+        skk.handle(Key::Char('L'));
+        assert_eq!(skk.preedit().cursor_tint.unwrap().glyph, Some('A'));
     }
 
     #[test]

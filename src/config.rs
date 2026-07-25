@@ -26,6 +26,11 @@ pub enum Marker {
     /// 形を下線に固定する。形 = 動いている合図、色 = モード、という配分。
     /// 素の端末ではカーソルそのものが色付いて見えて具合がよい。
     Cell,
+    /// カーソル位置のセルにモードを表す半角の記号を出す。
+    ///
+    /// 色だけに頼らないので、モノクロの環境でも区別が付く。幅は 1 桁なので
+    /// 見た目も崩れない。ただし下にある文字は隠れる (`Cell` は隠さない)。
+    Symbol,
     /// カーソルの**右隣**のセルに色を敷く。文字を足さない。
     ///
     /// カーソルに覆われないので、端末多重化器がカーソルの見た目を遅れて
@@ -196,10 +201,11 @@ impl Config {
                         cfg.mode_marker = match value.as_str() {
                             Some("off") => Marker::Off,
                             Some("cell") => Marker::Cell,
+                            Some("symbol") => Marker::Symbol,
                             Some("beside") => Marker::Beside,
                             Some("letter") => Marker::Letter,
                             _ => bail!(
-                                "behavior.mode_marker は \"off\" / \"cell\" / \"beside\" / \"letter\""
+                                "behavior.mode_marker は \"off\" / \"cell\" / \"symbol\" / \"beside\" / \"letter\""
                             ),
                         }
                     }
