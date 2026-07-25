@@ -111,6 +111,9 @@ pub struct Screen {
     autowrap: bool,
     pub cursor_visible: bool,
     pub alt_screen: bool,
+    /// 子アプリがカーソルの形 (DECSCUSR) や色 (OSC 12/112) を変えたか。
+    /// モードの合図を上書きされたことになるので、呼び出し側が塗り直す。
+    cursor_style_touched: bool,
 }
 
 impl Screen {
@@ -132,7 +135,13 @@ impl Screen {
             autowrap: true,
             cursor_visible: true,
             alt_screen: false,
+            cursor_style_touched: false,
         }
+    }
+
+    /// 子アプリがカーソルの見た目を変えていたら true を返し、印を落とす。
+    pub fn take_cursor_style_touched(&mut self) -> bool {
+        std::mem::take(&mut self.cursor_style_touched)
     }
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
@@ -405,12 +414,28 @@ impl Perform for Screen {
         }
     }
 
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 12 (カーソル色の設定) と OSC 112 (既定へ戻す)。DECSCUSR と同じ理由で
+        // 印を付ける。それ以外の OSC (題名など) は素通しでよい。
+        if let Some(first) = params.first()
+            && matches!(*first, b"12" | b"112")
+        {
+            self.cursor_style_touched = true;
+        }
+    }
+
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         // 私用マーカー (`?` `>` `<` `=`) や中間バイトが付いた CSI は、終端バイトが
         // 同じでも別の命令。`CSI > 4 ; 2 m` (modifyOtherKeys) を SGR 4;2 と読むと
         // 控えの pen が下線+薄字になり、書き戻しで画面全体に下線が乗る。
         // `CSI > 1 u` / `CSI < u` (kitty 鍵盤プロトコル) も 'u' = カーソル復帰では
         // ない。扱うのは `?` の h/l (DECSET/DECRST) だけで、他は読み飛ばす。
+        // DECSCUSR (`CSI Ps SP q`)。格子は変わらないが、モードの合図に使っている
+        // カーソルの形を子アプリが奪ったことになるので印を付ける。
+        if action == 'q' && intermediates.first() == Some(&b' ') {
+            self.cursor_style_touched = true;
+            return;
+        }
         let private = intermediates.first() == Some(&b'?');
         let understood = intermediates.is_empty() || (private && matches!(action, 'h' | 'l'));
         if !understood {
@@ -661,6 +686,24 @@ mod tests {
         assert_eq!(s.pen.flags & UNDERLINE, UNDERLINE);
         feed(&mut s, "\x1b[u");
         assert_eq!((s.row, s.col), (0, 0));
+    }
+
+    #[test]
+    fn notices_when_the_child_takes_over_the_cursor_look() {
+        let mut s = Screen::new(5, 20);
+        feed(&mut s, "abc\x1b[?25l\x1b]0;title\x07");
+        assert!(!s.take_cursor_style_touched());
+        // DECSCUSR (形)
+        feed(&mut s, "\x1b[5 q");
+        assert!(s.take_cursor_style_touched());
+        assert!(!s.take_cursor_style_touched(), "印は一度で落ちる");
+        // OSC 12 (色) と OSC 112 (既定へ戻す)
+        feed(&mut s, "\x1b]12;#ff0000\x07");
+        assert!(s.take_cursor_style_touched());
+        feed(&mut s, "\x1b]112\x07");
+        assert!(s.take_cursor_style_touched());
+        // 格子とカーソル位置には影響しない
+        assert_eq!((s.row, s.col), (0, 3));
     }
 
     #[test]

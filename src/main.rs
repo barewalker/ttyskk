@@ -171,15 +171,22 @@ fn read_cursor_report(timeout: Duration) -> (Option<(usize, usize)>, Vec<u8>) {
     }
 }
 
-/// モードを表すカーソル色。ASCII は端末の既定へ戻す。
-fn cursor_color(mode: Mode) -> &'static str {
+/// モードを表すカーソルの見た目。形 (DECSCUSR) と色 (OSC 12/112) の組。
+///
+/// 起動している間はどのモードでも設定するので、「カーソルの形が普段と違う」こと
+/// 自体が ttyskk が動いている合図になる。ASCII は下線、かな系はブロック。
+/// 色は ASCII だけ端末の既定へ戻し、他はモードごとに変える。
+fn cursor_indicator(mode: Mode) -> &'static str {
     match mode {
-        Mode::Ascii => "\x1b]112\x07",
-        Mode::Hiragana => "\x1b]12;#7fd75f\x07",
-        Mode::Katakana => "\x1b]12;#5fd7ff\x07",
-        Mode::ZenkakuAscii => "\x1b]12;#d787ff\x07",
+        Mode::Ascii => "\x1b[4 q\x1b]112\x07",
+        Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07",
+        Mode::Katakana => "\x1b[2 q\x1b]12;#5fd7ff\x07",
+        Mode::ZenkakuAscii => "\x1b[2 q\x1b]12;#d787ff\x07",
     }
 }
+
+/// カーソルを端末の既定へ戻す (形・色とも)。
+const CURSOR_RESET: &[u8] = b"\x1b[0 q\x1b]112\x07";
 
 fn main() -> Result<()> {
     // 最初の引数だけを見て、それ以降は丸ごと子のコマンド行として扱う
@@ -337,6 +344,17 @@ fn main() -> Result<()> {
     // 端末に何か書いたか。何も書いていなければ後片付けも要らない (完全透過を保つ)。
     let mut touched = false;
 
+    // 子に奪われたカーソルの見た目を塗り直す必要があるか
+    let mut cursor_dirty = false;
+
+    // 起動した時点でカーソルを ttyskk のものにする。何も打っていなくても、
+    // 動いていること・いまどのモードかが見て分かるようにするため。
+    if show_cursor_color {
+        let _ = stdout.write_all(cursor_indicator(skk.mode).as_bytes());
+        let _ = stdout.flush();
+        touched = true;
+    }
+
     for ev in rx {
         match ev {
             Event::Child(data) => {
@@ -347,6 +365,13 @@ fn main() -> Result<()> {
                 out.extend_from_slice(&data);
                 // 出力が列の途中で切れているあいだは割り込まない
                 mid_sequence = tracker.feed(&data);
+                // 子がカーソルの形や色を変えたら、モードの合図を塗り直す。
+                // 列の途中では割り込めないので、書けるようになるまで持ち越す。
+                cursor_dirty |= screen.take_cursor_style_touched();
+                if cursor_dirty && !mid_sequence && show_cursor_color {
+                    out.extend_from_slice(cursor_indicator(skk.mode).as_bytes());
+                    cursor_dirty = false;
+                }
                 // 子が描き直したので、待っていた位置報告はもう古い
                 awaiting_report = false;
                 let preedit = skk.preedit();
@@ -382,7 +407,7 @@ fn main() -> Result<()> {
                     writer.flush()?;
                 }
                 if mode_changed && show_cursor_color {
-                    out.extend_from_slice(cursor_color(skk.mode).as_bytes());
+                    out.extend_from_slice(cursor_indicator(skk.mode).as_bytes());
                     touched = true;
                 }
                 let preedit = skk.preedit();
@@ -423,7 +448,7 @@ fn main() -> Result<()> {
     if touched {
         let mut out = overlay.erase(&screen);
         if show_cursor_color {
-            out.extend_from_slice(b"\x1b]112\x07");
+            out.extend_from_slice(CURSOR_RESET);
         }
         out.extend_from_slice(b"\x1b[0m\x1b[?25h");
         let _ = stdout.write_all(&out);
