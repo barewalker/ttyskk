@@ -303,6 +303,15 @@ impl Skk {
 
     pub fn handle(&mut self, key: Key) -> Response {
         if self.regs.is_empty() {
+            // 挿入モードを抜けたときにかなが残らないようにする。vim / nvim で
+            // Esc を押すと挿入モードを抜けるので、同じキーで ASCII へ戻す。
+            // 登録の途中では効かせない (打ち込みの最中に消えると困る)。
+            if self.mode != Mode::Ascii && self.cfg.ascii_keys.contains(&key) {
+                let mut r = self.dispatch(key);
+                self.mode = Mode::Ascii;
+                r.mode_changed = true;
+                return r;
+            }
             return self.dispatch(key);
         }
         // 登録中。子へ出るはずだった文字は登録内容に溜める。
@@ -945,6 +954,54 @@ mod tests {
             Vec::<u8>::new()
         );
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    #[test]
+    fn escape_returns_to_ascii() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "ai");
+        // Esc は子へ渡りつつ、モードは ASCII に戻る (vim の挿入モードを抜ける動作)
+        let r = skk.handle(Key::Esc);
+        assert_eq!(r.to_child, vec![0x1b]);
+        assert!(r.mode_changed);
+        assert_eq!(skk.mode, Mode::Ascii);
+        // 以降はそのまま英字が通る
+        assert_eq!(typed(&mut skk, "dd"), "dd");
+    }
+
+    #[test]
+    fn escape_confirms_the_reading_first() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        // 変換中に Esc を押すと、候補を確定してから抜ける
+        let r = skk.handle(Key::Esc);
+        assert_eq!(String::from_utf8(r.to_child).unwrap(), "漢字\u{1b}");
+        assert_eq!(skk.mode, Mode::Ascii);
+    }
+
+    #[test]
+    fn escape_does_not_disturb_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        typed(&mut skk, "ai");
+        skk.handle(Key::Esc);
+        // 登録中は打ち込みが消えないよう、モードも内容もそのまま
+        assert_eq!(skk.mode, Mode::Hiragana);
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    #[test]
+    fn ascii_keys_can_be_turned_off() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[behavior]\nascii_keys = []\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        let r = skk.handle(Key::Esc);
+        assert_eq!(r.to_child, vec![0x1b]);
+        assert_eq!(skk.mode, Mode::Hiragana);
     }
 
     #[test]

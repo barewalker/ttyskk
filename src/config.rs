@@ -41,6 +41,10 @@ pub struct Config {
     pub select: Vec<char>,
     /// 一覧を出さずに一つずつ送る候補数
     pub inline_candidates: usize,
+    /// 押したときに ASCII モードへ戻すキー。空なら何もしない。
+    ///
+    /// vim / nvim で挿入モードを抜けたときに、かなモードが残らないようにする。
+    pub ascii_keys: Vec<Key>,
 }
 
 impl Default for Config {
@@ -58,6 +62,7 @@ impl Default for Config {
             previous: vec![Key::Char('x')],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
+            ascii_keys: vec![Key::Esc],
         }
     }
 }
@@ -107,6 +112,24 @@ impl Config {
             }
         }
 
+        if let Some(b) = table.get("behavior") {
+            let b = b
+                .as_table()
+                .ok_or_else(|| anyhow::anyhow!("[behavior] は表でなければならない"))?;
+            for (name, value) in b {
+                match name.as_str() {
+                    // ここだけは空の並びを許す (割り当てを外す指定になる)
+                    "ascii_keys" => {
+                        cfg.ascii_keys = match value {
+                            toml::Value::Array(a) if a.is_empty() => Vec::new(),
+                            v => parse_keys("ascii_keys", v)?,
+                        }
+                    }
+                    other => bail!("behavior.{other} は知らない項目"),
+                }
+            }
+        }
+
         if let Some(c) = table.get("candidates") {
             let c = c
                 .as_table()
@@ -128,7 +151,7 @@ impl Config {
         }
 
         for (name, value) in &table {
-            if !matches!(name.as_str(), "keys" | "candidates") {
+            if !matches!(name.as_str(), "keys" | "candidates" | "behavior") {
                 let _ = value;
                 bail!("[{name}] は知らない節");
             }
@@ -320,6 +343,19 @@ mod tests {
         assert_eq!(c.select, vec!['1', '2', '3']);
         assert_eq!(c.page_size(), 3);
         assert_eq!(c.inline_candidates, 2);
+        // behavior は空の並びだけ「無効」の意味で許す
+        assert_eq!(
+            Config::parse("[behavior]\nascii_keys = []\n")
+                .unwrap()
+                .ascii_keys,
+            Vec::<Key>::new()
+        );
+        assert_eq!(
+            Config::parse("[behavior]\nascii_keys = [\"esc\", \"C-c\"]\n")
+                .unwrap()
+                .ascii_keys,
+            vec![Key::Esc, Key::Ctrl(0x03)]
+        );
         // 書いていない項目は既定のまま
         assert_eq!(c.ascii, vec![Key::Char('l')]);
     }
@@ -332,6 +368,8 @@ mod tests {
         assert!(Config::parse("[keys]\nselect = [\"ab\"]\n").is_err());
         assert!(Config::parse("[candidates]\ninline = 0\n").is_err());
         assert!(Config::parse("[keys]\ncancel = []\n").is_err());
+        assert!(Config::parse("[behavior]\nascii_keys = 3\n").is_err());
+        assert!(Config::parse("[behavior]\nfoo = []\n").is_err());
     }
 
     #[test]
