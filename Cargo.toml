@@ -1,0 +1,14 @@
+[package]
+name = "ttyskk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+encoding_rs = "0.8.35"
+libc = "0.2.189"
+nix = { version = "0.31.3", features = ["term", "signal"] }
+portable-pty = "0.9.0"
+signal-hook = "0.4.4"
+unicode-width = "0.2.2"
+vte = "0.15.0"
