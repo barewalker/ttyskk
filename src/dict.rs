@@ -162,6 +162,37 @@ impl Dict {
         out
     }
 
+    /// 前方一致する見出し語を集める (TAB 補完)。
+    ///
+    /// 利用者辞書のものを先に置く。そこにあるのは実際に使った語なので、
+    /// 共有辞書の 17 万語から拾ったものより当たりやすい。同じ長さなら辞書順。
+    /// 送りありの見出し語 (`うごk`) は補完しても打ち直せないので外す。
+    pub fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        if prefix.is_empty() {
+            return Vec::new();
+        }
+        let pick = |map: &HashMap<String, Vec<Candidate>>| {
+            let mut v: Vec<String> = map
+                .keys()
+                .filter(|k| k.len() > prefix.len() && k.starts_with(prefix) && !is_okuri_ari(k))
+                .cloned()
+                .collect();
+            v.sort_by(|a, b| a.chars().count().cmp(&b.chars().count()).then(a.cmp(b)));
+            v
+        };
+        let mut out = pick(&self.user);
+        out.truncate(limit);
+        for k in pick(&self.system) {
+            if out.len() >= limit {
+                break;
+            }
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+        out
+    }
+
     /// 確定した候補を利用者辞書の先頭に移す (学習)。
     pub fn learn(&mut self, key: &str, cand: &Candidate) {
         move_to_front(self.user.entry(key.to_string()).or_default(), cand);
@@ -275,6 +306,35 @@ mod tests {
         // 全角空白は正当な候補
         let (_, c) = parse_line("すぺーす /　/").unwrap();
         assert_eq!(c[0].text, "　");
+    }
+
+    #[test]
+    fn completes_by_prefix() {
+        let mut sys = HashMap::new();
+        load_into(
+            &mut sys,
+            "かんじ /漢字/\nかんじゃ /患者/\nかんきょう /環境/\nかい /回/\nかんがr /考/\nかん /缶/\n",
+        );
+        let mut user = HashMap::new();
+        load_into(&mut user, "かんきょう /環境/\nかんぱい /乾杯/\n");
+        let d = Dict {
+            system: sys,
+            user,
+            user_path: PathBuf::from("/dev/null"),
+            import_path: None,
+            learned: Vec::new(),
+        };
+        // 利用者辞書のものが先、そのあと共有辞書。同じ長さなら辞書順。
+        assert_eq!(
+            d.complete("かん", 10),
+            ["かんぱい", "かんきょう", "かんじ", "かんじゃ"]
+        );
+        // 送りありの見出し語 (かんがr) は出さない。完全一致 (かん) も出さない。
+        assert!(!d.complete("かん", 10).iter().any(|k| k.ends_with('r')));
+        assert!(!d.complete("かん", 10).contains(&"かん".to_string()));
+        assert_eq!(d.complete("かん", 2).len(), 2, "上限が効く");
+        assert!(d.complete("", 10).is_empty());
+        assert!(d.complete("ぬ", 10).is_empty());
     }
 
     #[test]

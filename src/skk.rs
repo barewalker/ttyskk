@@ -7,6 +7,9 @@ use crate::config::Config;
 use crate::dict::{Candidate, Dict};
 use crate::romaji::{self, Romaji};
 
+/// TAB 補完で拾う見出し語の上限。多すぎると巡るのに手間がかかる。
+const COMPLETIONS: usize = 64;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Ascii,
@@ -107,6 +110,14 @@ impl Registration {
     }
 }
 
+/// TAB 補完の途中。見出し語を書き換えてしまうので、元に戻せるようにしておく。
+struct Completion {
+    /// 補完を始めたときの見出し語
+    original: String,
+    words: Vec<String>,
+    index: usize,
+}
+
 pub struct Skk {
     pub mode: Mode,
     phase: Phase,
@@ -126,6 +137,8 @@ pub struct Skk {
     cfg: Config,
     /// 辞書登録の積み上げ。空でなければ登録中。
     regs: Vec<Registration>,
+    /// TAB 補完の途中。見出し語が変わったら捨てる。
+    completion: Option<Completion>,
 }
 
 impl Skk {
@@ -144,6 +157,7 @@ impl Skk {
             dict_key: String::new(),
             dict,
             regs: Vec::new(),
+            completion: None,
         }
     }
 
@@ -282,6 +296,7 @@ impl Skk {
     }
 
     fn reset(&mut self) {
+        self.completion = None;
         self.phase = Phase::Direct;
         self.romaji.clear();
         self.reading.clear();
@@ -519,8 +534,26 @@ impl Skk {
     // ---- ▽ 見出し語入力 ----
 
     fn handle_composing(&mut self, key: Key) -> Response {
+        // 見出し語が変われば補完の並びは意味を失う。補完そのものと取り消し
+        // (元へ戻す) 以外のキーでは捨てる。
+        let keep = self.cfg.complete.contains(&key)
+            || self.cfg.complete_previous.contains(&key)
+            || self.cfg.cancel.contains(&key);
+        let r = self.composing_inner(key);
+        if !keep {
+            self.completion = None;
+        }
+        r
+    }
+
+    fn composing_inner(&mut self, key: Key) -> Response {
         match key {
             k if self.cfg.cancel.contains(&k) => {
+                // 補完の途中なら、まず補完を取り消して元の見出し語に戻す
+                if let Some(c) = self.completion.take() {
+                    self.reading = c.original;
+                    return Response::default();
+                }
                 // 取り消して何も出さない
                 self.reset();
                 Response::default()
@@ -548,7 +581,16 @@ impl Skk {
                 }
                 Response::default()
             }
+            k if self.cfg.complete.contains(&k) => {
+                self.step_completion(1);
+                Response::default()
+            }
+            k if self.cfg.complete_previous.contains(&k) => {
+                self.step_completion(-1);
+                Response::default()
+            }
             k if self.cfg.convert.contains(&k) => {
+                self.completion = None;
                 self.start_conversion();
                 Response::default()
             }
@@ -625,6 +667,36 @@ impl Skk {
             self.shape(&self.reading)
         };
         format!("{}{}", body, self.okuri_kana)
+    }
+
+    /// 見出し語を前方一致で補完する。`dir` は 1 で次、-1 で前。
+    ///
+    /// 補完の元は利用者辞書が先、共有辞書が後ろ。実際に使った語のほうが当たり
+    /// やすいため。一度作った並びは見出し語が変わるまで使い回す。
+    fn step_completion(&mut self, dir: i32) {
+        if self.abbrev {
+            return;
+        }
+        if self.completion.is_none() {
+            // 途中のローマ字を確定してから探す
+            let flushed = self.romaji.flush();
+            self.reading.push_str(&flushed);
+            let words = self.dict.complete(&self.reading, COMPLETIONS);
+            if words.is_empty() {
+                return;
+            }
+            self.completion = Some(Completion {
+                original: std::mem::take(&mut self.reading),
+                words,
+                index: 0,
+            });
+        } else if let Some(c) = self.completion.as_mut() {
+            let n = c.words.len() as i32;
+            c.index = ((c.index as i32 + dir).rem_euclid(n)) as usize;
+        }
+        if let Some(c) = self.completion.as_ref() {
+            self.reading = c.words[c.index].clone();
+        }
     }
 
     fn start_conversion(&mut self) {
@@ -1017,6 +1089,80 @@ mod tests {
         let r = skk.handle(Key::Esc);
         assert_eq!(r.to_child, vec![0x1b]);
         assert_eq!(skk.mode, Mode::Hiragana);
+    }
+
+    #[test]
+    fn tab_completes_the_reading() {
+        let mut skk = skk_with(&[
+            ("かんじ", "/漢字/"),
+            ("かんじゃ", "/患者/"),
+            ("かんきょう", "/環境/"),
+            ("かい", "/回/"),
+        ]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kan");
+        // 「n」はまだローマ字のまま。補完はこれを「ん」に確定してから探す。
+        assert_eq!(preedit_text(&skk), "▽かn");
+
+        // 短い順、同じ長さなら辞書順
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじゃ");
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんきょう");
+        // 一周する
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        // Shift+Tab で戻る
+        skk.handle(Key::Raw(b"\x1b[Z".to_vec()));
+        assert_eq!(preedit_text(&skk), "▽かんきょう");
+
+        // 補完したものはそのまま変換できる
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼環境");
+    }
+
+    #[test]
+    fn cancel_undoes_the_completion() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kan");
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        // 一度目の C-g は補完を取り消すだけ。▽ は残る。
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かん");
+        // 二度目で ▽ ごと取り消す
+        typed(&mut skk, "\x07");
+        assert!(preedit_text(&skk).is_empty());
+    }
+
+    #[test]
+    fn typing_after_a_completion_starts_over() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/"), ("かんじゃ", "/患者/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kan");
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        // 打ち足すと並びは作り直される
+        typed(&mut skk, "ya");
+        assert_eq!(preedit_text(&skk), "▽かんじや");
+        skk.handle(Key::Tab);
+        assert_eq!(
+            preedit_text(&skk),
+            "▽かんじや",
+            "前方一致しないので変わらない"
+        );
+    }
+
+    #[test]
+    fn tab_outside_conversion_reaches_the_child() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        // ASCII でもかなでも、直接入力中の TAB は子へ渡す (シェルの補完を殺さない)
+        assert_eq!(skk.handle(Key::Tab).to_child, vec![0x09]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(skk.handle(Key::Tab).to_child, vec![0x09]);
     }
 
     #[test]
