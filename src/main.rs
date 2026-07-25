@@ -193,6 +193,7 @@ fn cursor_indicator(mode: Mode) -> &'static str {
         Mode::Ascii => "\x1b[4 q\x1b]112\x07",           // 固定の下線
         Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07", // 固定のブロック
         Mode::Katakana => "\x1b[6 q\x1b]12;#5fd7ff\x07", // 固定のバー
+        Mode::HankakuKatakana => "\x1b[5 q\x1b]12;#5fafaf\x07", // 点滅するバー
         Mode::ZenkakuAscii => "\x1b[1 q\x1b]12;#d787ff\x07", // 点滅するブロック
     }
 }

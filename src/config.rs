@@ -29,6 +29,8 @@ pub struct Config {
     pub zenkaku: Vec<Key>,
     /// ひらがな ⇄ カタカナ。▽ の途中では見出し語をカタカナにして確定する
     pub katakana: Vec<Key>,
+    /// ひらがな ⇄ 半角カタカナ。▽ の途中では見出し語を半角カタカナにして確定する
+    pub hankaku_katakana: Vec<Key>,
     /// 空の見出し語で変換を始める (複合語向け)
     pub start_conversion: Vec<Key>,
     /// ASCII の見出し語で変換する
@@ -71,6 +73,7 @@ impl Default for Config {
             ascii: vec![Key::Char('l')],
             zenkaku: vec![Key::Char('L')],
             katakana: vec![Key::Char('q')],
+            hankaku_katakana: vec![Key::Ctrl(0x11)],
             start_conversion: vec![Key::Char('Q')],
             abbrev: vec![Key::Char('/')],
             convert: vec![Key::Char(' ')],
@@ -118,6 +121,7 @@ impl Config {
                     "ascii" => &mut cfg.ascii,
                     "zenkaku" => &mut cfg.zenkaku,
                     "katakana" => &mut cfg.katakana,
+                    "hankaku_katakana" => &mut cfg.hankaku_katakana,
                     "start_conversion" => &mut cfg.start_conversion,
                     "abbrev" => &mut cfg.abbrev,
                     "convert" => &mut cfg.convert,

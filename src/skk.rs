@@ -16,12 +16,16 @@ pub enum Mode {
     Ascii,
     Hiragana,
     Katakana,
+    HankakuKatakana,
     ZenkakuAscii,
 }
 
 impl Mode {
     fn is_kana(&self) -> bool {
-        matches!(self, Mode::Hiragana | Mode::Katakana)
+        matches!(
+            self,
+            Mode::Hiragana | Mode::Katakana | Mode::HankakuKatakana
+        )
     }
 }
 
@@ -298,11 +302,10 @@ impl Skk {
     }
 
     fn display_reading(&self) -> String {
-        if self.abbrev || self.mode != Mode::Katakana {
-            self.reading.clone()
-        } else {
-            romaji::to_katakana(&self.reading)
+        if self.abbrev {
+            return self.reading.clone();
         }
+        self.shape(&self.reading)
     }
 
     fn current_candidate(&self) -> Option<&Choice> {
@@ -396,6 +399,7 @@ impl Skk {
     fn shape(&self, kana: &str) -> String {
         match self.mode {
             Mode::Katakana => romaji::to_katakana(kana),
+            Mode::HankakuKatakana => romaji::to_hankaku_katakana(kana),
             _ => kana.to_string(),
         }
     }
@@ -580,6 +584,17 @@ impl Skk {
                     ..Default::default()
                 }
             }
+            k if self.romaji.is_empty() && self.cfg.hankaku_katakana.contains(&k) => {
+                self.mode = if self.mode == Mode::HankakuKatakana {
+                    Mode::Hiragana
+                } else {
+                    Mode::HankakuKatakana
+                };
+                Response {
+                    mode_changed: true,
+                    ..Default::default()
+                }
+            }
             k if self.romaji.is_empty() && self.cfg.katakana.contains(&k) => {
                 self.mode = if self.mode == Mode::Hiragana {
                     Mode::Katakana
@@ -698,6 +713,18 @@ impl Skk {
                 self.completion = None;
                 self.start_conversion();
                 Response::default()
+            }
+            k if !self.abbrev && self.cfg.hankaku_katakana.contains(&k) => {
+                // 見出し語を半角カタカナにして確定する
+                let flushed = self.romaji.flush();
+                self.reading.push_str(&flushed);
+                let text = format!(
+                    "{}{}",
+                    romaji::to_hankaku_katakana(&self.reading),
+                    romaji::to_hankaku_katakana(&self.okuri_kana)
+                );
+                self.reset();
+                Response::text(&text)
             }
             k if self.okuri_head.is_none() && !self.abbrev && self.cfg.katakana.contains(&k) => {
                 // 見出し語をカタカナ (カタカナモードならひらがな) にして確定
@@ -1494,6 +1521,42 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         // 変換していないときの > はただの文字
         assert_eq!(typed(&mut skk, ">"), ">");
+    }
+
+    #[test]
+    fn hankaku_katakana_mode() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        // C-q で半角カタカナモードへ
+        assert!(skk.handle(Key::Ctrl(0x11)).mode_changed);
+        assert_eq!(skk.mode, Mode::HankakuKatakana);
+        assert_eq!(typed(&mut skk, "nihongo"), "ﾆﾎﾝｺﾞ");
+        // もう一度でひらがなへ戻る
+        skk.handle(Key::Ctrl(0x11));
+        assert_eq!(skk.mode, Mode::Hiragana);
+        assert_eq!(typed(&mut skk, "aiu"), "あいう");
+    }
+
+    #[test]
+    fn hankaku_katakana_from_the_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihongo");
+        assert_eq!(preedit_text(&skk), "▽にほんご");
+        // ▽ の途中の C-q は見出し語を半角カタカナにして確定する
+        let r = skk.handle(Key::Ctrl(0x11));
+        assert_eq!(String::from_utf8(r.to_child).unwrap(), "ﾆﾎﾝｺﾞ");
+        assert!(preedit_text(&skk).is_empty());
+    }
+
+    #[test]
+    fn hankaku_katakana_shows_in_the_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        skk.handle(Key::Ctrl(0x11));
+        typed(&mut skk, "Nihongo");
+        // 見出し語もモードに合わせて出る
+        assert_eq!(preedit_text(&skk), "▽ﾆﾎﾝｺﾞ");
     }
 
     #[test]
