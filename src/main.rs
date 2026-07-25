@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-use config::Config;
+use config::{Config, Marker};
 use dict::Dict;
 use input::Decoder;
 use render::Overlay;
@@ -188,7 +188,12 @@ fn read_cursor_report(timeout: Duration) -> (Option<(usize, usize)>, Vec<u8>) {
 /// 挟むと OSC 12 が途中で吸われて色が変わらないことがある (herdr が実際にそう)。
 /// DECSCUSR は 3 つの形と点滅の有無しか持たないので、よく使う 3 つのモードに
 /// 形を割り当て、めったに使わない全角英数だけ点滅で区別する。
-fn cursor_indicator(mode: Mode) -> &'static str {
+fn cursor_indicator(mode: Mode, marker: Marker) -> &'static str {
+    // セルに色を敷く方式のときは、ブロックのカーソルがその色を覆ってしまう。
+    // 形は下線に固定し、モードは色だけで表す (形 = 動いている合図)。
+    if marker == Marker::Cell {
+        return "\x1b[4 q\x1b]112\x07";
+    }
     match mode {
         Mode::Ascii => "\x1b[4 q\x1b]112\x07",           // 固定の下線
         Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07", // 固定のブロック
@@ -401,7 +406,7 @@ fn main() -> Result<()> {
     // 起動した時点でカーソルを ttyskk のものにする。何も打っていなくても、
     // 動いていること・いまどのモードかが見て分かるようにするため。
     if show_cursor_color {
-        let _ = stdout.write_all(cursor_indicator(skk.mode).as_bytes());
+        let _ = stdout.write_all(cursor_indicator(skk.mode, skk.marker()).as_bytes());
         let _ = stdout.flush();
         touched = true;
     }
@@ -420,7 +425,7 @@ fn main() -> Result<()> {
                 // 列の途中では割り込めないので、書けるようになるまで持ち越す。
                 cursor_dirty |= screen.take_cursor_style_touched();
                 if cursor_dirty && !mid_sequence && show_cursor_color {
-                    out.extend_from_slice(cursor_indicator(skk.mode).as_bytes());
+                    out.extend_from_slice(cursor_indicator(skk.mode, skk.marker()).as_bytes());
                     cursor_dirty = false;
                 }
                 // 子が描き直したので、待っていた位置報告はもう古い
@@ -458,7 +463,7 @@ fn main() -> Result<()> {
                     writer.flush()?;
                 }
                 if mode_changed && show_cursor_color {
-                    out.extend_from_slice(cursor_indicator(skk.mode).as_bytes());
+                    out.extend_from_slice(cursor_indicator(skk.mode, skk.marker()).as_bytes());
                     touched = true;
                 }
                 let preedit = skk.preedit();

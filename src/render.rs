@@ -69,6 +69,7 @@ impl Overlay {
     pub fn draw(&mut self, screen: &Screen, p: &Preedit) -> Vec<u8> {
         self.painted.clear();
         let mut out = String::new();
+        self.draw_tint(screen, p.cursor_tint, &mut out);
         self.draw_at_cursor(screen, &p.at_cursor, &mut out);
         self.draw_floating(screen, &p.floating, &mut out);
         if out.is_empty() {
@@ -78,6 +79,31 @@ impl Overlay {
         let mut bytes = String::from("\x1b[?25l");
         bytes.push_str(&out);
         bytes.into_bytes()
+    }
+
+    /// カーソル位置のセルに色を敷く。
+    ///
+    /// 文字は控えのものをそのまま使う。書き換えるのは見た目だけなので、
+    /// 下にある文字が消えたり位置がずれたりしない。カーソルが行末の空きセルに
+    /// あるときは色の付いた箱に見え、カーソルそのものが色付いたように読める。
+    fn draw_tint(&mut self, screen: &Screen, style: Option<Style>, out: &mut String) {
+        let Some(style) = style else {
+            return;
+        };
+        let cell = screen.cell(screen.row, screen.col);
+        if cell.width == 0 {
+            // 全角の後続セルの上には敷かない (前半を断ち切ってしまう)
+            return;
+        }
+        let w = (cell.width as usize).max(1);
+        flush_line(
+            out,
+            screen.row,
+            screen.col,
+            &format!("{}{}", style_sgr(style), cell.ch),
+            w,
+        );
+        self.painted.push((screen.row, screen.col, w));
     }
 
     /// カーソル位置から区間列を描く。画面右端では次の行へ折り返す。
@@ -208,7 +234,7 @@ mod tests {
     fn at(segs: &[Segment]) -> Preedit {
         Preedit {
             at_cursor: segs.to_vec(),
-            floating: Vec::new(),
+            ..Preedit::default()
         }
     }
 
@@ -267,6 +293,7 @@ mod tests {
         let p = Preedit {
             at_cursor: vec![seg(Style::Candidate, "▼漢字")],
             floating: vec![seg(Style::ListItem, "a:感じ")],
+            ..Preedit::default()
         };
         let bytes = String::from_utf8(o.draw(&s, &p)).unwrap();
         assert!(bytes.contains("\x1b[1;3H"), "▼ はカーソル位置");
@@ -282,6 +309,7 @@ mod tests {
         let p = Preedit {
             at_cursor: vec![seg(Style::Candidate, "▼漢字")],
             floating: vec![seg(Style::ListItem, "a:感じ")],
+            ..Preedit::default()
         };
         let bytes = String::from_utf8(o.draw(&s, &p)).unwrap();
         assert!(bytes.contains("\x1b[4;1H"), "一覧は一つ上の行");
@@ -298,6 +326,7 @@ mod tests {
                 seg(Style::ListItem, " "),
                 seg(Style::ListItem, "s:うえおかき"),
             ],
+            ..Preedit::default()
         };
         let bytes = String::from_utf8(o.draw(&s, &p)).unwrap();
         // 幅 12 に収まらない項目は落とす (途中で切ると読めない)

@@ -3,7 +3,7 @@
 //! 未確定の文字は一切子プロセスへ送らない。確定した文字列だけを `to_child` に載せ、
 //! 途中経過は `preedit()` が返す区間列として重ね描きに回す。
 
-use crate::config::{Config, Layout};
+use crate::config::{Config, Layout, Marker};
 use crate::dict::{Candidate, Dict};
 use crate::num;
 use crate::romaji::{self, Romaji};
@@ -87,11 +87,13 @@ pub struct Preedit {
     pub at_cursor: Vec<Segment>,
     /// 別の行に一行で浮かせる (空なら無し)
     pub floating: Vec<Segment>,
+    /// カーソル位置のセルに敷く色。文字は控えのものをそのまま使う。
+    pub cursor_tint: Option<Style>,
 }
 
 impl Preedit {
     pub fn is_empty(&self) -> bool {
-        self.at_cursor.is_empty() && self.floating.is_empty()
+        self.at_cursor.is_empty() && self.floating.is_empty() && self.cursor_tint.is_none()
     }
 }
 
@@ -208,6 +210,11 @@ impl Skk {
             completion: None,
             last_commit: None,
         }
+    }
+
+    /// モードの印の出し方 (カーソルの見た目を決めるのに使う)。
+    pub fn marker(&self) -> Marker {
+        self.cfg.mode_marker
     }
 
     pub fn dict_mut(&mut self) -> &mut Dict {
@@ -336,26 +343,45 @@ impl Skk {
                 }
             }
         }
-        // モードの印は末尾に置く。カーソルは重ね描きの先頭に戻るので、
-        // 印は打ち込み中の文字より後ろに出て邪魔になりにくい。
-        if self.cfg.mode_marker
-            && let Some((style, text)) = match self.mode {
-                Mode::Ascii => None,
-                Mode::Hiragana => Some((Style::ModeHiragana, "あ")),
-                Mode::Katakana => Some((Style::ModeKatakana, "ア")),
-                Mode::HankakuKatakana => Some((Style::ModeHankaku, "半")),
-                Mode::ZenkakuAscii => Some((Style::ModeZenkaku, "Ａ")),
+        let mode_style = match self.mode {
+            Mode::Ascii => None,
+            Mode::Hiragana => Some(Style::ModeHiragana),
+            Mode::Katakana => Some(Style::ModeKatakana),
+            Mode::HankakuKatakana => Some(Style::ModeHankaku),
+            Mode::ZenkakuAscii => Some(Style::ModeZenkaku),
+        };
+        let mut cursor_tint = None;
+        match self.cfg.mode_marker {
+            Marker::Off => {}
+            // カーソル位置のセルに色を敷く。文字を足さないので邪魔にならない。
+            // 打ち込み中の文字がある間はその先頭が同じ場所に来るので出さない。
+            Marker::Cell => {
+                if segs.is_empty() {
+                    cursor_tint = mode_style;
+                }
             }
-        {
-            segs.push(Segment {
-                style,
-                text: text.to_string(),
-            });
+            // 印を末尾に置く。カーソルは重ね描きの先頭に戻るので、
+            // 印は打ち込み中の文字より後ろに出る。
+            Marker::Letter => {
+                if let Some(style) = mode_style {
+                    let text = match self.mode {
+                        Mode::Hiragana => "あ",
+                        Mode::Katakana => "ア",
+                        Mode::HankakuKatakana => "半",
+                        _ => "Ａ",
+                    };
+                    segs.push(Segment {
+                        style,
+                        text: text.to_string(),
+                    });
+                }
+            }
         }
 
         Preedit {
             at_cursor: segs,
             floating,
+            cursor_tint,
         }
     }
 
@@ -1663,7 +1689,7 @@ mod tests {
                 .iter()
                 .map(|s| s.text.as_str())
                 .collect::<String>(),
-            "▼挨あ"
+            "▼挨"
         );
         assert!(p.floating.iter().any(|s| s.text.contains("挨")));
         assert!(!p.floating.is_empty());
@@ -1689,11 +1715,34 @@ mod tests {
     }
 
     #[test]
-    fn mode_marker_appears_except_in_ascii() {
+    fn cell_marker_tints_the_cursor_without_adding_anything() {
         let mut skk = skk_with(&[]);
-        // ASCII では何も描かない (完全透過を保つ)
-        assert_eq!(mode_marker(&skk), "");
+        // 既定はセルに色を敷く方式。文字は足さない。
+        assert_eq!(skk.marker(), Marker::Cell);
+        assert!(skk.preedit().cursor_tint.is_none(), "ASCII では何もしない");
         assert!(skk.preedit().is_empty());
+
+        skk.handle(Key::Ctrl(0x0a));
+        let p = skk.preedit();
+        assert_eq!(p.cursor_tint, Some(Style::ModeHiragana));
+        assert!(p.at_cursor.is_empty(), "文字は足さない");
+        assert!(!p.is_empty(), "色を敷くので描くものはある");
+
+        skk.handle(Key::Char('q'));
+        assert_eq!(skk.preedit().cursor_tint, Some(Style::ModeKatakana));
+
+        // 打ち込み中はその先頭が同じ場所に来るので敷かない
+        skk.handle(Key::Char('q'));
+        typed(&mut skk, "Kanji");
+        assert!(skk.preedit().cursor_tint.is_none());
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    #[test]
+    fn letter_marker_appends_a_letter() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[behavior]\nmode_marker = \"letter\"\n").unwrap());
+        assert_eq!(mode_marker(&skk), "", "ASCII では何も描かない");
 
         skk.handle(Key::Ctrl(0x0a));
         assert_eq!(mode_marker(&skk), "あ");
@@ -1715,14 +1764,16 @@ mod tests {
             .map(|s| s.text)
             .collect();
         assert_eq!(texts.last().map(|s| s.as_str()), Some("あ"));
+        assert!(skk.preedit().cursor_tint.is_none());
     }
 
     #[test]
     fn mode_marker_can_be_turned_off() {
         let mut skk = skk_with(&[]);
-        skk.set_config(Config::parse("[behavior]\nmode_marker = false\n").unwrap());
+        skk.set_config(Config::parse("[behavior]\nmode_marker = \"off\"\n").unwrap());
         skk.handle(Key::Ctrl(0x0a));
         assert_eq!(mode_marker(&skk), "");
+        assert!(skk.preedit().cursor_tint.is_none());
         assert!(
             skk.preedit().is_empty(),
             "何も打っていなければ描くものが無い"

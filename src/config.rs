@@ -15,6 +15,20 @@ use crate::skk::Key;
 /// 設定ファイルを見張る間隔。
 const POLL: Duration = Duration::from_secs(1);
 
+/// モードの印の出し方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    /// 何も描かない。カーソルの形だけでモードを表す。
+    Off,
+    /// カーソル位置のセルにモードの色を敷く。文字を足さない。
+    ///
+    /// カーソルの形がブロックだと色を覆ってしまうので、この方式のときは
+    /// 形を下線に固定する。形 = 動いている合図、色 = モード、という配分。
+    Cell,
+    /// カーソルの直後に あ / ア / 半 / Ａ を出す。
+    Letter,
+}
+
 /// 候補一覧の出し方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -62,12 +76,12 @@ pub struct Config {
     pub inline_candidates: usize,
     /// 候補一覧の出し方
     pub layout: Layout,
-    /// カーソルのそばにモードの印を出すか。
+    /// モードの印の出し方。
     ///
     /// 端末多重化器を挟むとカーソルの色 (OSC 12) が途中で吸われる (herdr が実際に
     /// そう)。文字として書いた色はそのまま届くので、色でモードを見分けたい場合は
     /// これを使う。ASCII モードでは何も描かないので、そのときの完全透過は保つ。
-    pub mode_marker: bool,
+    pub mode_marker: Marker,
     /// 接頭辞・接尾辞に続けて確定した語を、繋げて辞書に覚えるか。
     ///
     /// 「さい>」→再 のあと「りよう」→利用 と確定したら `さいりよう /再利用/` を
@@ -102,7 +116,7 @@ impl Default for Config {
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
             layout: Layout::Inline,
-            mode_marker: true,
+            mode_marker: Marker::Cell,
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
         }
@@ -173,9 +187,12 @@ impl Config {
                         }
                     }
                     "mode_marker" => {
-                        cfg.mode_marker = value
-                            .as_bool()
-                            .ok_or_else(|| anyhow::anyhow!("behavior.mode_marker は真偽値"))?
+                        cfg.mode_marker = match value.as_str() {
+                            Some("off") => Marker::Off,
+                            Some("cell") => Marker::Cell,
+                            Some("letter") => Marker::Letter,
+                            _ => bail!("behavior.mode_marker は \"off\" か \"cell\" か \"letter\""),
+                        }
                     }
                     "learn_combined" => {
                         cfg.learn_combined = value
