@@ -150,6 +150,51 @@ impl Config {
         self.select.len().max(1)
     }
 
+    /// 割り当ての入っているキーを節ごとに並べて返す。
+    ///
+    /// **キーの項目を足したらここにも足す。** 拡張鍵盤プロトコルの復号
+    /// (`input::Decoder`) がこの並びを唯一の頼りにしているので、書き漏らすと
+    /// そのキーだけ Claude Code のようなアプリの下で効かなくなる。
+    fn key_slots(&self) -> [&Vec<Key>; 16] {
+        [
+            &self.kana,
+            &self.confirm,
+            &self.cancel,
+            &self.ascii,
+            &self.zenkaku,
+            &self.katakana,
+            &self.hankaku_katakana,
+            &self.start_conversion,
+            &self.abbrev,
+            &self.convert,
+            &self.previous,
+            &self.complete,
+            &self.complete_previous,
+            &self.purge,
+            &self.affix,
+            &self.ascii_keys,
+        ]
+    }
+
+    /// いま SKK に割り当てられている Ctrl 付きキーの制御文字。
+    ///
+    /// 拡張鍵盤プロトコルの下では Ctrl 付きのキーが `CSI 106;5u` のような形で
+    /// 届く。素の制御文字に戻すのはここに挙がったキーだけにして、割り当ての
+    /// 無いキーは元のバイト列のまま子へ渡す (`input::Decoder`)。
+    pub fn ctrl_keys(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for slot in self.key_slots() {
+            for k in slot {
+                if let Key::Ctrl(b) = k
+                    && !out.contains(b)
+                {
+                    out.push(*b);
+                }
+            }
+        }
+        out
+    }
+
     /// 設定ファイルを読む。無ければ既定を返す。
     pub fn load(path: &Path) -> Result<Config> {
         match std::fs::read_to_string(path) {
@@ -440,6 +485,52 @@ mod tests {
         assert_eq!(c.cancel, vec![Key::Ctrl(0x07)]);
         assert_eq!(c.convert, vec![Key::Char(' ')]);
         assert_eq!(c.page_size(), 7);
+    }
+
+    #[test]
+    fn ctrl_keys_lists_the_bound_control_characters() {
+        let c = Config::default().ctrl_keys();
+        assert!(c.contains(&0x0a), "C-j"); // kana / confirm
+        assert!(c.contains(&0x07), "C-g"); // cancel
+        assert!(c.contains(&0x11), "C-q"); // hankaku_katakana
+        assert!(c.contains(&0x03), "C-c"); // ascii_keys
+        // 割り当ての無いキーは挙げない (子アプリの操作を奪わない)
+        assert!(!c.contains(&0x1a), "C-z");
+    }
+
+    /// キーの項目を足して `key_slots` に足し忘れると、そのキーだけ拡張鍵盤
+    /// プロトコルを使うアプリの下で効かなくなる。全項目を Ctrl に割り当てて見張る。
+    #[test]
+    fn ctrl_keys_covers_every_binding() {
+        let names = [
+            "kana",
+            "confirm",
+            "cancel",
+            "ascii",
+            "zenkaku",
+            "katakana",
+            "hankaku_katakana",
+            "start_conversion",
+            "abbrev",
+            "convert",
+            "previous",
+            "complete",
+            "complete_previous",
+            "purge",
+            "affix",
+        ];
+        let letters = "abcdefghijklmno";
+        assert_eq!(names.len(), letters.len());
+        let mut text = String::from("[keys]\n");
+        for (name, c) in names.iter().zip(letters.chars()) {
+            text.push_str(&format!("{name} = \"C-{c}\"\n"));
+        }
+        text.push_str("\n[behavior]\nascii_keys = [\"C-p\"]\n");
+
+        let got = Config::parse(&text).unwrap().ctrl_keys();
+        for c in letters.chars().chain(std::iter::once('p')) {
+            assert!(got.contains(&(c as u8 & 0x1f)), "C-{c} が漏れている");
+        }
     }
 
     #[test]

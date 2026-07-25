@@ -441,7 +441,7 @@ fn main() -> Result<()> {
 
     let mut parser = vte::Parser::new();
     let mut overlay = Overlay::new();
-    let mut decoder = Decoder::new();
+    let mut decoder = Decoder::new(skk.config());
     let mut tracker = input::SeqTracker::new();
     let mut mid_sequence = false;
     // 尋ねたカーソル位置の報告を待っているか
@@ -583,7 +583,11 @@ fn main() -> Result<()> {
                 request_cursor_report(&mut stdout);
                 awaiting_report = true;
             }
-            Event::Reconfigured(cfg) => skk.set_config(*cfg),
+            Event::Reconfigured(cfg) => {
+                // 復号の対象は設定から作るので、切り出す側にも同じ設定を渡す
+                decoder.set_config(&cfg);
+                skk.set_config(*cfg);
+            }
             Event::ChildEof => break,
         }
     }

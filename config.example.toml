@@ -16,6 +16,7 @@ cancel = "C-g"           # 取り消す
 ascii = "l"              # ASCII モードへ
 zenkaku = "L"            # 全角英数モードへ
 katakana = "q"           # ひらがな ⇄ カタカナ / ▽ をカタカナにして確定
+hankaku_katakana = "C-q" # ひらがな ⇄ 半角カタカナ / ▽ を半角カタカナにして確定
 start_conversion = "Q"   # 空の見出し語で変換を始める (複合語向け)
 abbrev = "/"             # ASCII の見出し語で変換する
 convert = "space"        # 変換する / 次の候補へ

@@ -240,6 +240,11 @@ impl Skk {
         self.cfg = cfg;
     }
 
+    /// いまの設定。キーの割り当てを見たい側 (入力の切り出し) に渡す。
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
     /// 入力途中の表示。空なら重ね描きするものは無い。
     pub fn preedit(&self) -> Preedit {
         let mut segs = Vec::new();
