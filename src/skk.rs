@@ -5,6 +5,7 @@
 
 use crate::config::Config;
 use crate::dict::{Candidate, Dict};
+use crate::num;
 use crate::romaji::{self, Romaji};
 
 /// TAB 補完で拾う見出し語の上限。多すぎると巡るのに手間がかかる。
@@ -110,6 +111,18 @@ impl Registration {
     }
 }
 
+/// 選べる候補ひとつ。学習と削除の宛先を候補ごとに覚えておく。
+///
+/// 数値変換では「だい5かい」を `だい#かい` として引くので、辞書に書き戻す先が
+/// 打った見出し語と食い違う。候補の本文も `第#1回` のままで持ち、画面に出すとき
+/// と子へ送るときだけ数字を戻す。こうしないと `だい#かい /第５回/` のように、
+/// その数字専用の項目を辞書へ書いてしまう。
+struct Choice {
+    /// 学習・削除の宛先
+    key: String,
+    cand: Candidate,
+}
+
 /// TAB 補完の途中。見出し語を書き換えてしまうので、元に戻せるようにしておく。
 struct Completion {
     /// 補完を始めたときの見出し語
@@ -129,8 +142,10 @@ pub struct Skk {
     okuri_kana: String,
     /// `/` で始めた ASCII 見出し語の入力中か。
     abbrev: bool,
-    candidates: Vec<Candidate>,
+    candidates: Vec<Choice>,
     cand_index: usize,
+    /// 見出し語から取り出した数字 (数値変換で `#` に戻す)
+    numbers: Vec<String>,
     /// 変換に使った見出し語 (学習の登録先)。
     dict_key: String,
     dict: Dict,
@@ -154,6 +169,7 @@ impl Skk {
             abbrev: false,
             candidates: Vec::new(),
             cand_index: 0,
+            numbers: Vec::new(),
             dict_key: String::new(),
             dict,
             regs: Vec::new(),
@@ -226,7 +242,7 @@ impl Skk {
             Phase::Selecting => {
                 let cur = self
                     .current_candidate()
-                    .map(|c| c.text.clone())
+                    .map(|c| self.shown(c))
                     .unwrap_or_default();
                 segs.push(Segment {
                     style: Style::Candidate,
@@ -234,7 +250,7 @@ impl Skk {
                 });
                 if let Some(annot) = self
                     .current_candidate()
-                    .and_then(|c| c.annotation.clone())
+                    .and_then(|c| c.cand.annotation.clone())
                     .filter(|_| !self.list_visible())
                 {
                     segs.push(Segment {
@@ -256,7 +272,11 @@ impl Skk {
                         };
                         segs.push(Segment {
                             style,
-                            text: format!("{}:{}", self.cfg.select[n], self.candidates[i].text),
+                            text: format!(
+                                "{}:{}",
+                                self.cfg.select[n],
+                                self.shown(&self.candidates[i])
+                            ),
                         });
                         if i + 1 < end {
                             segs.push(Segment {
@@ -279,8 +299,13 @@ impl Skk {
         }
     }
 
-    fn current_candidate(&self) -> Option<&Candidate> {
+    fn current_candidate(&self) -> Option<&Choice> {
         self.candidates.get(self.cand_index)
+    }
+
+    /// 候補の本文を、数字を戻した形にする。
+    fn shown(&self, c: &Choice) -> String {
+        num::expand(&c.cand.text, &self.numbers)
     }
 
     fn list_visible(&self) -> bool {
@@ -305,6 +330,7 @@ impl Skk {
         self.abbrev = false;
         self.candidates.clear();
         self.cand_index = 0;
+        self.numbers.clear();
         self.dict_key.clear();
     }
 
@@ -713,7 +739,29 @@ impl Skk {
             Some(h) => format!("{}{}", self.reading, h),
             None => self.reading.clone(),
         };
-        self.candidates = self.dict.lookup(&self.dict_key);
+        // まず打った通りに引く。学習も削除もこの見出し語が宛先になる。
+        self.candidates = self
+            .dict
+            .lookup(&self.dict_key)
+            .into_iter()
+            .map(|cand| Choice {
+                key: self.dict_key.clone(),
+                cand,
+            })
+            .collect();
+        // 数字を含むなら `#` に置き換えた見出し語でも引く (だい5かい → だい#かい)
+        let (abstracted, numbers) = num::abstract_numbers(&self.dict_key);
+        self.numbers = numbers;
+        if abstracted != self.dict_key {
+            for cand in self.dict.lookup(&abstracted) {
+                if !self.candidates.iter().any(|c| c.cand.text == cand.text) {
+                    self.candidates.push(Choice {
+                        key: abstracted.clone(),
+                        cand,
+                    });
+                }
+            }
+        }
         if self.candidates.is_empty() {
             // 候補が無ければ辞書登録へ移る
             self.begin_registration();
@@ -844,12 +892,12 @@ impl Skk {
     /// 候補が尽きたら ▽ に戻す。共有辞書には触れないので、そちら由来の候補は
     /// 次の変換でまた出る — 消えるのは学習による先頭への繰り上がりだけ。
     fn purge_candidate(&mut self) {
-        let Some(cand) = self.current_candidate().cloned() else {
+        let Some(c) = self.current_candidate() else {
             return;
         };
-        let key = self.dict_key.clone();
-        self.dict.purge(&key, &cand.text);
-        self.candidates.retain(|c| c.text != cand.text);
+        let (key, text) = (c.key.clone(), c.cand.text.clone());
+        self.dict.purge(&key, &text);
+        self.candidates.retain(|c| c.cand.text != text);
         if self.candidates.is_empty() {
             self.phase = Phase::Composing;
             self.cand_index = 0;
@@ -861,9 +909,12 @@ impl Skk {
     fn commit_candidate(&mut self) -> String {
         let text = match self.current_candidate() {
             Some(c) => {
-                let cand = c.clone();
-                self.dict.learn(&self.dict_key.clone(), &cand);
-                format!("{}{}", cand.text, self.okuri_kana)
+                let (key, cand) = (c.key.clone(), c.cand.clone());
+                let shown = num::expand(&cand.text, &self.numbers);
+                // 辞書へ書き戻すのは `#` のままの形。数字を戻した形で覚えると
+                // その数字専用の項目になってしまう。
+                self.dict.learn(&key, &cand);
+                format!("{}{}", shown, self.okuri_kana)
             }
             None => String::new(),
         };
@@ -1218,6 +1269,59 @@ mod tests {
         // 唯一の候補を消すと ▽ に戻る
         typed(&mut skk, "X");
         assert_eq!(preedit_text(&skk), "▽てがき");
+    }
+
+    #[test]
+    fn numeric_conversion() {
+        let mut skk = skk_with(&[("だい#かい", "/第#1回/第#0回/第#3回/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Dai5kai ");
+        assert_eq!(preedit_text(&skk), "▼第５回");
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼第5回");
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼第五回");
+        assert_eq!(typed(&mut skk, "\n"), "第五回");
+
+        // 別の数字でも同じ項目が効く
+        typed(&mut skk, "Dai12kai ");
+        assert_eq!(preedit_text(&skk), "▼第十二回", "学習した #3 が先頭に来る");
+        assert_eq!(typed(&mut skk, "\n"), "第十二回");
+    }
+
+    #[test]
+    fn numeric_learning_keeps_the_hash_form() {
+        let mut skk = skk_with(&[("だい#かい", "/第#1回/第#3回/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        // 二番目 (#3) を選んで確定する
+        typed(&mut skk, "Dai5kai  \n");
+        // 辞書に書き戻されたのは `#` のままの形。数字専用の項目にはならない。
+        let cands = skk.dict_mut().lookup("だい#かい");
+        assert_eq!(cands[0].text, "第#3回");
+        assert!(skk.dict_mut().lookup("だい5かい").is_empty());
+    }
+
+    #[test]
+    fn literal_entry_wins_over_the_hash_form() {
+        let mut skk = skk_with(&[
+            ("だい#かい", "/第#1回/"),
+            ("だい5かい", "/第五回だけの項目/"),
+        ]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Dai5kai ");
+        // 打った通りの見出し語が先
+        assert_eq!(preedit_text(&skk), "▼第五回だけの項目");
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼第５回");
+    }
+
+    #[test]
+    fn a_reading_without_digits_is_untouched() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        assert_eq!(typed(&mut skk, "\n"), "漢字");
     }
 
     #[test]

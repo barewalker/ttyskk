@@ -6,6 +6,7 @@
 mod config;
 mod dict;
 mod input;
+mod num;
 mod render;
 mod romaji;
 mod screen;
