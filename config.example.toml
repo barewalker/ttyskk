@@ -1,41 +1,58 @@
-# ttyskk の設定例。~/.config/ttyskk/config.toml に置く。
+# ttyskk の設定の見本。~/.config/ttyskk/config.toml に置く。
 #
-# 書いた項目だけが既定を上書きする。ファイルが無ければ全部既定のまま。
+# 設定できる項目を全部、既定値のまま書き並べて行頭の # で無効にしてある。
+# 変えたい行だけ # を外す。書いた項目だけが既定を上書きするので、触らない行は
+# 消してしまってもよい。
+#
+# 手元に取り出す:
+#     mkdir -p ~/.config/ttyskk
+#     ttyskk --config-example > ~/.config/ttyskk/config.toml
+#
 # 書き換えると動いている ttyskk にそのまま反映される (起動し直さなくてよい)。
 # 書き方を間違えた設定は捨てられ、それまでの設定が使われ続ける。
 # 手元で確かめるには `ttyskk --check-config`。
+#
+# 説明の行は「#」のあとに空白、無効にしてある設定の行は「#」の直後から始まる。
 
 [keys]
-# キーの書き方: "C-j" "Ctrl-j" "ctrl+j" / "space" "enter" "tab" "esc" "bs" /
+# キーの書き方: "C-j" "Ctrl-j" "ctrl+j" / "space" "enter" "tab" "esc" "bs" "s-tab" /
 #               "q" "/" のような一文字そのもの
 # 一つの動作に複数割り当てるなら並びで書く: cancel = ["C-g", "esc"]
+#
+# Ctrl 付きのキーは、割り当てるとそれだけで Claude Code のような拡張鍵盤プロトコルを
+# 使うアプリの下でも効く (ttyskk が CSI 106;5u のような形を素の制御文字に戻す対象を、
+# この節から作っているため)。
 
-kana = "C-j"             # ASCII・全角英数から かなモードへ
-confirm = "C-j"          # 入力中のローマ字・見出し語・候補を確定する
-cancel = "C-g"           # 取り消す
-ascii = "l"              # ASCII モードへ
-zenkaku = "L"            # 全角英数モードへ
-katakana = "q"           # ひらがな ⇄ カタカナ / ▽ をカタカナにして確定
-hankaku_katakana = "C-q" # ひらがな ⇄ 半角カタカナ / ▽ を半角カタカナにして確定
-start_conversion = "Q"   # 空の見出し語で変換を始める (複合語向け)
-abbrev = "/"             # ASCII の見出し語で変換する
-convert = "space"        # 変換する / 次の候補へ
-previous = "x"           # 前の候補へ
+#kana = "C-j"                # ASCII・全角英数から かなモードへ
+#confirm = "C-j"             # 入力中のローマ字・見出し語・候補を確定する
+#cancel = "C-g"              # 取り消す
+#ascii = "l"                 # ASCII モードへ
+#zenkaku = "L"               # 全角英数モードへ
+#katakana = "q"              # ひらがな ⇄ カタカナ / ▽ をカタカナにして確定
+#hankaku_katakana = "C-q"    # ひらがな ⇄ 半角カタカナ / ▽ を半角カタカナにして確定
+#start_conversion = "Q"      # 空の見出し語で変換を始める (複合語向け)
+#abbrev = "/"                # ASCII の見出し語で変換する
+#convert = "space"           # 変換する / 次の候補へ
+#previous = "x"              # 前の候補へ
+#complete = "tab"            # ▽ の見出し語を前方一致で補完する / 次の補完候補へ
+#complete_previous = "s-tab" # 前の補完候補へ
+#purge = "X"                 # ▼ の候補を利用者辞書から取り除く
+#affix = ">"                 # 接頭辞・接尾辞変換を始める (▽ の末尾、または ▼ の確定後)
 
 # 候補一覧から選ぶキー。並び順がそのまま一覧の並び順になり、
 # 個数がそのまま一頁の候補数になる。
-select = ["a", "s", "d", "f", "j", "k", "l"]
+#select = ["a", "s", "d", "f", "j", "k", "l"]
 
 [candidates]
 # 何番目の候補から横並びの一覧を出すか。
 # 4 なら 4 つ目までは一つずつ送り、5 つ目に達したところで一覧になる。
-inline = 4
+#inline = 4
 
 # 一覧の出し方。
 #   "inline" … 入力中の行に続けて横並び (既定)。行が伸びて折り返すことがある。
 #   "float"  … カーソルの下の行に一行で浮かせる (最下行なら上の行)。
 #              行が伸びず縦にも広がらないので、nvim の補完 popup と重なりにくい。
-layout = "inline"
+#layout = "inline"
 
 [behavior]
 # 押したときに ASCII モードへ戻すキー。
@@ -47,7 +64,11 @@ layout = "inline"
 # nvim で実測したところ、挿入モードを抜けるのは Esc と C-c。C-d は抜けない
 # (インデントを一段戻す) ので既定に入れていない。
 # 空の並び [] にすると何もしない。
-ascii_keys = ["esc", "C-c"]
+#
+# ここに挙げたキーは「子アプリが自分の操作に使っているキーへの便乗」なので、押した
+# キーはそのまま子へも渡る (子の側の動作も起きる)。形を変えずに渡す都合上、拡張鍵盤
+# プロトコルを使うアプリの下では効かない。
+#ascii_keys = ["esc", "C-c"]
 
 # モードの印の出し方。
 #
@@ -67,12 +88,12 @@ ascii_keys = ["esc", "C-c"]
 # 端末多重化器を挟むとカーソルの色 (OSC 12) が途中で吸われる (herdr が実際にそう)。
 # 文字として書いた色はそのまま届くので、cell と letter はその性質を使っている。
 # ASCII モードでは何も描かないので、そのときの完全透過は保たれる。
-mode_marker = "cell"
+#mode_marker = "cell"
 
 # 接頭辞・接尾辞に続けて確定した語を、繋げて辞書に覚えるか。
 # 「さい>」→再 のあと「りよう」→利用 と確定したら さいりよう /再利用/ を覚える。
 # ddskk の skk-learn-combined-word と同じ。
-learn_combined = true
+#learn_combined = true
 
 # mode_marker = "symbol" のときに出す記号。半角一桁の文字だけ。
 #
@@ -80,7 +101,7 @@ learn_combined = true
 # 取った - (半分)、全角英数は英数の @」という覚え方。英字は本文と紛れるので記号にした。
 # 反転表示の一桁で見分けやすいのは # * + @ % & ~ = あたり。
 [behavior.mode_symbols]
-hiragana = "~"
-katakana = "+"
-hankaku_katakana = "-"
-zenkaku = "@"
+#hiragana = "~"
+#katakana = "+"
+#hankaku_katakana = "-"
+#zenkaku = "@"

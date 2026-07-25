@@ -608,6 +608,36 @@ mod tests {
         assert!(Config::parse("[behavior]\nfoo = []\n").is_err());
     }
 
+    /// 同梱の見本が、書いてあるとおりに動くこと。
+    ///
+    /// 見本は全項目を既定値のまま `#` で無効にしてある。そのまま読めば既定、`#` を
+    /// 外しても既定 — この二つが揃って初めて「既定値を並べた見本」が正しい。既定を
+    /// 変えたのに見本を直し忘れると、後者が食い違って落ちる。
+    #[test]
+    fn the_bundled_example_states_the_defaults() {
+        let text = crate::CONFIG_EXAMPLE;
+        assert_eq!(
+            Config::parse(text).unwrap(),
+            Config::default(),
+            "見本をそのまま読んだら既定になるはず"
+        );
+
+        // 説明の行は「# 」(空白付き)、無効にした設定の行は「#」の直後から始まる。
+        let enabled: String = text
+            .lines()
+            .map(|line| match line.strip_prefix('#') {
+                Some(rest) if !rest.starts_with(' ') && !rest.is_empty() => rest,
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            Config::parse(&enabled).unwrap(),
+            Config::default(),
+            "見本の # を外したら既定と同じになるはず (既定を変えたら見本も直す)"
+        );
+    }
+
     #[test]
     fn missing_file_is_not_an_error() {
         let p = std::env::temp_dir().join("ttyskk-no-such-config-file.toml");

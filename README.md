@@ -270,8 +270,16 @@ Nihon TAB      → ▽にほんご
 ## 設定
 
 キーの割り当ては `~/.config/ttyskk/config.toml` で変えられる。書いた項目だけが
-既定を上書きするので、変えたいものだけ書けばよい。`config.example.toml` が全項目の
-一覧を兼ねている。
+既定を上書きするので、変えたいものだけ書けばよい。
+
+設定できる項目を全部、既定値のまま並べて `#` で無効にした見本を実行ファイルに
+埋め込んである (`config.example.toml` と同じもの)。書き出して、変えたい行の `#` を
+外すのがいちばん早い。
+
+```sh
+mkdir -p ~/.config/ttyskk
+ttyskk --config-example > ~/.config/ttyskk/config.toml
+```
 
 ```toml
 [keys]

@@ -27,6 +27,12 @@ use render::Overlay;
 use screen::Screen;
 use skk::{Mode, Skk};
 
+/// 設定の見本。実行ファイルに埋め込んで `--config-example` で書き出す。
+///
+/// 別に配らなくてよいうえ、版とずれない。中身が既定と食い違っていないことは
+/// `config::tests::the_bundled_example_states_the_defaults` が見張る。
+pub const CONFIG_EXAMPLE: &str = include_str!("../config.example.toml");
+
 const USAGE: &str = "\
 ttyskk — 端末の中で完結する SKK 日本語入力
 
@@ -36,9 +42,10 @@ ttyskk — 端末の中で完結する SKK 日本語入力
 コマンドを省くと $SHELL を起動する。
 
 オプション:
-    -h, --help       この使い方を表示する
-    -V, --version    版を表示する
-    --check-config   設定ファイルを検査して終わる
+    -h, --help        この使い方を表示する
+    -V, --version     版を表示する
+    --check-config    設定ファイルを検査して終わる
+    --config-example  設定の見本を書き出す (全項目を既定値のまま # で無効にしたもの)
 
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
@@ -262,6 +269,10 @@ fn main() -> Result<()> {
             }
             "-V" | "--version" => {
                 println!("ttyskk {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--config-example" => {
+                print!("{CONFIG_EXAMPLE}");
                 return Ok(());
             }
             "--check-config" => {
