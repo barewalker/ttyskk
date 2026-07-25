@@ -244,7 +244,7 @@ mod tests {
     fn builtin_covers_the_circled_numbers() {
         let mut m = HashMap::new();
         load_into(&mut m, BUILTIN);
-        assert_eq!(m.len(), 50, "まる1 〜 まる50 の 50 個");
+        assert_eq!(m.len(), 100, "まる1〜50 と c1〜50 の二通り");
         for (key, want) in [
             ("まる1", "①"),
             ("まる20", "⑳"),
@@ -252,6 +252,10 @@ mod tests {
             ("まる35", "㉟"),
             ("まる36", "㊱"),
             ("まる50", "㊿"),
+            ("c1", "①"),
+            ("c20", "⑳"),
+            ("c21", "㉑"),
+            ("c50", "㊿"),
         ] {
             assert_eq!(m[key][0].text, want, "{key}");
         }
