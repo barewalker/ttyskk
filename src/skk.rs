@@ -995,6 +995,21 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_also_returns_to_ascii() {
+        // nvim では C-c も挿入モードを抜ける (C-d は抜けないので既定に入れない)
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        let r = skk.handle(Key::Ctrl(0x03));
+        assert_eq!(r.to_child, vec![0x03]);
+        assert_eq!(skk.mode, Mode::Ascii);
+
+        skk.handle(Key::Ctrl(0x0a));
+        let r = skk.handle(Key::Ctrl(0x04));
+        assert_eq!(r.to_child, vec![0x04]);
+        assert_eq!(skk.mode, Mode::Hiragana, "C-d では抜けない");
+    }
+
+    #[test]
     fn ascii_keys_can_be_turned_off() {
         let mut skk = skk_with(&[]);
         skk.set_config(Config::parse("[behavior]\nascii_keys = []\n").unwrap());

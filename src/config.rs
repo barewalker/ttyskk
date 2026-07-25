@@ -44,6 +44,8 @@ pub struct Config {
     /// 押したときに ASCII モードへ戻すキー。空なら何もしない。
     ///
     /// vim / nvim で挿入モードを抜けたときに、かなモードが残らないようにする。
+    /// 既定は `Esc` と `C-c` — nvim で実測したところ、この二つは挿入モードを
+    /// 抜けるが `C-d` は抜けない (インデントを一段戻す)。
     pub ascii_keys: Vec<Key>,
 }
 
@@ -62,7 +64,7 @@ impl Default for Config {
             previous: vec![Key::Char('x')],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
-            ascii_keys: vec![Key::Esc],
+            ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
         }
     }
 }
