@@ -53,6 +53,9 @@ curl -s https://pypi.org/pypi/sentimental-skk/json \
 
 ここが本命。以下は展開後の `sentimental-skk-0.0.146/sskk/` からの相対パス。
 
+**以下のコード片は sentimental-skk (GPL-3.0) からの引用で、何をしているかを説明する
+ためのもの。ttyskk はこの実装の移植ではなく、設計を読んだうえで Rust で新しく書いた。**
+
 **出力を二股に流す** (`sskk.py:278`)
 
 ```python

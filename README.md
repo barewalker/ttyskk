@@ -24,6 +24,17 @@ cargo install --path .
 
 依存するのは POSIX の擬似端末と VT100 系のエスケープ列を解する端末だけ。
 tmux / screen / SSH / mosh のどれとも組み合わせられるし、なくても動く。
+Linux と macOS で動く。**WSL2 なら動くが、Windows ネイティブでは動かない**
+(termios と POSIX 擬似端末を使っているため)。
+
+変換には SKK の辞書が要る。
+
+```sh
+sudo apt install skkdic     # Debian / Ubuntu / WSL
+sudo pacman -S skk-jisyo    # Arch
+```
+
+置き場所が違う場合は `TTYSKK_JISYO` で指定する。
 
 ## キー操作
 
@@ -191,3 +202,25 @@ mosh 越しに使う場合はリモート側で動くため、辞書と学習が
 - 候補窓を浮かせる表示 (いまは行内に横並び)
 - 補完 (`TAB`)、数字変換、半角カタカナ
 - 変換中のカーソル移動 (矢印キーは見出し語を確定してから子へ渡す)
+
+## ライセンス
+
+MIT または Apache-2.0 のどちらかを選べる (`LICENSE-MIT` / `LICENSE-APACHE`)。
+
+先行実装の [sentimental-skk](https://github.com/saitoha/sentimental-skk) (GPL-3.0) は
+設計の参考にしたが、**移植ではない**。`NOTES.md` にあるのは読み解いた内容を説明する
+ための短い引用で、コードは Rust で新しく書いている。
+
+## English
+
+`ttyskk` is an SKK Japanese input method that lives entirely inside the terminal.
+It wraps a child process in a pseudo-terminal, intercepts stdin, and passes only
+*confirmed* text to the child. Unconfirmed text is painted directly onto the
+terminal as an overlay, so it never enters the child application's screen at all.
+
+Because the input method sits at the terminal-application layer, keys always flow
+in the order "multiplexer → ttyskk → child". This removes, structurally, the key
+contention you get when an X-level input method (fcitx5 and friends) fights your
+terminal multiplexer over `Ctrl+Z`.
+
+Documentation is in Japanese, since the users are.
