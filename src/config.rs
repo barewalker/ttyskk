@@ -150,12 +150,16 @@ impl Config {
         self.select.len().max(1)
     }
 
-    /// 割り当ての入っているキーを節ごとに並べて返す。
+    /// SKK 自身の操作に割り当てられているキーを節ごとに並べて返す。
     ///
     /// **キーの項目を足したらここにも足す。** 拡張鍵盤プロトコルの復号
     /// (`input::Decoder`) がこの並びを唯一の頼りにしているので、書き漏らすと
     /// そのキーだけ Claude Code のようなアプリの下で効かなくなる。
-    fn key_slots(&self) -> [&Vec<Key>; 16] {
+    ///
+    /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
+    /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
+    /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
+    fn key_slots(&self) -> [&Vec<Key>; 15] {
         [
             &self.kana,
             &self.confirm,
@@ -172,11 +176,10 @@ impl Config {
             &self.complete_previous,
             &self.purge,
             &self.affix,
-            &self.ascii_keys,
         ]
     }
 
-    /// いま SKK に割り当てられている Ctrl 付きキーの制御文字。
+    /// いま SKK 自身の操作に割り当てられている Ctrl 付きキーの制御文字。
     ///
     /// 拡張鍵盤プロトコルの下では Ctrl 付きのキーが `CSI 106;5u` のような形で
     /// 届く。素の制御文字に戻すのはここに挙がったキーだけにして、割り当ての
@@ -493,9 +496,10 @@ mod tests {
         assert!(c.contains(&0x0a), "C-j"); // kana / confirm
         assert!(c.contains(&0x07), "C-g"); // cancel
         assert!(c.contains(&0x11), "C-q"); // hankaku_katakana
-        assert!(c.contains(&0x03), "C-c"); // ascii_keys
         // 割り当ての無いキーは挙げない (子アプリの操作を奪わない)
         assert!(!c.contains(&0x1a), "C-z");
+        // ascii_keys は子アプリのキーへの便乗なので、形を変えずに渡す
+        assert!(!c.contains(&0x03), "C-c");
     }
 
     /// キーの項目を足して `key_slots` に足し忘れると、そのキーだけ拡張鍵盤
@@ -528,9 +532,10 @@ mod tests {
         text.push_str("\n[behavior]\nascii_keys = [\"C-p\"]\n");
 
         let got = Config::parse(&text).unwrap().ctrl_keys();
-        for c in letters.chars().chain(std::iter::once('p')) {
+        for c in letters.chars() {
             assert!(got.contains(&(c as u8 & 0x1f)), "C-{c} が漏れている");
         }
+        assert!(!got.contains(&0x10), "ascii_keys の C-p は対象外");
     }
 
     #[test]

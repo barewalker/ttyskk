@@ -393,7 +393,6 @@ mod tests {
         assert_eq!(d.feed(b"\x1b[106;5u"), vec![Key::Ctrl(0x0a)]); // Ctrl+J
         assert_eq!(d.feed(b"\x1b[103;5u"), vec![Key::Ctrl(0x07)]); // Ctrl+G
         assert_eq!(d.feed(b"\x1b[113;5u"), vec![Key::Ctrl(0x11)]); // Ctrl+Q
-        assert_eq!(d.feed(b"\x1b[99;5u"), vec![Key::Ctrl(0x03)]); // Ctrl+C
         // 下位引数 (イベント種別) が付いていても読める
         assert_eq!(d.feed(b"\x1b[106;5:1u"), vec![Key::Ctrl(0x0a)]);
     }
@@ -421,10 +420,15 @@ mod tests {
     }
 
     /// 割り当ての無いキーは元の形のまま子へ渡す。
+    ///
+    /// `Ctrl+C` は `ascii_keys` に入っているが、あれは子アプリのキーへの便乗なので
+    /// 形を変えない。素の `0x03` に直すと、Claude Code のように `Ctrl+C` で入力欄を
+    /// 空にするアプリで押した内容が消える。
     #[test]
     fn other_extended_keys_pass_through() {
         let mut d = decoder();
         for seq in [
+            &b"\x1b[99;5u"[..],  // Ctrl+C (ascii_keys)
             &b"\x1b[122;5u"[..], // Ctrl+Z
             &b"\x1b[100;5u"[..], // Ctrl+D
             &b"\x1b[106;1u"[..], // 修飾なしの J
