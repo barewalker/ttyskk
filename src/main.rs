@@ -190,8 +190,9 @@ fn read_cursor_report(timeout: Duration) -> (Option<(usize, usize)>, Vec<u8>) {
 /// DECSCUSR は 3 つの形と点滅の有無しか持たないので、よく使う 3 つのモードに
 /// 形を割り当て、めったに使わない全角英数だけ点滅で区別する。
 fn cursor_indicator(mode: Mode, marker: Marker) -> &'static str {
-    // セルに色を敷く方式のときは、ブロックのカーソルがその色を覆ってしまう。
+    // カーソルの真下に色を敷く方式では、ブロックのカーソルがその色を覆ってしまう。
     // 形は下線に固定し、モードは色だけで表す (形 = 動いている合図)。
+    // 右隣に置く方式なら覆われないので、形はモードごとのままでよい。
     if marker == Marker::Cell {
         return "\x1b[4 q\x1b]112\x07";
     }

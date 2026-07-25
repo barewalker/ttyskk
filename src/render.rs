@@ -86,11 +86,15 @@ impl Overlay {
     /// 文字は控えのものをそのまま使う。書き換えるのは見た目だけなので、
     /// 下にある文字が消えたり位置がずれたりしない。カーソルが行末の空きセルに
     /// あるときは色の付いた箱に見え、カーソルそのものが色付いたように読める。
-    fn draw_tint(&mut self, screen: &Screen, style: Option<Style>, out: &mut String) {
-        let Some(style) = style else {
+    fn draw_tint(&mut self, screen: &Screen, tint: Option<(Style, usize)>, out: &mut String) {
+        let Some((style, offset)) = tint else {
             return;
         };
-        let cell = screen.cell(screen.row, screen.col);
+        let col = screen.col + offset;
+        if col >= screen.cols {
+            return;
+        }
+        let cell = screen.cell(screen.row, col);
         if cell.width == 0 {
             // 全角の後続セルの上には敷かない (前半を断ち切ってしまう)
             return;
@@ -99,11 +103,11 @@ impl Overlay {
         flush_line(
             out,
             screen.row,
-            screen.col,
+            col,
             &format!("{}{}", style_sgr(style), cell.ch),
             w,
         );
-        self.painted.push((screen.row, screen.col, w));
+        self.painted.push((screen.row, col, w));
     }
 
     /// カーソル位置から区間列を描く。画面右端では次の行へ折り返す。

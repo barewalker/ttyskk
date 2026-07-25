@@ -87,8 +87,8 @@ pub struct Preedit {
     pub at_cursor: Vec<Segment>,
     /// 別の行に一行で浮かせる (空なら無し)
     pub floating: Vec<Segment>,
-    /// カーソル位置のセルに敷く色。文字は控えのものをそのまま使う。
-    pub cursor_tint: Option<Style>,
+    /// セルに敷く色と、カーソルからの桁のずれ。文字は控えのものをそのまま使う。
+    pub cursor_tint: Option<(Style, usize)>,
 }
 
 impl Preedit {
@@ -355,9 +355,11 @@ impl Skk {
             Marker::Off => {}
             // カーソル位置のセルに色を敷く。文字を足さないので邪魔にならない。
             // 打ち込み中の文字がある間はその先頭が同じ場所に来るので出さない。
-            Marker::Cell => {
+            Marker::Cell | Marker::Beside => {
+                // 打ち込み中の文字がある間はその先頭が同じ場所に来るので出さない
                 if segs.is_empty() {
-                    cursor_tint = mode_style;
+                    let offset = usize::from(self.cfg.mode_marker == Marker::Beside);
+                    cursor_tint = mode_style.map(|s| (s, offset));
                 }
             }
             // 印を末尾に置く。カーソルは重ね描きの先頭に戻るので、
@@ -1724,18 +1726,30 @@ mod tests {
 
         skk.handle(Key::Ctrl(0x0a));
         let p = skk.preedit();
-        assert_eq!(p.cursor_tint, Some(Style::ModeHiragana));
+        assert_eq!(p.cursor_tint, Some((Style::ModeHiragana, 0)));
         assert!(p.at_cursor.is_empty(), "文字は足さない");
         assert!(!p.is_empty(), "色を敷くので描くものはある");
 
         skk.handle(Key::Char('q'));
-        assert_eq!(skk.preedit().cursor_tint, Some(Style::ModeKatakana));
+        assert_eq!(skk.preedit().cursor_tint, Some((Style::ModeKatakana, 0)));
 
         // 打ち込み中はその先頭が同じ場所に来るので敷かない
         skk.handle(Key::Char('q'));
         typed(&mut skk, "Kanji");
         assert!(skk.preedit().cursor_tint.is_none());
         assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    #[test]
+    fn beside_marker_sits_next_to_the_cursor() {
+        // カーソルに覆われない位置に置く。多重化器がカーソルの見た目を遅れて
+        // 同期する環境でも確実に見える。
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[behavior]\nmode_marker = \"beside\"\n").unwrap());
+        assert!(skk.preedit().cursor_tint.is_none(), "ASCII では何もしない");
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(skk.preedit().cursor_tint, Some((Style::ModeHiragana, 1)));
+        assert!(skk.preedit().at_cursor.is_empty(), "文字は足さない");
     }
 
     #[test]

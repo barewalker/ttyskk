@@ -24,7 +24,13 @@ pub enum Marker {
     ///
     /// カーソルの形がブロックだと色を覆ってしまうので、この方式のときは
     /// 形を下線に固定する。形 = 動いている合図、色 = モード、という配分。
+    /// 素の端末ではカーソルそのものが色付いて見えて具合がよい。
     Cell,
+    /// カーソルの**右隣**のセルに色を敷く。文字を足さない。
+    ///
+    /// カーソルに覆われないので、端末多重化器がカーソルの見た目を遅れて
+    /// 同期する環境 (herdr がそう) でも確実に見える。
+    Beside,
     /// カーソルの直後に あ / ア / 半 / Ａ を出す。
     Letter,
 }
@@ -190,8 +196,11 @@ impl Config {
                         cfg.mode_marker = match value.as_str() {
                             Some("off") => Marker::Off,
                             Some("cell") => Marker::Cell,
+                            Some("beside") => Marker::Beside,
                             Some("letter") => Marker::Letter,
-                            _ => bail!("behavior.mode_marker は \"off\" か \"cell\" か \"letter\""),
+                            _ => bail!(
+                                "behavior.mode_marker は \"off\" / \"cell\" / \"beside\" / \"letter\""
+                            ),
                         }
                     }
                     "learn_combined" => {
