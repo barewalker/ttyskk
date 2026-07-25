@@ -372,10 +372,10 @@ impl Skk {
                     // 記号を出す方式では、色に頼らずモードが分かるようにする
                     let glyph =
                         (self.cfg.mode_marker == Marker::Symbol).then_some(match self.mode {
-                            Mode::Hiragana => 'H',
-                            Mode::Katakana => 'K',
-                            Mode::HankakuKatakana => 'k',
-                            _ => 'A',
+                            Mode::Hiragana => self.cfg.mode_symbols[0],
+                            Mode::Katakana => self.cfg.mode_symbols[1],
+                            Mode::HankakuKatakana => self.cfg.mode_symbols[2],
+                            _ => self.cfg.mode_symbols[3],
                         });
                     cursor_tint = mode_style.map(|style| Tint {
                         style,
@@ -1798,9 +1798,9 @@ mod tests {
         skk.set_config(Config::parse("[behavior]\nmode_marker = \"symbol\"\n").unwrap());
         assert!(skk.preedit().cursor_tint.is_none(), "ASCII では何もしない");
         for (key, glyph) in [
-            (Key::Ctrl(0x0a), 'H'),
-            (Key::Char('q'), 'K'),
-            (Key::Ctrl(0x11), 'k'),
+            (Key::Ctrl(0x0a), '~'),
+            (Key::Char('q'), '+'),
+            (Key::Ctrl(0x11), '-'),
         ] {
             skk.handle(key);
             let t = skk.preedit().cursor_tint.expect("印が出る");
@@ -1809,7 +1809,20 @@ mod tests {
         }
         skk.handle(Key::Ctrl(0x11));
         skk.handle(Key::Char('L'));
-        assert_eq!(skk.preedit().cursor_tint.unwrap().glyph, Some('A'));
+        assert_eq!(skk.preedit().cursor_tint.unwrap().glyph, Some('@'));
+
+        // 記号は設定で変えられる。半角一桁だけを認める。
+        skk.set_config(
+            Config::parse(
+                "[behavior]\nmode_marker = \"symbol\"\n[behavior.mode_symbols]\nhiragana = \"#\"\n",
+            )
+            .unwrap(),
+        );
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(skk.preedit().cursor_tint.unwrap().glyph, Some('#'));
+        assert!(Config::parse("[behavior.mode_symbols]\nhiragana = \"あ\"\n").is_err());
+        assert!(Config::parse("[behavior.mode_symbols]\nhiragana = \"ab\"\n").is_err());
+        assert!(Config::parse("[behavior.mode_symbols]\nfoo = \"#\"\n").is_err());
     }
 
     #[test]

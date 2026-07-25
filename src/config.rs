@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Result, bail};
 
 use crate::skk::Key;
+use unicode_width::UnicodeWidthChar;
 
 /// 設定ファイルを見張る間隔。
 const POLL: Duration = Duration::from_secs(1);
@@ -30,6 +31,7 @@ pub enum Marker {
     ///
     /// 色だけに頼らないので、モノクロの環境でも区別が付く。幅は 1 桁なので
     /// 見た目も崩れない。ただし下にある文字は隠れる (`Cell` は隠さない)。
+    /// 記号は `mode_symbols` で変えられる。
     Symbol,
     /// カーソルの**右隣**のセルに色を敷く。文字を足さない。
     ///
@@ -87,6 +89,13 @@ pub struct Config {
     pub inline_candidates: usize,
     /// 候補一覧の出し方
     pub layout: Layout,
+    /// `mode_marker = "symbol"` で出す記号。
+    ///
+    /// 順に ひらがな / カタカナ / 半角カタカナ / 全角英数。既定は `~ + - @` で、
+    /// ひらがなは曲線的、カタカナは角ばった形、半角カタカナは `+` から縦棒を
+    /// 取った形 (半分)、全角英数は英数の `@`、という覚え方にしてある。
+    /// 英字は本文と紛れるので記号にしてある。
+    pub mode_symbols: [char; 4],
     /// モードの印の出し方。
     ///
     /// 端末多重化器を挟むとカーソルの色 (OSC 12) が途中で吸われる (herdr が実際に
@@ -127,6 +136,7 @@ impl Default for Config {
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
             layout: Layout::Inline,
+            mode_symbols: ['~', '+', '-', '@'],
             mode_marker: Marker::Cell,
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
@@ -207,6 +217,21 @@ impl Config {
                             _ => bail!(
                                 "behavior.mode_marker は \"off\" / \"cell\" / \"symbol\" / \"beside\" / \"letter\""
                             ),
+                        }
+                    }
+                    "mode_symbols" => {
+                        let t = value.as_table().ok_or_else(|| {
+                            anyhow::anyhow!("behavior.mode_symbols は表 (名前 = 記号)")
+                        })?;
+                        for (name, v) in t {
+                            let i = match name.as_str() {
+                                "hiragana" => 0,
+                                "katakana" => 1,
+                                "hankaku_katakana" => 2,
+                                "zenkaku" => 3,
+                                other => bail!("mode_symbols.{other} は知らない項目"),
+                            };
+                            cfg.mode_symbols[i] = parse_symbol(name, v)?;
                         }
                     }
                     "learn_combined" => {
@@ -293,6 +318,23 @@ fn parse_select(value: &toml::Value) -> Result<Vec<char>> {
         bail!("keys.select が空");
     }
     Ok(out)
+}
+
+/// モードの印に使う記号。半角の一文字だけを認める。
+///
+/// 全角を許すと幅が二桁になり、「見た目が崩れない」という約束が壊れる。
+fn parse_symbol(name: &str, value: &toml::Value) -> Result<char> {
+    let s = value
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("mode_symbols.{name} は文字列"))?;
+    let mut it = s.chars();
+    let (Some(c), None) = (it.next(), it.next()) else {
+        bail!("mode_symbols.{name} は一文字だけ ({s} は不可)");
+    };
+    if c.width().unwrap_or(0) != 1 {
+        bail!("mode_symbols.{name} は半角一桁の文字だけ ({c} は不可)");
+    }
+    Ok(c)
 }
 
 /// キーの書き方を `Key` にする。
