@@ -154,6 +154,11 @@ pub struct Skk {
     regs: Vec<Registration>,
     /// TAB 補完の途中。見出し語が変わったら捨てる。
     completion: Option<Completion>,
+    /// 直前に確定した変換 (見出し語, 出力)。合成語の学習に使う。
+    ///
+    /// 直接入力で何か文字を出したら捨てる。接頭辞と次の語が画面上で隣り合って
+    /// いることが繋げる条件なので (ddskk は `looking-at` で同じことを確かめる)。
+    last_commit: Option<(String, String)>,
 }
 
 impl Skk {
@@ -174,6 +179,7 @@ impl Skk {
             dict,
             regs: Vec::new(),
             completion: None,
+            last_commit: None,
         }
     }
 
@@ -303,9 +309,61 @@ impl Skk {
         self.candidates.get(self.cand_index)
     }
 
-    /// 候補の本文を、数字を戻した形にする。
+    /// 候補の本文を、画面と出力に出す形にする。
+    ///
+    /// 数字を戻し、接頭辞・接尾辞の印を落とす。`SKK-JISYO.L` では候補側に `>` が
+    /// 付くのは 1 件だけだが、skkeleton も同じ処理を持つ。
     fn shown(&self, c: &Choice) -> String {
-        num::expand(&c.cand.text, &self.numbers)
+        let t = num::expand(&c.cand.text, &self.numbers);
+        if c.key.ends_with('>') {
+            t.trim_end_matches('>').to_string()
+        } else if c.key.starts_with('>') {
+            t.trim_start_matches('>').to_string()
+        } else {
+            t
+        }
+    }
+
+    /// 確定を記録し、接頭辞・接尾辞に続いた場合は繋げて覚える。
+    ///
+    /// ddskk の `skk-learn-combined-word` と同じ。「さい>」→再 のあと
+    /// 「りよう」→利用 と確定したら `さいりよう /再利用/` を覚える。
+    /// 送りありの語は繋げない (候補が語幹だけなので繋いでも筋が通らない)。
+    fn note_commit(&mut self, key: String, text: String, okuri: bool) {
+        let prev = self.last_commit.take();
+        if self.cfg.learn_combined
+            && !okuri
+            && let Some((pk, pt)) = prev
+        {
+            let joined = if pk.ends_with('>') && !key.ends_with('>') && !key.starts_with('>') {
+                // 接頭辞のあとに普通の語
+                Some((
+                    format!("{}{}", &pk[..pk.len() - 1], key),
+                    format!("{pt}{text}"),
+                ))
+            } else if key.starts_with('>') && !pk.starts_with('>') && !pk.ends_with('>') {
+                // 普通の語のあとに接尾辞
+                Some((format!("{}{}", pk, &key[1..]), format!("{pt}{text}")))
+            } else {
+                None
+            };
+            if let Some((k, joined_text)) = joined
+                && !joined_text.is_empty()
+            {
+                self.dict.learn(
+                    &k,
+                    &Candidate {
+                        text: joined_text,
+                        annotation: None,
+                    },
+                );
+            }
+        }
+        if okuri {
+            self.last_commit = None;
+        } else {
+            self.last_commit = Some((key, text));
+        }
     }
 
     fn list_visible(&self) -> bool {
@@ -458,6 +516,15 @@ impl Skk {
     // ---- 直接入力 ----
 
     fn handle_direct(&mut self, key: Key) -> Response {
+        let r = self.direct_inner(key);
+        // 何か出したなら、接頭辞と次の語はもう隣り合っていない
+        if !r.to_child.is_empty() {
+            self.last_commit = None;
+        }
+        r
+    }
+
+    fn direct_inner(&mut self, key: Key) -> Response {
         // ASCII / 全角英数モードはほぼ素通し
         if !self.mode.is_kana() {
             return match key {
@@ -605,6 +672,18 @@ impl Skk {
                 } else if self.reading.pop().is_none() {
                     self.reset();
                 }
+                Response::default()
+            }
+            k if self.cfg.affix.contains(&k)
+                && !self.reading.is_empty()
+                && self.okuri_head.is_none()
+                && !self.abbrev =>
+            {
+                // 接頭辞。見出し語の末尾に `>` を足してすぐ変換する。
+                let flushed = self.romaji.flush();
+                self.reading.push_str(&flushed);
+                self.reading.push('>');
+                self.start_conversion();
                 Response::default()
             }
             k if self.cfg.complete.contains(&k) => {
@@ -790,6 +869,13 @@ impl Skk {
                 let text = self.commit_candidate();
                 Response::text(&text)
             }
+            k if self.cfg.affix.contains(&k) => {
+                // 接尾辞。いまの候補を確定し、`>` から始まる新しい見出し語を立てる。
+                let text = self.commit_candidate();
+                self.phase = Phase::Composing;
+                self.reading = ">".into();
+                Response::text(&text)
+            }
             k if self.cfg.purge.contains(&k) => {
                 self.purge_candidate();
                 Response::default()
@@ -914,6 +1000,8 @@ impl Skk {
                 // 辞書へ書き戻すのは `#` のままの形。数字を戻した形で覚えると
                 // その数字専用の項目になってしまう。
                 self.dict.learn(&key, &cand);
+                let okuri = self.okuri_head.is_some();
+                self.note_commit(self.dict_key.clone(), shown.clone(), okuri);
                 format!("{}{}", shown, self.okuri_kana)
             }
             None => String::new(),
@@ -1322,6 +1410,90 @@ mod tests {
         typed(&mut skk, "Kanji ");
         assert_eq!(preedit_text(&skk), "▼漢字");
         assert_eq!(typed(&mut skk, "\n"), "漢字");
+    }
+
+    #[test]
+    fn prefix_conversion() {
+        let mut skk = skk_with(&[("あか>", "/赤/"), ("ぺん", "/ペン/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        // ▽ の途中で > を押すと末尾に付いてすぐ変換が始まる
+        typed(&mut skk, "Aka>");
+        assert_eq!(preedit_text(&skk), "▼赤");
+        assert_eq!(typed(&mut skk, "\n"), "赤");
+        assert_eq!(typed(&mut skk, "Pen \n"), "ペン");
+    }
+
+    #[test]
+    fn suffix_conversion() {
+        let mut skk = skk_with(&[("かんどう", "/感動/"), (">てき", "/的/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kandou ");
+        assert_eq!(preedit_text(&skk), "▼感動");
+        // ▼ で > を押すと候補を確定し、> から始まる新しい見出し語を立てる
+        assert_eq!(typed(&mut skk, ">"), "感動");
+        assert_eq!(preedit_text(&skk), "▽>");
+        typed(&mut skk, "teki");
+        assert_eq!(preedit_text(&skk), "▽>てき");
+        assert_eq!(typed(&mut skk, " \n"), "的");
+    }
+
+    #[test]
+    fn learns_the_combined_word() {
+        let mut skk = skk_with(&[("さい>", "/再/"), ("りよう", "/利用/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Sai>\n");
+        typed(&mut skk, "Riyou \n");
+        // 接頭辞に続いた語を繋げて覚える (ddskk の skk-learn-combined-word)
+        let c = skk.dict_mut().lookup("さいりよう");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].text, "再利用");
+    }
+
+    #[test]
+    fn learns_the_combined_word_with_a_suffix() {
+        let mut skk = skk_with(&[("かんどう", "/感動/"), (">てき", "/的/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kandou >teki \n");
+        let c = skk.dict_mut().lookup("かんどうてき");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].text, "感動的");
+    }
+
+    #[test]
+    fn does_not_combine_across_other_input() {
+        let mut skk = skk_with(&[("さい>", "/再/"), ("りよう", "/利用/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Sai>\n");
+        // 間にかなを打ったら隣り合っていない
+        typed(&mut skk, "no");
+        typed(&mut skk, "Riyou \n");
+        assert!(skk.dict_mut().lookup("さいりよう").is_empty());
+    }
+
+    #[test]
+    fn combining_can_be_turned_off() {
+        let mut skk = skk_with(&[("さい>", "/再/"), ("りよう", "/利用/")]);
+        skk.set_config(Config::parse("[behavior]\nlearn_combined = false\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Sai>\nRiyou \n");
+        assert!(skk.dict_mut().lookup("さいりよう").is_empty());
+    }
+
+    #[test]
+    fn affix_marker_is_stripped_from_the_candidate() {
+        // SKK-JISYO.L には候補側にも > が付く項目が 1 件ある
+        let mut skk = skk_with(&[("さい>", "/再>/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Sai>");
+        assert_eq!(preedit_text(&skk), "▼再");
+    }
+
+    #[test]
+    fn a_bare_angle_bracket_passes_through() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        // 変換していないときの > はただの文字
+        assert_eq!(typed(&mut skk, ">"), ">");
     }
 
     #[test]

@@ -43,10 +43,17 @@ pub struct Config {
     pub complete_previous: Vec<Key>,
     /// ▼ の候補を利用者辞書から取り除く
     pub purge: Vec<Key>,
+    /// 接頭辞・接尾辞変換を始める (▽ の末尾に付けるか、▼ を確定して `>` から始める)
+    pub affix: Vec<Key>,
     /// 候補一覧から選ぶキー。並び順がそのまま一覧の並び順になる
     pub select: Vec<char>,
     /// 一覧を出さずに一つずつ送る候補数
     pub inline_candidates: usize,
+    /// 接頭辞・接尾辞に続けて確定した語を、繋げて辞書に覚えるか。
+    ///
+    /// 「さい>」→再 のあと「りよう」→利用 と確定したら `さいりよう /再利用/` を
+    /// 覚える。ddskk の `skk-learn-combined-word` と同じ (既定は有効)。
+    pub learn_combined: bool,
     /// 押したときに ASCII モードへ戻すキー。空なら何もしない。
     ///
     /// vim / nvim で挿入モードを抜けたときに、かなモードが残らないようにする。
@@ -71,8 +78,10 @@ impl Default for Config {
             complete: vec![Key::Tab],
             complete_previous: vec![Key::Raw(b"\x1b[Z".to_vec())],
             purge: vec![Key::Char('X')],
+            affix: vec![Key::Char('>')],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
+            learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
         }
     }
@@ -116,6 +125,7 @@ impl Config {
                     "complete" => &mut cfg.complete,
                     "complete_previous" => &mut cfg.complete_previous,
                     "purge" => &mut cfg.purge,
+                    "affix" => &mut cfg.affix,
                     "select" => {
                         cfg.select = parse_select(value)?;
                         continue;
@@ -138,6 +148,11 @@ impl Config {
                             toml::Value::Array(a) if a.is_empty() => Vec::new(),
                             v => parse_keys("ascii_keys", v)?,
                         }
+                    }
+                    "learn_combined" => {
+                        cfg.learn_combined = value
+                            .as_bool()
+                            .ok_or_else(|| anyhow::anyhow!("behavior.learn_combined は真偽値"))?
                     }
                     other => bail!("behavior.{other} は知らない項目"),
                 }
