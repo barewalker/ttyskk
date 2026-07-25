@@ -81,6 +81,32 @@ impl Response {
     }
 }
 
+/// 辞書登録の途中。候補が見つからないときに積む。
+///
+/// 入れ子にできる。登録内容を打っている最中にさらに未知語を変換した場合、
+/// もう一段積まれる。
+struct Registration {
+    /// 辞書に登録する見出し語 (送りありなら `うごk`)
+    key: String,
+    /// 打ち込み中の登録内容
+    buffer: String,
+    /// 取り消したときに ▽ へ戻すための控え
+    reading: String,
+    okuri_head: Option<char>,
+    okuri_kana: String,
+    abbrev: bool,
+}
+
+impl Registration {
+    /// 画面に出す見出し (送りありは `うご*く`)。
+    fn label(&self) -> String {
+        match self.okuri_head {
+            Some(_) => format!("{}*{}", self.reading, self.okuri_kana),
+            None => self.reading.clone(),
+        }
+    }
+}
+
 pub struct Skk {
     pub mode: Mode,
     phase: Phase,
@@ -98,6 +124,8 @@ pub struct Skk {
     dict_key: String,
     dict: Dict,
     cfg: Config,
+    /// 辞書登録の積み上げ。空でなければ登録中。
+    regs: Vec<Registration>,
 }
 
 impl Skk {
@@ -115,6 +143,7 @@ impl Skk {
             cand_index: 0,
             dict_key: String::new(),
             dict,
+            regs: Vec::new(),
         }
     }
 
@@ -134,6 +163,25 @@ impl Skk {
     /// 入力途中の表示。空なら重ね描きするものは無い。
     pub fn preedit(&self) -> Vec<Segment> {
         let mut segs = Vec::new();
+        // 登録中は見出しと打ち込み済みの内容を前に置く。入れ子は括弧の重なりで表す。
+        if let Some(reg) = self.regs.last() {
+            let depth = self.regs.len();
+            segs.push(Segment {
+                style: Style::ListItem,
+                text: format!(
+                    "{}登録:{}{}",
+                    "[".repeat(depth),
+                    reg.label(),
+                    "]".repeat(depth)
+                ),
+            });
+            if !reg.buffer.is_empty() {
+                segs.push(Segment {
+                    style: Style::Reading,
+                    text: reg.buffer.clone(),
+                });
+            }
+        }
         match self.phase {
             Phase::Direct => {
                 if !self.romaji.is_empty() {
@@ -254,11 +302,107 @@ impl Skk {
     }
 
     pub fn handle(&mut self, key: Key) -> Response {
+        if self.regs.is_empty() {
+            return self.dispatch(key);
+        }
+        // 登録中。子へ出るはずだった文字は登録内容に溜める。
+        if matches!(key, Key::Raw(_)) {
+            // 矢印などは受け付けない。挟むと登録内容が壊れる。
+            return Response::default();
+        }
+        if self.phase == Phase::Direct {
+            if key == Key::Enter {
+                return self.finish_registration();
+            }
+            if self.romaji.is_empty() {
+                if self.cfg.cancel.contains(&key) {
+                    return self.abort_registration();
+                }
+                if key == Key::Backspace {
+                    let reg = self.regs.last_mut().expect("登録中");
+                    if reg.buffer.pop().is_none() {
+                        return self.abort_registration();
+                    }
+                    return Response::default();
+                }
+            }
+        }
+        let r = self.dispatch(key);
+        self.capture(r)
+    }
+
+    /// 子へ出るはずだった文字を、いちばん内側の登録内容へ回す。
+    ///
+    /// 制御文字は捨てる。割り当ての無い `C-z` などがそのまま混ざると、
+    /// 辞書に制御文字を含む項目ができてしまうため。
+    fn capture(&mut self, r: Response) -> Response {
+        let Some(reg) = self.regs.last_mut() else {
+            return r;
+        };
+        if let Ok(s) = String::from_utf8(r.to_child) {
+            reg.buffer.extend(s.chars().filter(|c| !c.is_control()));
+        }
+        Response {
+            to_child: Vec::new(),
+            mode_changed: r.mode_changed,
+        }
+    }
+
+    fn dispatch(&mut self, key: Key) -> Response {
         match self.phase {
             Phase::Direct => self.handle_direct(key),
             Phase::Composing => self.handle_composing(key),
             Phase::Selecting => self.handle_selecting(key),
         }
+    }
+
+    /// 候補が尽きたので辞書登録を始める。
+    fn begin_registration(&mut self) {
+        self.regs.push(Registration {
+            key: std::mem::take(&mut self.dict_key),
+            buffer: String::new(),
+            reading: self.reading.clone(),
+            okuri_head: self.okuri_head,
+            okuri_kana: self.okuri_kana.clone(),
+            abbrev: self.abbrev,
+        });
+        self.reset();
+    }
+
+    /// 登録を確定する。空のまま確定したときは登録せず ▽ へ戻す。
+    fn finish_registration(&mut self) -> Response {
+        let flushed = self.romaji.flush();
+        let shaped = self.shape(&flushed);
+        if let Some(reg) = self.regs.last_mut() {
+            reg.buffer.push_str(&shaped);
+        }
+        let reg = self.regs.pop().expect("登録中");
+        if reg.buffer.is_empty() {
+            return self.resume_composing(reg);
+        }
+        let cand = Candidate {
+            text: reg.buffer.clone(),
+            annotation: None,
+        };
+        self.dict.learn(&reg.key, &cand);
+        let text = format!("{}{}", reg.buffer, reg.okuri_kana);
+        self.capture(Response::text(&text))
+    }
+
+    /// 登録を取り消して ▽ に戻す。打ちかけの登録内容は捨てる。
+    fn abort_registration(&mut self) -> Response {
+        let reg = self.regs.pop().expect("登録中");
+        self.resume_composing(reg)
+    }
+
+    fn resume_composing(&mut self, reg: Registration) -> Response {
+        self.reset();
+        self.phase = Phase::Composing;
+        self.reading = reg.reading;
+        self.okuri_head = reg.okuri_head;
+        self.okuri_kana = reg.okuri_kana;
+        self.abbrev = reg.abbrev;
+        Response::default()
     }
 
     // ---- 直接入力 ----
@@ -490,7 +634,8 @@ impl Skk {
         };
         self.candidates = self.dict.lookup(&self.dict_key);
         if self.candidates.is_empty() {
-            // 候補が無ければ ▽ のまま。C-j でかな確定できる。
+            // 候補が無ければ辞書登録へ移る
+            self.begin_registration();
             return;
         }
         self.cand_index = 0;
@@ -517,7 +662,10 @@ impl Skk {
                 Response::text(&text)
             }
             k if self.cfg.convert.contains(&k) => {
-                self.next_candidate();
+                if self.next_candidate() {
+                    // 候補を出し切ったので辞書登録へ
+                    self.begin_registration();
+                }
                 Response::default()
             }
             k if self.cfg.previous.contains(&k) => {
@@ -541,7 +689,7 @@ impl Skk {
             Key::Char(c) => {
                 // 候補を確定してから、その文字を新しい入力として処理する
                 let text = self.commit_candidate();
-                let mut r = self.handle(Key::Char(c));
+                let mut r = self.dispatch(Key::Char(c));
                 let mut bytes = text.into_bytes();
                 bytes.append(&mut r.to_child);
                 Response {
@@ -561,26 +709,30 @@ impl Skk {
         }
     }
 
-    fn next_candidate(&mut self) {
-        if self.candidates.is_empty() {
-            return;
-        }
+    /// 次の候補へ。もう先が無ければ true (辞書登録へ移る合図)。
+    fn next_candidate(&mut self) -> bool {
         if self.cand_index + 1 < self.cfg.inline_candidates {
+            if self.cand_index + 1 >= self.candidates.len() {
+                return true;
+            }
             self.cand_index += 1;
-            return;
+            return false;
         }
         if !self.list_visible() {
             // 一覧の表示を始める
             if self.candidates.len() > self.cfg.inline_candidates {
                 self.cand_index = self.cfg.inline_candidates;
+                return false;
             }
-            return;
+            return true;
         }
         // 一覧が出ているときは頁単位で送る
         let (_, end) = self.page_range();
         if end < self.candidates.len() {
             self.cand_index = end;
+            return false;
         }
+        true
     }
 
     fn prev_candidate(&mut self) {
@@ -656,6 +808,7 @@ mod tests {
         for c in s.chars() {
             let key = match c {
                 '\n' => Key::Ctrl(0x0a),
+                '\r' => Key::Enter,
                 '\x07' => Key::Ctrl(0x07),
                 '\x7f' => Key::Backspace,
                 c => Key::Char(c),
@@ -667,6 +820,131 @@ mod tests {
 
     fn preedit_text(skk: &Skk) -> String {
         skk.preedit().into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn unknown_word_starts_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        // 候補が無いので登録に入る。見出しが出て、入力は直接入力に戻る。
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]");
+
+        // 登録内容を打つ。子へは何も出ない。
+        assert_eq!(typed(&mut skk, "kanji"), "");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]かんじ");
+
+        // Enter で確定。ここで初めて子へ出る。
+        assert_eq!(typed(&mut skk, "\r"), "かんじ");
+        assert!(preedit_text(&skk).is_empty());
+
+        // 覚えたので次からは変換できる
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼かんじ");
+    }
+
+    #[test]
+    fn registration_keeps_conversion_available_inside() {
+        let mut skk = skk_with(&[("かん", "/漢/"), ("じ", "/字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        // 登録の中でも変換できる
+        typed(&mut skk, "Kan \nJi \n");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]漢字");
+        assert_eq!(typed(&mut skk, "\r"), "漢字");
+    }
+
+    #[test]
+    fn registration_with_okuri_registers_only_the_stem() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "UgoKu");
+        // 送りありは見出しに送り仮名が添う
+        assert_eq!(preedit_text(&skk), "[登録:うご*く]");
+        // l で ASCII にして漢字を直接打ち込む
+        typed(&mut skk, "l動");
+        assert_eq!(preedit_text(&skk), "[登録:うご*く]動");
+        // 登録されるのは語幹だけ。子へ出るのは送り仮名の付いた形。
+        assert_eq!(typed(&mut skk, "\r"), "動く");
+        typed(&mut skk, "\nUgoKu");
+        assert_eq!(preedit_text(&skk), "▼動く");
+    }
+
+    #[test]
+    fn cancelling_registration_returns_to_the_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        typed(&mut skk, "aiu");
+        // C-g で登録を取り消すと ▽ に戻り、見出し語は残る
+        assert_eq!(typed(&mut skk, "\x07"), "");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    #[test]
+    fn empty_registration_returns_to_the_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(typed(&mut skk, "\r"), "");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    #[test]
+    fn backspace_walks_out_of_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        typed(&mut skk, "ai");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+        typed(&mut skk, "\x7f");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]あ");
+        typed(&mut skk, "\x7f");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]");
+        // 空のところでもう一度押すと登録から抜ける
+        typed(&mut skk, "\x7f");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    #[test]
+    fn exhausting_the_candidates_starts_registration() {
+        let mut skk = skk_with(&[("あい", "/愛/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Ai ");
+        assert_eq!(preedit_text(&skk), "▼愛");
+        // 候補を出し切ったところで space を押すと登録へ
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "[登録:あい]");
+    }
+
+    #[test]
+    fn registration_nests() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        // 登録の中でさらに未知語を変換すると、もう一段積まれる
+        typed(&mut skk, "Ai ");
+        assert_eq!(preedit_text(&skk), "[[登録:あい]]");
+        typed(&mut skk, "l愛");
+        assert_eq!(typed(&mut skk, "\r"), "");
+        // 内側が確定すると外側の登録内容になる
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]愛");
+        assert_eq!(typed(&mut skk, "\r"), "愛");
+    }
+
+    #[test]
+    fn control_keys_do_not_leak_into_the_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        typed(&mut skk, "ai");
+        // 割り当ての無い C-z や矢印は登録内容に混ざらない
+        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child, Vec::<u8>::new());
+        assert_eq!(
+            skk.handle(Key::Raw(b"\x1b[A".to_vec())).to_child,
+            Vec::<u8>::new()
+        );
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
     }
 
     #[test]
