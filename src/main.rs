@@ -3,6 +3,7 @@
 //! 子プロセスを擬似端末で包み、標準入力を横取りして確定した文字列だけを渡す。
 //! 未確定の文字は端末へ直接重ね描きするので、子アプリの画面には現れない。
 
+mod config;
 mod dict;
 mod input;
 mod render;
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+use config::Config;
 use dict::Dict;
 use input::Decoder;
 use render::Overlay;
@@ -35,10 +37,12 @@ ttyskk — 端末の中で完結する SKK 日本語入力
 オプション:
     -h, --help       この使い方を表示する
     -V, --version    版を表示する
+    --check-config   設定ファイルを検査して終わる
 
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
     TTYSKK_USER_JISYO  利用者辞書のパス
+    TTYSKK_CONFIG      設定ファイルのパス (既定 ~/.config/ttyskk/config.toml)
     TTYSKK_NO_CURSOR   モードに応じたカーソルの形・色の変更をやめる
 
 キー操作 (かなモード):
@@ -57,6 +61,8 @@ enum Event {
     ChildEof,
     Input(Vec<u8>),
     Winch,
+    /// 設定ファイルが書き換わって読み直せた
+    Reconfigured(Box<Config>),
 }
 
 /// 端末を raw モードにし、終了時に必ず元へ戻す。
@@ -206,6 +212,16 @@ fn main() -> Result<()> {
                 println!("ttyskk {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
+            "--check-config" => {
+                let path = config::config_path();
+                Config::load(&path).with_context(|| format!("{}", path.display()))?;
+                if path.exists() {
+                    println!("ttyskk: {} に問題なし", path.display());
+                } else {
+                    println!("ttyskk: {} は無い (既定で動く)", path.display());
+                }
+                return Ok(());
+            }
             "--" => {}
             _ => command.push(first),
         }
@@ -227,7 +243,11 @@ fn main() -> Result<()> {
             "ttyskk: 共有辞書が見つからない。TTYSKK_JISYO でパスを指定できる。変換はできないが起動は続ける。"
         );
     }
-    let mut skk = Skk::new(dict);
+    // 設定は子を起こす前に読む。ここで駄目なら画面を触る前に知らせられる。
+    let config_path = config::config_path();
+    let cfg = Config::load(&config_path)
+        .with_context(|| format!("設定 {} を読めない", config_path.display()))?;
+    let mut skk = Skk::new(dict, cfg);
 
     let (rows, cols) = winsize();
 
@@ -330,6 +350,11 @@ fn main() -> Result<()> {
             }
         });
     }
+
+    // 設定ファイルの書き換えを見張る
+    config::watch_into(config_path, tx.clone(), |c| {
+        Event::Reconfigured(Box::new(c))
+    });
 
     // 位置を尋ねている間に打たれた文字は、まだ処理していないので改めて流し込む
     if !typeahead.is_empty() {
@@ -443,6 +468,7 @@ fn main() -> Result<()> {
                 request_cursor_report(&mut stdout);
                 awaiting_report = true;
             }
+            Event::Reconfigured(cfg) => skk.set_config(*cfg),
             Event::ChildEof => break,
         }
     }

@@ -3,15 +3,9 @@
 //! 未確定の文字は一切子プロセスへ送らない。確定した文字列だけを `to_child` に載せ、
 //! 途中経過は `preedit()` が返す区間列として重ね描きに回す。
 
+use crate::config::Config;
 use crate::dict::{Candidate, Dict};
 use crate::romaji::{self, Romaji};
-
-/// 一覧を出さずに一つずつ送る候補数。これを超えると横並びの一覧になる。
-const INLINE_CANDIDATES: usize = 4;
-/// 一覧一頁あたりの候補数。
-const PAGE_SIZE: usize = 7;
-/// 一覧から候補を選ぶキー。
-const SELECT_KEYS: [char; PAGE_SIZE] = ['a', 's', 'd', 'f', 'j', 'k', 'l'];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -103,11 +97,13 @@ pub struct Skk {
     /// 変換に使った見出し語 (学習の登録先)。
     dict_key: String,
     dict: Dict,
+    cfg: Config,
 }
 
 impl Skk {
-    pub fn new(dict: Dict) -> Self {
+    pub fn new(dict: Dict, cfg: Config) -> Self {
         Skk {
+            cfg,
             mode: Mode::Ascii,
             phase: Phase::Direct,
             romaji: Romaji::new(),
@@ -124,6 +120,15 @@ impl Skk {
 
     pub fn dict_mut(&mut self) -> &mut Dict {
         &mut self.dict
+    }
+
+    /// 設定ファイルが書き換わったときに差し替える。
+    ///
+    /// 変換の途中で入れ替わっても状態は壊れない。見出し語や候補は設定に依らず、
+    /// 参照するのは次のキーを解釈するときだけだから。一覧の頁の大きさが変わると
+    /// 表示中の頁の切れ目は変わるが、選んでいる候補そのものはずれない。
+    pub fn set_config(&mut self, cfg: Config) {
+        self.cfg = cfg;
     }
 
     /// 入力途中の表示。空なら重ね描きするものは無い。
@@ -189,7 +194,7 @@ impl Skk {
                         };
                         segs.push(Segment {
                             style,
-                            text: format!("{}:{}", SELECT_KEYS[n], self.candidates[i].text),
+                            text: format!("{}:{}", self.cfg.select[n], self.candidates[i].text),
                         });
                         if i + 1 < end {
                             segs.push(Segment {
@@ -217,13 +222,15 @@ impl Skk {
     }
 
     fn list_visible(&self) -> bool {
-        self.cand_index >= INLINE_CANDIDATES
+        self.cand_index >= self.cfg.inline_candidates
     }
 
     fn page_range(&self) -> (usize, usize) {
-        let page = (self.cand_index - INLINE_CANDIDATES) / PAGE_SIZE;
-        let start = INLINE_CANDIDATES + page * PAGE_SIZE;
-        (start, (start + PAGE_SIZE).min(self.candidates.len()))
+        let inline = self.cfg.inline_candidates;
+        let size = self.cfg.page_size();
+        let page = (self.cand_index - inline) / size;
+        let start = inline + page * size;
+        (start, (start + size).min(self.candidates.len()))
     }
 
     fn reset(&mut self) {
@@ -260,7 +267,7 @@ impl Skk {
         // ASCII / 全角英数モードはほぼ素通し
         if !self.mode.is_kana() {
             return match key {
-                Key::Ctrl(0x0a) => {
+                k if self.cfg.kana.contains(&k) => {
                     self.mode = Mode::Hiragana;
                     Response {
                         mode_changed: true,
@@ -278,13 +285,13 @@ impl Skk {
         }
 
         match key {
-            Key::Ctrl(0x0a) => {
-                // C-j: 途中のローマ字を確定させる
+            k if self.cfg.confirm.contains(&k) => {
+                // 途中のローマ字を確定させる
                 let out = self.romaji.flush();
                 Response::text(&self.shape(&out))
             }
-            Key::Ctrl(0x07) => {
-                // C-g: 途中のローマ字を捨てる
+            k if self.cfg.cancel.contains(&k) => {
+                // 途中のローマ字を捨てる
                 self.romaji.clear();
                 Response::default()
             }
@@ -298,21 +305,21 @@ impl Skk {
                     }
                 }
             }
-            Key::Char('l') if self.romaji.is_empty() => {
+            k if self.romaji.is_empty() && self.cfg.ascii.contains(&k) => {
                 self.mode = Mode::Ascii;
                 Response {
                     mode_changed: true,
                     ..Default::default()
                 }
             }
-            Key::Char('L') if self.romaji.is_empty() => {
+            k if self.romaji.is_empty() && self.cfg.zenkaku.contains(&k) => {
                 self.mode = Mode::ZenkakuAscii;
                 Response {
                     mode_changed: true,
                     ..Default::default()
                 }
             }
-            Key::Char('q') if self.romaji.is_empty() => {
+            k if self.romaji.is_empty() && self.cfg.katakana.contains(&k) => {
                 self.mode = if self.mode == Mode::Hiragana {
                     Mode::Katakana
                 } else {
@@ -323,12 +330,12 @@ impl Skk {
                     ..Default::default()
                 }
             }
-            Key::Char('Q') => {
+            k if self.cfg.start_conversion.contains(&k) => {
                 self.phase = Phase::Composing;
                 self.romaji.clear();
                 Response::default()
             }
-            Key::Char('/') if self.romaji.is_empty() => {
+            k if self.romaji.is_empty() && self.cfg.abbrev.contains(&k) => {
                 self.phase = Phase::Composing;
                 self.abbrev = true;
                 Response::default()
@@ -360,12 +367,19 @@ impl Skk {
 
     fn handle_composing(&mut self, key: Key) -> Response {
         match key {
-            Key::Ctrl(0x07) => {
-                // C-g: 取り消して何も出さない
+            k if self.cfg.cancel.contains(&k) => {
+                // 取り消して何も出さない
                 self.reset();
                 Response::default()
             }
-            Key::Ctrl(0x0a) | Key::Enter => {
+            // Enter は割り当てに依らず確定として扱う。端末では改行が「コマンドの
+            // 実行」を意味するので、変換の途中で子へ送るわけにいかない。
+            Key::Enter => {
+                let text = self.confirm_reading();
+                self.reset();
+                Response::text(&text)
+            }
+            k if self.cfg.confirm.contains(&k) => {
                 let text = self.confirm_reading();
                 self.reset();
                 Response::text(&text)
@@ -381,12 +395,12 @@ impl Skk {
                 }
                 Response::default()
             }
-            Key::Char(' ') => {
+            k if self.cfg.convert.contains(&k) => {
                 self.start_conversion();
                 Response::default()
             }
-            Key::Char('q') if self.okuri_head.is_none() && !self.abbrev => {
-                // q: 見出し語をカタカナ (カタカナモードならひらがな) にして確定
+            k if self.okuri_head.is_none() && !self.abbrev && self.cfg.katakana.contains(&k) => {
+                // 見出し語をカタカナ (カタカナモードならひらがな) にして確定
                 let flushed = self.romaji.flush();
                 self.reading.push_str(&flushed);
                 let text = if self.mode == Mode::Katakana {
@@ -487,27 +501,32 @@ impl Skk {
 
     fn handle_selecting(&mut self, key: Key) -> Response {
         match key {
-            Key::Ctrl(0x07) => {
+            k if self.cfg.cancel.contains(&k) => {
                 self.phase = Phase::Composing;
                 self.candidates.clear();
                 self.cand_index = 0;
                 Response::default()
             }
-            Key::Ctrl(0x0a) | Key::Enter => {
+            // Enter を確定に固定する理由は handle_composing と同じ
+            Key::Enter => {
                 let text = self.commit_candidate();
                 Response::text(&text)
             }
-            Key::Char(' ') => {
+            k if self.cfg.confirm.contains(&k) => {
+                let text = self.commit_candidate();
+                Response::text(&text)
+            }
+            k if self.cfg.convert.contains(&k) => {
                 self.next_candidate();
                 Response::default()
             }
-            Key::Char('x') => {
+            k if self.cfg.previous.contains(&k) => {
                 self.prev_candidate();
                 Response::default()
             }
-            Key::Char(c) if self.list_visible() && SELECT_KEYS.contains(&c) => {
+            Key::Char(c) if self.list_visible() && self.cfg.select.contains(&c) => {
                 let (start, end) = self.page_range();
-                let n = SELECT_KEYS.iter().position(|&k| k == c).unwrap();
+                let n = self.cfg.select.iter().position(|&k| k == c).unwrap();
                 if start + n < end {
                     self.cand_index = start + n;
                     let text = self.commit_candidate();
@@ -546,14 +565,14 @@ impl Skk {
         if self.candidates.is_empty() {
             return;
         }
-        if self.cand_index + 1 < INLINE_CANDIDATES {
+        if self.cand_index + 1 < self.cfg.inline_candidates {
             self.cand_index += 1;
             return;
         }
         if !self.list_visible() {
             // 一覧の表示を始める
-            if self.candidates.len() > INLINE_CANDIDATES {
-                self.cand_index = INLINE_CANDIDATES;
+            if self.candidates.len() > self.cfg.inline_candidates {
+                self.cand_index = self.cfg.inline_candidates;
             }
             return;
         }
@@ -575,9 +594,11 @@ impl Skk {
             return;
         }
         let (start, _) = self.page_range();
-        self.cand_index = start.saturating_sub(PAGE_SIZE).max(INLINE_CANDIDATES);
-        if start == INLINE_CANDIDATES {
-            self.cand_index = INLINE_CANDIDATES - 1;
+        self.cand_index = start
+            .saturating_sub(self.cfg.page_size())
+            .max(self.cfg.inline_candidates);
+        if start == self.cfg.inline_candidates {
+            self.cand_index = self.cfg.inline_candidates - 1;
         }
     }
 
@@ -627,7 +648,7 @@ mod tests {
         }
         std::fs::write(&sys, body).unwrap();
         let dict = Dict::load(&[sys], dir.join("user.dict"), None).unwrap();
-        Skk::new(dict)
+        Skk::new(dict, Config::default())
     }
 
     fn typed(skk: &mut Skk, s: &str) -> String {
@@ -646,6 +667,77 @@ mod tests {
 
     fn preedit_text(skk: &Skk) -> String {
         skk.preedit().into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn custom_bindings_are_honoured() {
+        let cfg = Config::parse(
+            r#"
+            [keys]
+            kana = "C-o"
+            ascii = "@"
+            katakana = "~"
+            convert = "C-space"
+            previous = "-"
+            select = ["1", "2"]
+
+            [candidates]
+            inline = 1
+            "#,
+        )
+        .unwrap();
+        let mut skk = skk_with(&[("あい", "/愛/藍/相/合/"), ("かんじ", "/漢字/")]);
+        skk.set_config(cfg);
+
+        // C-j はもう効かない (素のまま子へ行く)
+        assert_eq!(skk.handle(Key::Ctrl(0x0a)).to_child, vec![0x0a]);
+        // C-o でかなモードへ
+        assert!(skk.handle(Key::Ctrl(0x0f)).mode_changed);
+        assert_eq!(typed(&mut skk, "ai"), "あい");
+        // ~ でカタカナ、@ で ASCII
+        skk.handle(Key::Char('~'));
+        assert_eq!(skk.mode, Mode::Katakana);
+        skk.handle(Key::Char('@'));
+        assert_eq!(skk.mode, Mode::Ascii);
+
+        // 変換は C-space、一覧は inline = 1 なので 2 番目から出て 1 2 で選ぶ
+        skk.handle(Key::Ctrl(0x0f));
+        typed(&mut skk, "Ai");
+        skk.handle(Key::Ctrl(0x00));
+        assert_eq!(preedit_text(&skk), "▼愛");
+        skk.handle(Key::Ctrl(0x00));
+        assert!(preedit_text(&skk).contains("1:藍"));
+        assert!(preedit_text(&skk).contains("2:相"));
+        assert_eq!(skk.handle(Key::Char('2')).to_child, "相".as_bytes());
+    }
+
+    #[test]
+    fn reconfiguring_mid_conversion_keeps_the_state() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/感じ/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        // 変換の途中で設定が差し替わっても見出し語と候補は残る
+        let cfg = Config::parse("[keys]\nconvert = \"C-n\"\n").unwrap();
+        skk.set_config(cfg);
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        skk.handle(Key::Ctrl(0x0e));
+        assert_eq!(preedit_text(&skk), "▼感じ");
+        // 古い割り当ての space は候補を確定してから子へ流れる
+        assert_eq!(typed(&mut skk, " "), "感じ ");
+    }
+
+    #[test]
+    fn enter_confirms_regardless_of_bindings() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.set_config(Config::parse("[keys]\nconfirm = \"C-m\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        // 変換中の Enter は改行を送らずに確定する
+        let r = skk.handle(Key::Enter);
+        assert_eq!(String::from_utf8(r.to_child).unwrap(), "漢字");
+        // 直接入力に戻れば Enter は素通し (コマンドの実行を邪魔しない)
+        assert_eq!(skk.handle(Key::Enter).to_child, vec![0x0d]);
     }
 
     #[test]
