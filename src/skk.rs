@@ -3,7 +3,7 @@
 //! 未確定の文字は一切子プロセスへ送らない。確定した文字列だけを `to_child` に載せ、
 //! 途中経過は `preedit()` が返す区間列として重ね描きに回す。
 
-use crate::config::Config;
+use crate::config::{Config, Layout};
 use crate::dict::{Candidate, Dict};
 use crate::num;
 use crate::romaji::{self, Romaji};
@@ -70,6 +70,24 @@ pub enum Style {
 pub struct Segment {
     pub style: Style,
     pub text: String,
+}
+
+/// 重ね描きするもの。
+///
+/// 候補一覧を浮かせる設定では、一覧だけがカーソルから離れた行に出る。
+/// 描く場所が違うので受け渡しの段階で分けておく。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Preedit {
+    /// カーソル位置から描く
+    pub at_cursor: Vec<Segment>,
+    /// 別の行に一行で浮かせる (空なら無し)
+    pub floating: Vec<Segment>,
+}
+
+impl Preedit {
+    pub fn is_empty(&self) -> bool {
+        self.at_cursor.is_empty() && self.floating.is_empty()
+    }
 }
 
 #[derive(Default)]
@@ -201,8 +219,9 @@ impl Skk {
     }
 
     /// 入力途中の表示。空なら重ね描きするものは無い。
-    pub fn preedit(&self) -> Vec<Segment> {
+    pub fn preedit(&self) -> Preedit {
         let mut segs = Vec::new();
+        let mut floating = Vec::new();
         // 登録中は見出しと打ち込み済みの内容を前に置く。入れ子は括弧の重なりで表す。
         if let Some(reg) = self.regs.last() {
             let depth = self.regs.len();
@@ -269,10 +288,16 @@ impl Skk {
                     });
                 }
                 if self.list_visible() {
-                    segs.push(Segment {
-                        style: Style::ListItem,
-                        text: " ".into(),
-                    });
+                    let list = &mut match self.cfg.layout {
+                        Layout::Inline => &mut segs,
+                        Layout::Float => &mut floating,
+                    };
+                    if self.cfg.layout == Layout::Inline {
+                        list.push(Segment {
+                            style: Style::ListItem,
+                            text: " ".into(),
+                        });
+                    }
                     let (start, end) = self.page_range();
                     for (n, i) in (start..end).enumerate() {
                         let style = if i == self.cand_index {
@@ -280,7 +305,7 @@ impl Skk {
                         } else {
                             Style::ListItem
                         };
-                        segs.push(Segment {
+                        list.push(Segment {
                             style,
                             text: format!(
                                 "{}:{}",
@@ -289,16 +314,27 @@ impl Skk {
                             ),
                         });
                         if i + 1 < end {
-                            segs.push(Segment {
+                            list.push(Segment {
                                 style: Style::ListItem,
                                 text: " ".into(),
                             });
                         }
                     }
+                    // 残りの件数を添える (ddskk と同じ)
+                    let rest = self.candidates.len() - end;
+                    if rest > 0 {
+                        list.push(Segment {
+                            style: Style::ListItem,
+                            text: format!("  [残り {rest}]"),
+                        });
+                    }
                 }
             }
         }
-        segs
+        Preedit {
+            at_cursor: segs,
+            floating,
+        }
     }
 
     fn display_reading(&self) -> String {
@@ -1089,7 +1125,12 @@ mod tests {
     }
 
     fn preedit_text(skk: &Skk) -> String {
-        skk.preedit().into_iter().map(|s| s.text).collect()
+        let p = skk.preedit();
+        p.at_cursor
+            .into_iter()
+            .chain(p.floating)
+            .map(|s| s.text)
+            .collect()
     }
 
     #[test]
@@ -1557,6 +1598,44 @@ mod tests {
         typed(&mut skk, "Nihongo");
         // 見出し語もモードに合わせて出る
         assert_eq!(preedit_text(&skk), "▽ﾆﾎﾝｺﾞ");
+    }
+
+    #[test]
+    fn float_layout_moves_the_list_off_the_line() {
+        let mut skk = skk_with(&[("あい", "/愛/藍/相/合/挨/曖/哀/")]);
+        skk.set_config(Config::parse("[candidates]\nlayout = \"float\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Ai     ");
+        let p = skk.preedit();
+        // 行内は ▼ だけ。一覧は浮かせる側へ。
+        assert_eq!(
+            p.at_cursor
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "▼挨"
+        );
+        assert!(p.floating.iter().any(|s| s.text.contains("挨")));
+        assert!(!p.floating.is_empty());
+    }
+
+    #[test]
+    fn inline_layout_keeps_everything_on_the_line() {
+        let mut skk = skk_with(&[("あい", "/愛/藍/相/合/挨/曖/哀/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Ai     ");
+        let p = skk.preedit();
+        assert!(p.floating.is_empty());
+        assert!(p.at_cursor.iter().any(|s| s.text.contains("挨")));
+    }
+
+    #[test]
+    fn shows_how_many_candidates_remain() {
+        // 一覧に載りきらない分は件数で知らせる (ddskk と同じ)
+        let mut skk = skk_with(&[("あい", "/1/2/3/4/5/6/7/8/9/10/11/12/13/14/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Ai     ");
+        assert!(preedit_text(&skk).contains("[残り 3]"));
     }
 
     #[test]

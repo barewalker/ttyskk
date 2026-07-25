@@ -15,6 +15,15 @@ use crate::skk::Key;
 /// 設定ファイルを見張る間隔。
 const POLL: Duration = Duration::from_secs(1);
 
+/// 候補一覧の出し方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// 入力中の行に続けて横並び。行が伸びるぶん折り返すことがある。
+    Inline,
+    /// カーソルの下の行 (最下行なら上の行) に一行で浮かせる。
+    Float,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// ASCII / 全角英数から かなモードへ入る
@@ -51,6 +60,8 @@ pub struct Config {
     pub select: Vec<char>,
     /// 一覧を出さずに一つずつ送る候補数
     pub inline_candidates: usize,
+    /// 候補一覧の出し方
+    pub layout: Layout,
     /// 接頭辞・接尾辞に続けて確定した語を、繋げて辞書に覚えるか。
     ///
     /// 「さい>」→再 のあと「りよう」→利用 と確定したら `さいりよう /再利用/` を
@@ -84,6 +95,7 @@ impl Default for Config {
             affix: vec![Key::Char('>')],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
+            layout: Layout::Inline,
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
         }
@@ -177,6 +189,13 @@ impl Config {
                             bail!("candidates.inline は 1 以上");
                         }
                         cfg.inline_candidates = n as usize;
+                    }
+                    "layout" => {
+                        cfg.layout = match value.as_str() {
+                            Some("inline") => Layout::Inline,
+                            Some("float") => Layout::Float,
+                            _ => bail!("candidates.layout は \"inline\" か \"float\""),
+                        }
                     }
                     other => bail!("candidates.{other} は知らない項目"),
                 }
