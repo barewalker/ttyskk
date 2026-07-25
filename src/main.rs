@@ -190,18 +190,28 @@ fn read_cursor_report(timeout: Duration) -> (Option<(usize, usize)>, Vec<u8>) {
 /// DECSCUSR は 3 つの形と点滅の有無しか持たないので、よく使う 3 つのモードに
 /// 形を割り当て、めったに使わない全角英数だけ点滅で区別する。
 fn cursor_indicator(mode: Mode, marker: Marker) -> &'static str {
-    // カーソルの真下に色を敷く方式では、ブロックのカーソルがその色を覆ってしまう。
-    // 形は下線に固定し、モードは色だけで表す (形 = 動いている合図)。
-    // 右隣に置く方式なら覆われないので、形はモードごとのままでよい。
-    if marker == Marker::Cell {
-        return "\x1b[4 q\x1b]112\x07";
-    }
-    match mode {
-        Mode::Ascii => "\x1b[4 q\x1b]112\x07",           // 固定の下線
-        Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07", // 固定のブロック
-        Mode::Katakana => "\x1b[6 q\x1b]12;#5fd7ff\x07", // 固定のバー
-        Mode::HankakuKatakana => "\x1b[5 q\x1b]12;#5fafaf\x07", // 点滅するバー
-        Mode::ZenkakuAscii => "\x1b[1 q\x1b]12;#d787ff\x07", // 点滅するブロック
+    match marker {
+        // カーソルの真下に色を敷く方式では、ブロックのカーソルがその色を覆う。
+        // 形は下線に固定し、モードは色だけで表す (形 = 動いている合図)。
+        Marker::Cell => "\x1b[4 q\x1b]112\x07",
+        // 右隣に色の箱を置く方式では、カーソル自体には色を付けない。
+        // 付けると色付きのものが二つ並んで見えて紛らわしい。色は箱が担い、
+        // カーソルは形だけでモードを表す。
+        Marker::Beside => match mode {
+            Mode::Ascii => "\x1b[4 q\x1b]112\x07",           // 固定の下線
+            Mode::Hiragana => "\x1b[2 q\x1b]112\x07",        // 固定のブロック
+            Mode::Katakana => "\x1b[6 q\x1b]112\x07",        // 固定のバー
+            Mode::HankakuKatakana => "\x1b[5 q\x1b]112\x07", // 点滅するバー
+            Mode::ZenkakuAscii => "\x1b[1 q\x1b]112\x07",    // 点滅するブロック
+        },
+        // 印を出さない / 文字で出す場合は、カーソルの色も手掛かりとして使う
+        _ => match mode {
+            Mode::Ascii => "\x1b[4 q\x1b]112\x07",           // 固定の下線
+            Mode::Hiragana => "\x1b[2 q\x1b]12;#7fd75f\x07", // 固定のブロック
+            Mode::Katakana => "\x1b[6 q\x1b]12;#5fd7ff\x07", // 固定のバー
+            Mode::HankakuKatakana => "\x1b[5 q\x1b]12;#5fafaf\x07", // 点滅するバー
+            Mode::ZenkakuAscii => "\x1b[1 q\x1b]12;#d787ff\x07", // 点滅するブロック
+        },
     }
 }
 
