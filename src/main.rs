@@ -529,7 +529,7 @@ fn main() -> Result<()> {
                 let mut mode_changed = false;
                 for key in decoder.feed(&data) {
                     let r = skk.handle(key);
-                    to_child.extend(r.to_child);
+                    to_child.extend(r.to_child());
                     mode_changed |= r.mode_changed;
                 }
                 let had_overlay = !overlay.is_empty();

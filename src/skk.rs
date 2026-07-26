@@ -1,7 +1,8 @@
 //! SKK の状態機械。
 //!
-//! 未確定の文字は一切子プロセスへ送らない。確定した文字列だけを `to_child` に載せ、
-//! 途中経過は `preedit()` が返す区間列として重ね描きに回す。
+//! 未確定の文字は一切外へ出さない。確定した文字列だけを [`Response::commit`] に載せ、
+//! 途中経過は [`Skk::preedit`] が返す区間列、候補は [`Skk::candidates`] に回す。
+//! 解釈しなかったキーは [`Response::passthrough`] としてそのまま返す。
 
 use crate::config::{Config, Layout, Marker};
 use crate::dict::{Candidate, Dict};
@@ -150,10 +151,22 @@ impl Preedit {
     }
 }
 
-#[derive(Default)]
+/// キーを一つ処理した結果。
+///
+/// **確定した文字列と、素通しするキーは別物**として持つ。端末ではどちらも子プロセスの
+/// 標準入力という同じ穴へ流すので [`Response::to_child`] で一本に組めるが、GUI の
+/// 入力メソッドでは前者が「文字列の確定」、後者が「このキーは使わなかった」という
+/// まったく別の知らせになる。一本のバイト列にしてしまうと、受け取った側で二度と
+/// 分けられない (境目を知るには端末の作法が要り、それはこの層の持ち物ではない)。
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Response {
-    /// 子プロセスへ流すバイト列。
-    pub to_child: Vec<u8>,
+    /// 確定した文字列。
+    pub commit: String,
+    /// 解釈しなかったキー。呼ぶ側が自分で扱う。
+    ///
+    /// 確定と同時に起きることがある — ▽ の途中で矢印を押すと、見出し語を確定した
+    /// うえで矢印を渡す。
+    pub passthrough: Option<Key>,
     /// 入力モードが変わったか (カーソル色の更新に使う)。
     pub mode_changed: bool,
 }
@@ -161,9 +174,23 @@ pub struct Response {
 impl Response {
     fn text(s: &str) -> Self {
         Response {
-            to_child: s.as_bytes().to_vec(),
-            mode_changed: false,
+            commit: s.to_string(),
+            ..Default::default()
         }
+    }
+
+    /// 端末へ流すバイト列。確定した文字列に、素通しするキーを続けたもの。
+    pub fn to_child(&self) -> Vec<u8> {
+        let mut out = self.commit.as_bytes().to_vec();
+        if let Some(k) = &self.passthrough {
+            out.extend(raw_bytes(k));
+        }
+        out
+    }
+
+    /// 子へ出るものが何も無いか。
+    pub fn is_empty(&self) -> bool {
+        self.commit.is_empty() && self.passthrough.is_none()
     }
 }
 
@@ -634,17 +661,22 @@ impl Skk {
     /// 子へ出るはずだった文字を、いちばん内側の登録内容へ回す。
     ///
     /// 制御文字は捨てる。割り当ての無い `C-z` などがそのまま混ざると、
-    /// 辞書に制御文字を含む項目ができてしまうため。
+    /// 辞書に制御文字を含む項目ができてしまうため。素通しするキーのうち拾うのは
+    /// 文字だけ (ASCII モードで打った英字など)。矢印のようなキーは捨てる。
     fn capture(&mut self, r: Response) -> Response {
         let Some(reg) = self.regs.last_mut() else {
             return r;
         };
-        if let Ok(s) = String::from_utf8(r.to_child) {
-            reg.buffer.extend(s.chars().filter(|c| !c.is_control()));
+        reg.buffer
+            .extend(r.commit.chars().filter(|c| !c.is_control()));
+        if let Some(Key::Char(c)) = r.passthrough
+            && !c.is_control()
+        {
+            reg.buffer.push(c);
         }
         Response {
-            to_child: Vec::new(),
             mode_changed: r.mode_changed,
+            ..Default::default()
         }
     }
 
@@ -710,7 +742,7 @@ impl Skk {
     fn handle_direct(&mut self, key: Key) -> Response {
         let r = self.direct_inner(key);
         // 何か出したなら、接頭辞と次の語はもう隣り合っていない
-        if !r.to_child.is_empty() {
+        if !r.is_empty() {
             self.last_commit = None;
         }
         r
@@ -731,8 +763,8 @@ impl Skk {
                     Response::text(&romaji::to_zenkaku(c).to_string())
                 }
                 k => Response {
-                    to_child: raw_bytes(&k),
-                    mode_changed: false,
+                    passthrough: Some(k),
+                    ..Default::default()
                 },
             };
         }
@@ -753,7 +785,7 @@ impl Skk {
                     Response::default()
                 } else {
                     Response {
-                        to_child: vec![0x7f],
+                        passthrough: Some(Key::Backspace),
                         ..Default::default()
                     }
                 }
@@ -817,10 +849,9 @@ impl Skk {
             k => {
                 // 制御キーや矢印は素通し。途中のローマ字は先に確定させる。
                 let flushed = self.romaji.flush();
-                let mut bytes = self.shape(&flushed).into_bytes();
-                bytes.extend(raw_bytes(&k));
                 Response {
-                    to_child: bytes,
+                    commit: self.shape(&flushed),
+                    passthrough: Some(k),
                     mode_changed: false,
                 }
             }
@@ -963,10 +994,9 @@ impl Skk {
                 // 想定外のキーは見出し語を確定してから素通しする
                 let text = self.confirm_reading();
                 self.reset();
-                let mut bytes = text.into_bytes();
-                bytes.extend(raw_bytes(&k));
                 Response {
-                    to_child: bytes,
+                    commit: text,
+                    passthrough: Some(k),
                     mode_changed: false,
                 }
             }
@@ -1123,20 +1153,18 @@ impl Skk {
             Key::Char(c) => {
                 // 候補を確定してから、その文字を新しい入力として処理する
                 let text = self.commit_candidate();
-                let mut r = self.dispatch(Key::Char(c));
-                let mut bytes = text.into_bytes();
-                bytes.append(&mut r.to_child);
+                let r = self.dispatch(Key::Char(c));
                 Response {
-                    to_child: bytes,
+                    commit: text + &r.commit,
+                    passthrough: r.passthrough,
                     mode_changed: r.mode_changed,
                 }
             }
             k => {
                 let text = self.commit_candidate();
-                let mut bytes = text.into_bytes();
-                bytes.extend(raw_bytes(&k));
                 Response {
-                    to_child: bytes,
+                    commit: text,
+                    passthrough: Some(k),
                     mode_changed: false,
                 }
             }
@@ -1279,7 +1307,7 @@ mod tests {
                 '\x7f' => Key::Backspace,
                 c => Key::Char(c),
             };
-            out.extend(skk.handle(key).to_child);
+            out.extend(skk.handle(key).to_child());
         }
         String::from_utf8(out).unwrap()
     }
@@ -1438,12 +1466,51 @@ mod tests {
         typed(&mut skk, "Kanji ");
         typed(&mut skk, "ai");
         // 割り当ての無い C-z や矢印は登録内容に混ざらない
-        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child, Vec::<u8>::new());
+        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child(), Vec::<u8>::new());
         assert_eq!(
-            skk.handle(Key::Raw(b"\x1b[A".to_vec())).to_child,
+            skk.handle(Key::Raw(b"\x1b[A".to_vec())).to_child(),
             Vec::<u8>::new()
         );
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 確定した文字列と、解釈しなかったキーは別々に取れる。
+    ///
+    /// 端末では一本のバイト列に組んで子へ流すが、GUI の入力メソッドでは前者が
+    /// 「文字列の確定」、後者が「このキーは使わなかった」というまったく別の知らせ
+    /// になる。混ぜてしまうと受け取った側で分けられない。
+    #[test]
+    fn commit_and_passthrough_come_apart() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+
+        // ▽ の途中で矢印。見出し語を確定したうえで矢印を渡す
+        let r = skk.handle(Key::Raw(b"\x1b[A".to_vec()));
+        assert_eq!(r.commit, "かんじ");
+        assert_eq!(r.passthrough, Some(Key::Raw(b"\x1b[A".to_vec())));
+        // 端末向けには一本に組める
+        assert_eq!(r.to_child(), "かんじ\x1b[A".as_bytes());
+
+        // 確定だけの場合は素通しが無い
+        let r = skk.handle(Key::Char('a'));
+        assert_eq!((r.commit.as_str(), r.passthrough), ("あ", None));
+    }
+
+    /// 登録の途中で ASCII モードにして打った英字も、登録内容に入る。
+    ///
+    /// ASCII モードの文字は「解釈しなかったキー」として返るので、素通しの側も
+    /// 見ないと取りこぼす。
+    #[test]
+    fn ascii_typing_reaches_the_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]");
+        typed(&mut skk, "l");
+        typed(&mut skk, "abc");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]abc");
+        assert_eq!(typed(&mut skk, "\r"), "abc");
     }
 
     /// 候補は端末向けの組み上げを通さず、そのまま取り出せる。
@@ -1491,7 +1558,7 @@ mod tests {
     /// ここではキーを直に渡す (切り出しは `input` のテストが見ている)。
     fn pasted(skk: &mut Skk, text: &str) -> String {
         let r = skk.handle(Key::Paste(text.as_bytes().to_vec()));
-        String::from_utf8(r.to_child).unwrap()
+        String::from_utf8(r.to_child()).unwrap()
     }
 
     /// 貼り付けた中身はローマ字変換にもモード切り替えにも回さない。
@@ -1543,7 +1610,7 @@ mod tests {
         typed(&mut skk, "ai");
         // Esc は子へ渡りつつ、モードは ASCII に戻る (vim の挿入モードを抜ける動作)
         let r = skk.handle(Key::Esc);
-        assert_eq!(r.to_child, vec![0x1b]);
+        assert_eq!(r.to_child(), vec![0x1b]);
         assert!(r.mode_changed);
         assert_eq!(skk.mode, Mode::Ascii);
         // 以降はそのまま英字が通る
@@ -1558,7 +1625,7 @@ mod tests {
         assert_eq!(preedit_text(&skk), "▼漢字");
         // 変換中に Esc を押すと、候補を確定してから抜ける
         let r = skk.handle(Key::Esc);
-        assert_eq!(String::from_utf8(r.to_child).unwrap(), "漢字\u{1b}");
+        assert_eq!(String::from_utf8(r.to_child()).unwrap(), "漢字\u{1b}");
         assert_eq!(skk.mode, Mode::Ascii);
     }
 
@@ -1580,12 +1647,12 @@ mod tests {
         let mut skk = skk_with(&[]);
         skk.handle(Key::Ctrl(0x0a));
         let r = skk.handle(Key::Ctrl(0x03));
-        assert_eq!(r.to_child, vec![0x03]);
+        assert_eq!(r.to_child(), vec![0x03]);
         assert_eq!(skk.mode, Mode::Ascii);
 
         skk.handle(Key::Ctrl(0x0a));
         let r = skk.handle(Key::Ctrl(0x04));
-        assert_eq!(r.to_child, vec![0x04]);
+        assert_eq!(r.to_child(), vec![0x04]);
         assert_eq!(skk.mode, Mode::Hiragana, "C-d では抜けない");
     }
 
@@ -1595,7 +1662,7 @@ mod tests {
         skk.set_config(Config::parse("[behavior]\nascii_keys = []\n").unwrap());
         skk.handle(Key::Ctrl(0x0a));
         let r = skk.handle(Key::Esc);
-        assert_eq!(r.to_child, vec![0x1b]);
+        assert_eq!(r.to_child(), vec![0x1b]);
         assert_eq!(skk.mode, Mode::Hiragana);
     }
 
@@ -1668,9 +1735,9 @@ mod tests {
     fn tab_outside_conversion_reaches_the_child() {
         let mut skk = skk_with(&[("かんじ", "/漢字/")]);
         // ASCII でもかなでも、直接入力中の TAB は子へ渡す (シェルの補完を殺さない)
-        assert_eq!(skk.handle(Key::Tab).to_child, vec![0x09]);
+        assert_eq!(skk.handle(Key::Tab).to_child(), vec![0x09]);
         skk.handle(Key::Ctrl(0x0a));
-        assert_eq!(skk.handle(Key::Tab).to_child, vec![0x09]);
+        assert_eq!(skk.handle(Key::Tab).to_child(), vec![0x09]);
     }
 
     #[test]
@@ -1864,7 +1931,7 @@ mod tests {
         assert_eq!(preedit_text(&skk), "▽にほんご");
         // ▽ の途中の C-q は見出し語を半角カタカナにして確定する
         let r = skk.handle(Key::Ctrl(0x11));
-        assert_eq!(String::from_utf8(r.to_child).unwrap(), "ﾆﾎﾝｺﾞ");
+        assert_eq!(String::from_utf8(r.to_child()).unwrap(), "ﾆﾎﾝｺﾞ");
         assert!(preedit_text(&skk).is_empty());
     }
 
@@ -2066,7 +2133,7 @@ mod tests {
         skk.set_config(cfg);
 
         // C-j はもう効かない (素のまま子へ行く)
-        assert_eq!(skk.handle(Key::Ctrl(0x0a)).to_child, vec![0x0a]);
+        assert_eq!(skk.handle(Key::Ctrl(0x0a)).to_child(), vec![0x0a]);
         // C-o でかなモードへ
         assert!(skk.handle(Key::Ctrl(0x0f)).mode_changed);
         assert_eq!(typed(&mut skk, "ai"), "あい");
@@ -2084,7 +2151,7 @@ mod tests {
         skk.handle(Key::Ctrl(0x00));
         assert!(preedit_text(&skk).contains("1:藍"));
         assert!(preedit_text(&skk).contains("2:相"));
-        assert_eq!(skk.handle(Key::Char('2')).to_child, "相".as_bytes());
+        assert_eq!(skk.handle(Key::Char('2')).to_child(), "相".as_bytes());
     }
 
     #[test]
@@ -2111,9 +2178,9 @@ mod tests {
         typed(&mut skk, "Kanji ");
         // 変換中の Enter は改行を送らずに確定する
         let r = skk.handle(Key::Enter);
-        assert_eq!(String::from_utf8(r.to_child).unwrap(), "漢字");
+        assert_eq!(String::from_utf8(r.to_child()).unwrap(), "漢字");
         // 直接入力に戻れば Enter は素通し (コマンドの実行を邪魔しない)
-        assert_eq!(skk.handle(Key::Enter).to_child, vec![0x0d]);
+        assert_eq!(skk.handle(Key::Enter).to_child(), vec![0x0d]);
     }
 
     #[test]
@@ -2225,13 +2292,13 @@ mod tests {
     #[test]
     fn control_keys_reach_the_child() {
         let mut skk = skk_with(&[]);
-        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child, vec![0x1a]);
+        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child(), vec![0x1a]);
         skk.handle(Key::Ctrl(0x0a)); // かなモードへ
-        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child, vec![0x1a]);
+        assert_eq!(skk.handle(Key::Ctrl(0x1a)).to_child(), vec![0x1a]);
         // 入力途中のローマ字があっても、確定させたうえで届く
         skk.handle(Key::Char('k'));
         let r = skk.handle(Key::Ctrl(0x1a));
-        assert_eq!(r.to_child, vec![0x1a]);
+        assert_eq!(r.to_child(), vec![0x1a]);
     }
 
     /// 変換中に矢印キーなどが来たら、見出し語を確定してから素通しする。
@@ -2241,7 +2308,7 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         typed(&mut skk, "Kanji");
         let r = skk.handle(Key::Raw(b"\x1b[A".to_vec()));
-        assert_eq!(r.to_child, "かんじ\x1b[A".as_bytes());
+        assert_eq!(r.to_child(), "かんじ\x1b[A".as_bytes());
         assert_eq!(preedit_text(&skk), "");
     }
 

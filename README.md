@@ -500,6 +500,21 @@ ttyskk = { version = "0.1", default-features = false }
 キーを一つずつ `Skk::handle` に渡し、`Response` を出力に回す。入力中の表示は
 `Skk::preedit`、候補の一覧は `Skk::candidates` で、いずれも組み上げ前の形で取れる。
 
+`Response` は**確定した文字列と、解釈しなかったキーを分けて**返す。
+
+```rust
+pub struct Response {
+    pub commit: String,             // 確定した文字列
+    pub passthrough: Option<Key>,   // 解釈しなかったキー
+    pub mode_changed: bool,
+}
+```
+
+この二つは同時に起きる — ▽ の途中で矢印を押すと、見出し語を確定したうえで矢印を渡す。
+端末ではどちらも子プロセスの標準入力という同じ穴へ流すので `Response::to_child()` で
+一本のバイト列に組めるが、GUI の入力メソッドでは前者が「文字列の確定」、後者が
+「このキーは使わなかった」というまったく別の知らせになる。
+
 ## まだ無いもの
 
 - 数値変換の `#4` (数値再変換) — `SKK-JISYO.L` に 1 件のみ。辞書を再帰的に引く必要がある
