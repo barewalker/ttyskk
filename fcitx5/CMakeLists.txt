@@ -29,13 +29,17 @@ set(CAPI_HEADER "${CARGO_ROOT}/capi/ttyskk.h")
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
 # ヘッダは cargo が (build.rs から cbindgen で) 一緒に作る。
-add_custom_command(
-  OUTPUT ${CAPI_LIB} ${CAPI_HEADER}
+#
+# **毎回 cargo を呼ぶ。** add_custom_command(OUTPUT ...) だと、出来上がりが既にある
+# 限り再実行されない (DEPENDS にソースを並べない限り)。capi を直したのに古い
+# libttyskk.a がリンクされ、**実行時に undefined symbol で落ちる**。cargo は自分で
+# 差分を見るので、毎回呼んでも無駄にならない。
+add_custom_target(ttyskk-capi ALL
   COMMAND ${CARGO_EXECUTABLE} build --release -p ttyskk-capi
   WORKING_DIRECTORY ${CARGO_ROOT}
+  BYPRODUCTS ${CAPI_LIB} ${CAPI_HEADER}
   COMMENT "変換エンジン (Rust) を組み立てる"
   VERBATIM)
-add_custom_target(ttyskk-capi DEPENDS ${CAPI_LIB} ${CAPI_HEADER})
 
 # ---- addon ----
 #
@@ -48,6 +52,9 @@ target_include_directories(ttyskk PRIVATE "${CARGO_ROOT}/capi")
 target_link_libraries(ttyskk PRIVATE Fcitx5::Core ${CAPI_LIB})
 # Rust の標準ライブラリが要求するもの
 target_link_libraries(ttyskk PRIVATE pthread dl m)
+# 呼べない関数があればリンクの時点で止める。実行時の undefined symbol まで
+# 持ち越すと、fcitx5 が丸ごと落ちて原因が見えにくい。
+target_link_options(ttyskk PRIVATE -Wl,--no-undefined)
 set_target_properties(ttyskk PROPERTIES PREFIX "lib")
 
 install(TARGETS ttyskk DESTINATION "${FCITX_INSTALL_LIBDIR}/fcitx5")
