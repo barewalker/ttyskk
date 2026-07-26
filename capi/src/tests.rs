@@ -115,6 +115,43 @@ fn kana_mode_and_conversion() {
     unsafe { ttyskk_free(p) };
 }
 
+/// 候補があることと、一覧を出すことは別。
+///
+/// SKK では最初の数件を一つずつ送り、それを過ぎたところで一覧に切り替える。
+/// 候補窓を出すかどうかは呼ぶ側が判断できないので、こちらで持つ。
+#[test]
+fn the_candidate_list_appears_only_after_a_few() {
+    let p = engine(&[("あ", "/亜/唖/娃/阿/哀/愛/挨/姶/逢/")]);
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+    typed(p, "A ");
+
+    // 既定では 4 件目まで一つずつ送る
+    assert_eq!(unsafe { ttyskk_candidate_len(p) }, 9, "候補は全部見える");
+    assert!(
+        !unsafe { ttyskk_candidate_visible(p) },
+        "まだ一覧は出さない"
+    );
+
+    // 3 件目まではまだ
+    typed(p, "  ");
+    assert_eq!(unsafe { ttyskk_candidate_selected(p) }, 2);
+    assert!(!unsafe { ttyskk_candidate_visible(p) });
+
+    typed(p, "  ");
+    assert_eq!(unsafe { ttyskk_candidate_selected(p) }, 4);
+    assert!(
+        unsafe { ttyskk_candidate_visible(p) },
+        "4 件目を過ぎたら一覧"
+    );
+
+    // ▼ を抜ければ消える
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+    assert!(!unsafe { ttyskk_candidate_visible(p) });
+    assert_eq!(unsafe { ttyskk_candidate_len(p) }, 0);
+
+    unsafe { ttyskk_free(p) };
+}
+
 /// 確定と「呼ぶ側へ委ねる」は同時に起きる。
 ///
 /// ▽ の途中で矢印を押すと、見出し語を確定したうえで矢印は呼ぶ側へ渡る。

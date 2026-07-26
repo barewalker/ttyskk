@@ -182,6 +182,18 @@ const char *ttyskk_candidate_annotation(const struct TtyskkEngine *p,
 uintptr_t ttyskk_candidate_selected(const struct TtyskkEngine *p);
 
 /**
+ * 候補の一覧を出す段階か。
+ *
+ * SKK では最初の数件を一つずつ送り、それを過ぎたところで一覧に切り替える習わし
+ * (何件目からかは設定の `candidates.inline`)。**候補があること**と**一覧を出すこと**
+ * は別なので、窓を出すかどうかはこちらで判断する。
+ *
+ * # Safety
+ * `p` は有効なハンドル。
+ */
+bool ttyskk_candidate_visible(const struct TtyskkEngine *p);
+
+/**
  * 候補一覧から選ぶキーを並べたもの ("asdfjkl" など)。文字数が一頁の大きさになる。
  *
  * # Safety

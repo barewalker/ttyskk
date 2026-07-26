@@ -36,6 +36,8 @@ pub struct TtyskkEngine {
     /// 選択中の候補。▼ でなければ空。
     candidates: Vec<(CString, CString)>,
     selected: usize,
+    /// 一覧を出す段階に来ているか。
+    list_visible: bool,
     labels: CString,
 }
 
@@ -153,8 +155,11 @@ impl TtyskkEngine {
 
         self.candidates.clear();
         self.selected = 0;
+        self.list_visible = false;
         self.labels = CString::default();
         if let Some(v) = self.skk.candidates() {
+            // SKK では最初の数件を一つずつ送り、それを過ぎたら一覧に切り替える
+            self.list_visible = v.selected >= v.inline_until;
             for item in &v.items {
                 let annot = item.annotation.clone().unwrap_or_default();
                 self.candidates.push((cstring(&item.text), cstring(&annot)));
@@ -205,6 +210,7 @@ pub unsafe extern "C" fn ttyskk_new(
             preedit: Vec::new(),
             candidates: Vec::new(),
             selected: 0,
+            list_visible: false,
             labels: CString::default(),
         });
         engine.refresh("");
@@ -400,6 +406,19 @@ pub unsafe extern "C" fn ttyskk_candidate_annotation(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ttyskk_candidate_selected(p: *const TtyskkEngine) -> usize {
     unsafe { p.as_ref() }.map_or(0, |e| e.selected)
+}
+
+/// 候補の一覧を出す段階か。
+///
+/// SKK では最初の数件を一つずつ送り、それを過ぎたところで一覧に切り替える習わし
+/// (何件目からかは設定の `candidates.inline`)。**候補があること**と**一覧を出すこと**
+/// は別なので、窓を出すかどうかはこちらで判断する。
+///
+/// # Safety
+/// `p` は有効なハンドル。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyskk_candidate_visible(p: *const TtyskkEngine) -> bool {
+    unsafe { p.as_ref() }.is_some_and(|e| e.list_visible)
 }
 
 /// 候補一覧から選ぶキーを並べたもの ("asdfjkl" など)。文字数が一頁の大きさになる。

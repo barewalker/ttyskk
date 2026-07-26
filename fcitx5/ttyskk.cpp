@@ -1,6 +1,7 @@
 #include "engine.h"
 
 #include <fcitx-utils/i18n.h>
+#include <fcitx/candidatelist.h>
 #include <fcitx/inputpanel.h>
 
 #include <cstdlib>
@@ -146,6 +147,40 @@ void TtyskkEngine::updateUI(InputContext *ic) {
 
     ic->inputPanel().reset();
     ic->inputPanel().setClientPreedit(preedit);
+
+    /* 候補窓。**候補があること**と**一覧を出すこと**は別で、SKK では最初の数件を
+     * 一つずつ送り、それを過ぎたところで一覧に切り替える。判断は Rust 側が持つ。
+     *
+     * 選ぶ操作 (a s d f …) はエンジンが自分で扱うので、ここは表示だけを担う。 */
+    if (ttyskk_candidate_visible(engine_)) {
+        auto list = std::make_unique<CommonCandidateList>();
+        list->setLayoutHint(CandidateLayoutHint::Horizontal);
+
+        const std::string labels(ttyskk_candidate_labels(engine_));
+        std::vector<std::string> shown;
+        shown.reserve(labels.size());
+        for (const char c : labels) {
+            shown.push_back(std::string(1, c) + ": ");
+        }
+        if (!shown.empty()) {
+            list->setPageSize(static_cast<int>(shown.size()));
+            list->setLabels(shown);
+        }
+
+        const size_t n = ttyskk_candidate_len(engine_);
+        for (size_t i = 0; i < n; i++) {
+            Text text(std::string(ttyskk_candidate_text(engine_, i)));
+            const char *annot = ttyskk_candidate_annotation(engine_, i);
+            if (annot && *annot) {
+                text.append(" ; " + std::string(annot));
+            }
+            list->append<DisplayOnlyCandidateWord>(std::move(text));
+        }
+        list->setGlobalCursorIndex(
+            static_cast<int>(ttyskk_candidate_selected(engine_)));
+        ic->inputPanel().setCandidateList(std::move(list));
+    }
+
     ic->updatePreedit();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
