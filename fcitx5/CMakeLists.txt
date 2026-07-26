@@ -38,6 +38,9 @@ add_custom_command(
 add_custom_target(ttyskk-capi DEPENDS ${CAPI_LIB} ${CAPI_HEADER})
 
 # ---- addon ----
+#
+# 出来上がりは libttyskk.so。**fcitx5 は Library= の値をそのままファイル名として探す**
+# ので、addon の登録 (ttyskk-addon.conf) は Library=libttyskk と書く必要がある。
 
 add_library(ttyskk MODULE ttyskk.cpp)
 add_dependencies(ttyskk ttyskk-capi)
