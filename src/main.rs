@@ -3,14 +3,10 @@
 //! 子プロセスを擬似端末で包み、標準入力を横取りして確定した文字列だけを渡す。
 //! 未確定の文字は端末へ直接重ね描きするので、子アプリの画面には現れない。
 
-mod config;
-mod dict;
+// 端末に載せる部分だけがここにある。変換エンジンは lib (ttyskk) の側。
 mod input;
-mod num;
 mod render;
-mod romaji;
 mod screen;
-mod skk;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -20,18 +16,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-use config::{Config, Marker};
-use dict::Dict;
 use input::Decoder;
 use render::Overlay;
 use screen::Screen;
-use skk::{Mode, Skk};
+use ttyskk::config::{self, Config, Marker};
+use ttyskk::dict::Dict;
+use ttyskk::skk::{Mode, Skk};
 
-/// 設定の見本。実行ファイルに埋め込んで `--config-example` で書き出す。
-///
-/// 別に配らなくてよいうえ、版とずれない。中身が既定と食い違っていないことは
-/// `config::tests::the_bundled_example_states_the_defaults` が見張る。
-pub const CONFIG_EXAMPLE: &str = include_str!("../config.example.toml");
+use ttyskk::config::EXAMPLE as CONFIG_EXAMPLE;
 
 const USAGE: &str = "\
 ttyskk — 端末の中で完結する SKK 日本語入力

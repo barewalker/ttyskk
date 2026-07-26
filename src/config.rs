@@ -16,6 +16,12 @@ use unicode_width::UnicodeWidthChar;
 /// 設定ファイルを見張る間隔。
 const POLL: Duration = Duration::from_secs(1);
 
+/// 設定の見本。実行ファイルに埋め込んで `--config-example` で書き出す。
+///
+/// 別に配らなくてよいうえ、版とずれない。中身が既定と食い違っていないことは
+/// [`tests::the_bundled_example_states_the_defaults`] が見張る。
+pub const EXAMPLE: &str = include_str!("../config.example.toml");
+
 /// モードの印の出し方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Marker {
@@ -615,7 +621,7 @@ mod tests {
     /// 変えたのに見本を直し忘れると、後者が食い違って落ちる。
     #[test]
     fn the_bundled_example_states_the_defaults() {
-        let text = crate::CONFIG_EXAMPLE;
+        let text = EXAMPLE;
         assert_eq!(
             Config::parse(text).unwrap(),
             Config::default(),

@@ -3,15 +3,8 @@
 //! エスケープ列は中身を解釈せず `Key::Raw` のまま子へ渡す。矢印キーや修飾キーの
 //! 意味づけは子アプリの仕事で、入力メソッドが横取りする必要はない。
 
-use crate::config::Config;
-use crate::skk::Key;
-
-/// 括弧付き貼り付け (bracketed paste) の囲み。
-///
-/// 端末は貼り付けた内容をこの二つで挟んで送る。挟まれた中身は「打鍵」ではないので、
-/// ローマ字変換にもモード切り替えにも回さず、丸ごと `Key::Paste` にまとめる。
-pub const PASTE_START: &[u8] = b"\x1b[200~";
-pub const PASTE_END: &[u8] = b"\x1b[201~";
+use ttyskk::config::Config;
+use ttyskk::skk::{Key, PASTE_END, PASTE_START};
 
 /// 貼り付けを溜め込む上限。これを超えたら諦めて素通しに切り替える。
 ///

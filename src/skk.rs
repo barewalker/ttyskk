@@ -5,7 +5,16 @@
 
 use crate::config::{Config, Layout, Marker};
 use crate::dict::{Candidate, Dict};
-use crate::input::{PASTE_END, PASTE_START};
+
+/// 括弧付き貼り付け (bracketed paste) の囲み。
+///
+/// 端末は貼り付けた内容をこの二つで挟んで送る。挟まれた中身は「打鍵」ではないので、
+/// ローマ字変換にもモード切り替えにも回さず、丸ごと `Key::Paste` にまとめる。
+///
+/// 端末の約束事なので本来は切り出す側 (`input`) の持ち物だが、確定した文字列に続けて
+/// 貼り付けを組み直すのがここ (`raw_bytes`) なので、定義もここに置いている。
+pub const PASTE_START: &[u8] = b"\x1b[200~";
+pub const PASTE_END: &[u8] = b"\x1b[201~";
 use crate::num;
 use crate::romaji::{self, Romaji};
 
@@ -91,6 +100,34 @@ pub struct Tint {
     pub offset: usize,
     /// 敷く文字。`None` なら控えの文字をそのまま使う (下の文字を隠さない)。
     pub glyph: Option<char>,
+}
+
+/// 選択中の候補と、その並び。
+///
+/// 候補窓を自前で描く側のための形。頁分けはしていない — 端末は `inline_until` と
+/// `select_keys` の数から一行に組み、GUI は窓の大きさに合わせて好きに切れる。
+#[derive(Clone, Debug, PartialEq)]
+pub struct CandidateView {
+    /// 候補の全体。学習で前に出たものはその順のまま。
+    pub items: Vec<CandidateItem>,
+    /// `items` の中で選ばれているものの位置。
+    pub selected: usize,
+    /// 一覧から選ぶキー。この数がそのまま一頁の大きさになる (設定の `keys.select`)。
+    pub select_keys: Vec<char>,
+    /// 何番目の候補から一覧を出すか (設定の `candidates.inline`)。
+    ///
+    /// SKK では最初の数件を一つずつ送り、それを過ぎたら一覧に切り替えるのが習わし。
+    /// 常に一覧を出す GUI では読み飛ばしてよい。
+    pub inline_until: usize,
+}
+
+/// 候補ひとつ。
+#[derive(Clone, Debug, PartialEq)]
+pub struct CandidateItem {
+    /// 画面に出す形。数値変換は展開済み、接頭辞・接尾辞の `>` は落としてある。
+    pub text: String,
+    /// 辞書の注釈 (`;` 以降)。
+    pub annotation: Option<String>,
 }
 
 /// 重ね描きするもの。
@@ -429,6 +466,30 @@ impl Skk {
 
     fn current_candidate(&self) -> Option<&Choice> {
         self.candidates.get(self.cand_index)
+    }
+
+    /// 選択中 (▼) の候補を、そのまま扱える形で返す。▼ でなければ `None`。
+    ///
+    /// [`Skk::preedit`] は端末に重ね描きするために候補を一行へ組み上げてしまうので、
+    /// 候補窓を自前で描く側 (GUI の入力メソッドなど) はこちらを使う。頁の切り方は
+    /// 呼ぶ側に任せ、ここでは全体と選択位置だけを渡す。
+    pub fn candidates(&self) -> Option<CandidateView> {
+        if self.phase != Phase::Selecting {
+            return None;
+        }
+        Some(CandidateView {
+            items: self
+                .candidates
+                .iter()
+                .map(|c| CandidateItem {
+                    text: self.shown(c),
+                    annotation: c.cand.annotation.clone(),
+                })
+                .collect(),
+            selected: self.cand_index,
+            select_keys: self.cfg.select.clone(),
+            inline_until: self.cfg.inline_candidates,
+        })
     }
 
     /// 候補の本文を、画面と出力に出す形にする。
@@ -1385,17 +1446,52 @@ mod tests {
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
     }
 
-    /// 端末が送ってくるバイト列をそのまま食わせて、子へ出るものを見る。
+    /// 候補は端末向けの組み上げを通さず、そのまま取り出せる。
+    #[test]
+    fn candidates_come_out_as_data() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/幹事;宴会の/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        // 変換していない間は無い
+        assert!(skk.candidates().is_none());
+
+        typed(&mut skk, "Kanji ");
+        let v = skk.candidates().expect("▼ の最中");
+        assert_eq!(v.items.len(), 2);
+        assert_eq!(v.items[0].text, "漢字");
+        assert_eq!(v.items[0].annotation, None);
+        assert_eq!(v.items[1].text, "幹事");
+        assert_eq!(v.items[1].annotation.as_deref(), Some("宴会の"));
+        assert_eq!(v.selected, 0);
+        assert_eq!(v.select_keys, Config::default().select);
+
+        // 次の候補へ送ると選択位置が動く
+        typed(&mut skk, " ");
+        assert_eq!(skk.candidates().unwrap().selected, 1);
+
+        // 確定したら消える
+        typed(&mut skk, "\n");
+        assert!(skk.candidates().is_none());
+    }
+
+    /// 数値変換の展開も済んだ形で出る。
+    #[test]
+    fn candidates_show_the_expanded_numbers() {
+        let mut skk = skk_with(&[("だい#かい", "/第#1回/第#3回/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Dai5kai ");
+        let v = skk.candidates().unwrap();
+        // #1 は全角、#3 は位取りの漢数字
+        assert_eq!(v.items[0].text, "第５回");
+        assert_eq!(v.items[1].text, "第五回");
+    }
+
+    /// 貼り付けを一つ与えて、子へ出るものを見る。
+    ///
+    /// 端末のバイト列から `Key::Paste` を切り出すところは実行ファイル側の仕事なので、
+    /// ここではキーを直に渡す (切り出しは `input` のテストが見ている)。
     fn pasted(skk: &mut Skk, text: &str) -> String {
-        let mut d = crate::input::Decoder::new(&Config::default());
-        let mut bytes = crate::input::PASTE_START.to_vec();
-        bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(crate::input::PASTE_END);
-        let mut out = Vec::new();
-        for k in d.feed(&bytes) {
-            out.extend(skk.handle(k).to_child);
-        }
-        String::from_utf8(out).unwrap()
+        let r = skk.handle(Key::Paste(text.as_bytes().to_vec()));
+        String::from_utf8(r.to_child).unwrap()
     }
 
     /// 貼り付けた中身はローマ字変換にもモード切り替えにも回さない。

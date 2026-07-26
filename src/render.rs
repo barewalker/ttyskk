@@ -7,7 +7,7 @@
 use unicode_width::UnicodeWidthChar;
 
 use crate::screen::Screen;
-use crate::skk::{Preedit, Segment, Style, Tint};
+use ttyskk::skk::{Preedit, Segment, Style, Tint};
 
 fn style_sgr(style: Style) -> &'static str {
     match style {
