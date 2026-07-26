@@ -177,6 +177,35 @@ impl Dict {
         self.system.len()
     }
 
+    /// 別の SKK 辞書を利用者辞書に取り込む。足した候補の数を返す。
+    ///
+    /// 他の実装 (skkeleton の `~/.skkeleton`、fcitx5-skk の `user.dict` など) で
+    /// 溜めた学習を合流させるためのもの。**既にある候補は動かさない** — 学習の
+    /// 順序は「最近使った順」なので、取り込んだものを先頭に置くと、いま使っている
+    /// 語より古い語が前に出てしまう。相手にしかない候補だけを後ろへ足す。
+    ///
+    /// 保存と同じく、ディスクの現状を読み直してから重ねる。取り込みの最中に他の
+    /// プロセスが覚えたことも失わない。
+    pub fn import_user(&mut self, path: &Path) -> Result<usize> {
+        let mut incoming = HashMap::new();
+        load_into(&mut incoming, &read_jisyo(path)?);
+
+        // ディスクの現状 + この起動で覚えたことを土台にする
+        let mut merged = self.merged_with_disk()?;
+        let mut added = 0;
+        for (key, cands) in incoming {
+            let entry = merged.entry(key).or_default();
+            for c in cands {
+                if !entry.iter().any(|e| e.text == c.text) {
+                    entry.push(c);
+                    added += 1;
+                }
+            }
+        }
+        self.write_user(merged)?;
+        Ok(added)
+    }
+
     /// 利用者辞書が別のプロセスに書き換えられていたら読み直す。読んだら true。
     ///
     /// GUI の入力メソッドや、別のペインの ttyskk が覚えたことを取り込むためのもの。
@@ -307,7 +336,16 @@ impl Dict {
         if self.changes.is_empty() {
             return Ok(());
         }
-        // ディスクの現状を読み直してから、この起動で覚えたことを重ねる
+        let merged = self.merged_with_disk()?;
+        self.write_user(merged)
+    }
+
+    /// ディスクの現状に、この起動で覚えたことを重ねたもの。
+    ///
+    /// 丸ごと書き出すと、複数の ttyskk (端末・GUI・別のペイン) が互いの学習を消し
+    /// 合ってしまう。**ディスクを土台にして自分の記録だけを重ねる**ことで、他が
+    /// 覚えたことを残したまま書ける。
+    fn merged_with_disk(&self) -> Result<HashMap<String, Vec<Candidate>>> {
         let mut merged = HashMap::new();
         if self.user_path.exists() {
             load_into(&mut merged, &read_jisyo(&self.user_path)?);
@@ -331,7 +369,11 @@ impl Dict {
                 }
             }
         }
+        Ok(merged)
+    }
 
+    /// 利用者辞書を書き出し、手元の状態を書いた内容に合わせる。
+    fn write_user(&mut self, merged: HashMap<String, Vec<Candidate>>) -> Result<()> {
         if let Some(dir) = self.user_path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -493,6 +535,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["漢字"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 他の実装で溜めた学習を合流させる。
+    ///
+    /// **既にある候補は動かさない** — 学習の順序は「最近使った順」なので、取り込んだ
+    /// ものを先頭に置くと、いま使っている語より古い語が前に出てしまう。
+    #[test]
+    fn imports_another_implementations_learning() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let user = dir.join("user.dict");
+        let other = dir.join("skkeleton");
+        std::fs::write(&user, ";; okuri-nasi entries.\nかんじ /漢字/幹事/\n").unwrap();
+        // 向こうにしかない語と、こちらと順序が違う語
+        std::fs::write(
+            &other,
+            ";; okuri-ari entries.\nうごk /動/\n;; okuri-nasi entries.\nかんじ /監事/幹事/\nとうきょう /東京/\n",
+        )
+        .unwrap();
+
+        let mut d = Dict::load(&[], user.clone(), None).unwrap();
+        let added = d.import_user(&other).unwrap();
+        assert_eq!(added, 3, "監事・東京・動 の 3 つ");
+
+        // こちらの順序は変わらない。向こうにしかないものが後ろに付く
+        let k: Vec<String> = d.lookup("かんじ").into_iter().map(|c| c.text).collect();
+        assert_eq!(k, ["漢字", "幹事", "監事"]);
+        assert_eq!(d.lookup("とうきょう")[0].text, "東京");
+        assert_eq!(d.lookup("うごk")[0].text, "動");
+
+        // ディスクにも書けている
+        let fresh = Dict::load(&[], user, None).unwrap();
+        assert_eq!(fresh.lookup("とうきょう")[0].text, "東京");
+        assert_eq!(fresh.lookup("うごk")[0].text, "動");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

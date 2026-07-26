@@ -72,6 +72,19 @@ setsid fcitx5 -r -d >/dev/null 2>&1 </dev/null
 `fcitx5-configtool` の入力メソッド一覧に **ttyskk** が出るので追加する。仕組みは
 [`docs/fcitx5-addon.md`](docs/fcitx5-addon.md)。
 
+### 他の実装から学習を引き継ぐ
+
+skkeleton や fcitx5-skk など、別の SKK 実装で溜めた学習を合流できる。
+
+```sh
+ttyskk --import ~/.skkeleton              # skkeleton (nvim)
+ttyskk --import ~/.local/share/fcitx5/skk/user.dict
+```
+
+**既にある候補は動かさない。** 学習の順序は「最近使った順」なので、取り込んだものを
+先頭に置くと、いま使っている語より古い語が前に出てしまう。相手にしかない候補だけを
+後ろへ足す。何度実行してもよい (足すものが無ければ 0 件と出る)。
+
 ### 複数の環境で学習を分け合う
 
 利用者辞書 (`~/.local/share/ttyskk/user.dict`) を git に載せれば、職場と自宅で

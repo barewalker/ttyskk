@@ -38,6 +38,7 @@ ttyskk — 端末の中で完結する SKK 日本語入力
     -V, --version     版を表示する
     --check-config    設定ファイルを検査して終わる
     --config-example  設定の見本を書き出す (全項目を既定値のまま # で無効にしたもの)
+    --import <辞書>   別の SKK 辞書を利用者辞書に取り込む (他の実装からの移行)
 
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
@@ -267,6 +268,22 @@ fn main() -> Result<()> {
             }
             "--config-example" => {
                 print!("{CONFIG_EXAMPLE}");
+                return Ok(());
+            }
+            "--import" => {
+                let Some(path) = iter.next() else {
+                    bail!("--import には取り込む辞書のパスが要る");
+                };
+                let path = PathBuf::from(path);
+                let mut dict = Dict::load(&[], user_jisyo(), None)?;
+                let added = dict
+                    .import_user(&path)
+                    .with_context(|| format!("{} を取り込めない", path.display()))?;
+                println!(
+                    "ttyskk: {} から {added} 件を {} へ取り込んだ",
+                    path.display(),
+                    user_jisyo().display()
+                );
                 return Ok(());
             }
             "--check-config" => {
