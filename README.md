@@ -72,6 +72,37 @@ setsid fcitx5 -r -d >/dev/null 2>&1 </dev/null
 `fcitx5-configtool` の入力メソッド一覧に **ttyskk** が出るので追加する。仕組みは
 [`docs/fcitx5-addon.md`](docs/fcitx5-addon.md)。
 
+### 複数の環境で学習を分け合う
+
+利用者辞書 (`~/.local/share/ttyskk/user.dict`) を git に載せれば、職場と自宅で
+覚えた語が行き来する。**ttyskk を止めなくてよい。**
+
+保存も読み直しも「**ディスクの現状を土台に、この起動で覚えたことを重ねる**」方式
+なので、外から書き換わっても自分の学習を失わない。取り込む側は利用者辞書の更新時刻
+を見張っていて、`git pull` で新しくなればその場で読み直す。
+
+```sh
+cd ~/.local/share/ttyskk
+git init -b main && git add -A && git commit -m "init"
+git remote add origin <辞書用のリポジトリ>
+git push -u origin main
+```
+
+もう一方の環境では clone する。
+
+```sh
+git clone <辞書用のリポジトリ> ~/.local/share/ttyskk
+```
+
+あとは定期的に pull と push を回す。手元では `~/.local/bin/ttyskk-sync` と
+systemd の user timer (10 分おき) で回している。**非対話にすること** — 鍵の
+パスフレーズを聞かれると、誰も答えられないまま止まる。
+
+```sh
+export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10"
+export GIT_TERMINAL_PROMPT=0
+```
+
 ## キー操作
 
 ### モード切り替え
