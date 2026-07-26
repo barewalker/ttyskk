@@ -1531,6 +1531,30 @@ mod tests {
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
     }
 
+    /// AZIK の `c` (チャ行の子音) と、丸数字の読み `c1` は食い違わない。
+    ///
+    /// `c` の後ろに数字が来る綴りは AZIK にも標準にも無いので、`c` はそのまま
+    /// 見出し語に落ちる。かなにならない文字を素通しする既存の道筋がそのまま働く。
+    #[test]
+    fn azik_does_not_eat_the_circled_number_reading() {
+        let mut skk = skk_with(&[]);
+        let mut cfg = Config::default();
+        cfg.azik = true;
+        skk.set_config(cfg);
+        skk.handle(Key::Ctrl(0x0a));
+
+        typed(&mut skk, "C1");
+        assert_eq!(preedit_text(&skk), "▽c1");
+        assert_eq!(typed(&mut skk, " \n"), "①");
+
+        // AZIK の綴りとしての c は従来どおり (直接入力なのでその場で出る)
+        assert_eq!(typed(&mut skk, "ca"), "ちゃ");
+        // まる1 の側も打てる
+        typed(&mut skk, "Maru1");
+        assert_eq!(preedit_text(&skk), "▽まる1");
+        assert_eq!(typed(&mut skk, " \n"), "①");
+    }
+
     /// 区切りの文字が来たら、その手前までで自動的に変換を始める。
     ///
     /// 「ほんやくを」と打つと `を` の直前で変換に入り、`を` は候補の後ろに置かれる。
