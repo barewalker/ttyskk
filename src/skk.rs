@@ -341,6 +341,57 @@ impl Skk {
         &self.cfg
     }
 
+    /// 入力中の内容を確定して返す。
+    ///
+    /// **解釈しないキーが来たとき**に、その手前までを確定させるために使う。端末では
+    /// [`Key::Raw`] を渡せば同じことが起きる (見出し語を確定してから素通しする) が、
+    /// GUI の入力メソッドでは矢印や機能キーをバイト列で表せないので、確定だけを
+    /// 頼む口が要る。
+    ///
+    /// 辞書登録の途中では何もしない — 打ち込み中の内容が消えると困る。
+    pub fn flush(&mut self) -> String {
+        if !self.regs.is_empty() {
+            return String::new();
+        }
+        let text = match self.phase {
+            Phase::Direct => {
+                let out = self.romaji.flush();
+                self.shape(&out)
+            }
+            Phase::Composing => {
+                let text = self.confirm_reading();
+                self.reset();
+                text
+            }
+            Phase::Selecting => self.commit_candidate(),
+        };
+        if !text.is_empty() {
+            self.last_commit = None;
+        }
+        text
+    }
+
+    /// 入力中の内容をすべて捨てる。モードは変えない。
+    ///
+    /// 打ちかけのローマ字・見出し語・候補・辞書登録が消える。GUI の入力メソッドで
+    /// 窓のフォーカスが移ったときのように、**入力の続きが望めなくなった**場面で使う。
+    /// 端末では子プロセスがそのまま残るので、いまのところ呼ぶ場面が無い。
+    pub fn clear(&mut self) {
+        self.regs.clear();
+        self.last_commit = None;
+        self.reset();
+    }
+
+    /// いまの入力モード。
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// 入力中のものが何も無いか。
+    pub fn is_idle(&self) -> bool {
+        self.regs.is_empty() && self.phase == Phase::Direct && self.romaji.is_empty()
+    }
+
     /// 入力途中の表示。空なら重ね描きするものは無い。
     pub fn preedit(&self) -> Preedit {
         let mut segs = Vec::new();
@@ -1538,9 +1589,10 @@ mod tests {
     #[test]
     fn azik_does_not_eat_the_circled_number_reading() {
         let mut skk = skk_with(&[]);
-        let mut cfg = Config::default();
-        cfg.azik = true;
-        skk.set_config(cfg);
+        skk.set_config(Config {
+            azik: true,
+            ..Default::default()
+        });
         skk.handle(Key::Ctrl(0x0a));
 
         typed(&mut skk, "C1");

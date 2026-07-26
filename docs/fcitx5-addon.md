@@ -70,7 +70,16 @@ GUI 向けに、モードの印を含まない形で取り出す口が要る。�
 - fcitx5 の停止時 (addon の deinit) にも書く
 - 端末側の ttyskk が同時に動いていても、重ねる方式なので消し合わない
 
-## C ABI の形
+## C ABI の形 (実装済み — `capi/`)
+
+以下は当初の見取り図で、**実際に作ったものもほぼこの形**。違いは二点だけ。
+
+- `ttyskk_flush` は要らなかった。**畳めないキーを渡したときに内部で確定する**ように
+  したので、呼ぶ側は `ttyskk_key` が false を返したら `ttyskk_commit` を見るだけでよい
+- ハンドルの型名は `TtyskkEngine`
+
+生成したヘッダは `capi/ttyskk.h` (cbindgen が `capi/src/lib.rs` から作る。手で直さない)。
+
 
 ```c
 typedef struct TtyskkEngine TtyskkEngine;
@@ -192,14 +201,22 @@ Rust 側は cargo でビルドし、CMake から呼ぶ (`corrosion` か、単に
 
 ## 段階
 
-1. **capi を作る** — `ttyskk_new` / `ttyskk_key` / `ttyskk_commit` / preedit まで。
-   Rust のテストで一通り叩けるので、C++ 抜きで確かめられる
+1. ~~**capi を作る**~~ — **済**。`capi/` に一式ある。Rust のテスト 9 件に加えて、
+   C から共有ライブラリを叩いて変換・候補・確定まで通ることを確かめた
 2. **最小の addon** — 直接入力だけ動かす。かなモードで打った文字が出るところまで
 3. **変換と候補** — ▽ ▼ と候補リスト
 4. **学習の書き出し** — タイマーと deinit
 5. **モード表示・設定の追従**
 
-1 と 2 の間に一度動くものが見える。3 から先は積み上げ。
+2 に入るには `libfcitx5core-dev` と `fcitx5-modules-dev` が要る (どちらも未導入)。
+C++ のビルドなので distrobox の側の作業になる。
+
+### capi を叩いてみる
+
+```sh
+cargo build -p ttyskk-capi --release     # target/release/libttyskk.so と capi/ttyskk.h
+cargo test -p ttyskk-capi                # C ABI をそのままの形で叩くテスト
+```
 
 ## 未確定のこと
 

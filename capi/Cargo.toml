@@ -1,0 +1,21 @@
+[package]
+name = "ttyskk-capi"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI for the ttyskk SKK conversion engine, for use from input method frameworks."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/barewalker/ttyskk"
+rust-version = "1.88"
+publish = false
+
+[lib]
+# 共有ライブラリとして fcitx5 の addon から読む。名前は libttyskk.so になる。
+name = "ttyskk"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# 端末側の実装は要らないので落とす。
+ttyskk = { path = "..", default-features = false }
+
+[build-dependencies]
+cbindgen = "0.29"

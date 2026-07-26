@@ -1,3 +1,8 @@
+# GUI の入力メソッドに載せるための C ABI は別 crate にしてある。
+# 実行ファイルを作るだけなら関係しない (cargo build -p ttyskk)。
+[workspace]
+members = ["capi"]
+
 [package]
 name = "ttyskk"
 version = "0.1.0"

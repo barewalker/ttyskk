@@ -1,0 +1,18 @@
+language = "C"
+include_guard = "TTYSKK_H"
+documentation = true
+documentation_style = "doxy"
+cpp_compat = true
+
+header = """
+/* ttyskk の変換エンジンを C から使うための宣言。
+ *
+ * このファイルは cbindgen が capi/src/lib.rs から作る。手で直さない。
+ * 作り直すには capi の中で cargo build。
+ */"""
+
+[export]
+prefix = ""
+
+[parse]
+parse_deps = false
