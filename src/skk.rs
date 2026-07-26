@@ -294,6 +294,7 @@ impl Skk {
     pub fn new(dict: Dict, cfg: Config) -> Self {
         let mut romaji = Romaji::new();
         romaji.set_kutouten(cfg.kutouten);
+        romaji.set_azik(cfg.azik);
         Skk {
             cfg,
             mode: Mode::Ascii,
@@ -331,6 +332,7 @@ impl Skk {
     /// 表示中の頁の切れ目は変わるが、選んでいる候補そのものはずれない。
     pub fn set_config(&mut self, cfg: Config) {
         self.romaji.set_kutouten(cfg.kutouten);
+        self.romaji.set_azik(cfg.azik);
         self.cfg = cfg;
     }
 

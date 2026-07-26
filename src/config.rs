@@ -111,6 +111,11 @@ pub struct Config {
     pub mode_marker: Marker,
     /// `.` と `,` から出す句読点の組。
     pub kutouten: Kutouten,
+    /// AZIK (拡張ローマ字入力) を使うか。
+    ///
+    /// 「2 文字めに《ん》が来る」「二重母音」の並びを 2 打で打てるようにする方式。
+    /// 標準のローマ字を土台にしているので、打てなくなる綴りは無い。
+    pub azik: bool,
     /// 見出し語の入力中にこれらの文字が来たら、その手前までで変換を始める。
     ///
     /// 「ほんやくを」と打つと `を` の直前で変換に入り、`を` は候補の後ろに置かれる。
@@ -154,6 +159,7 @@ impl Default for Config {
             mode_symbols: ['~', '+', '-', '@'],
             mode_marker: Marker::Cell,
             kutouten: Kutouten::Jp,
+            azik: false,
             // ddskk の skk-auto-start-henkan-keyword-list と同じ顔ぶれ
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
@@ -296,6 +302,13 @@ impl Config {
                                 other => bail!("mode_symbols.{other} は知らない項目"),
                             };
                             cfg.mode_symbols[i] = parse_symbol(name, v)?;
+                        }
+                    }
+                    "romaji" => {
+                        cfg.azik = match value.as_str() {
+                            Some("default") => false,
+                            Some("azik") => true,
+                            _ => bail!("behavior.romaji は \"default\" か \"azik\""),
                         }
                     }
                     "kutouten" => {

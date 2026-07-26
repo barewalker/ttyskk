@@ -254,6 +254,215 @@ fn is_consonant(c: char) -> bool {
     c.is_ascii_alphabetic() && !matches!(c.to_ascii_lowercase(), 'a' | 'i' | 'u' | 'e' | 'o')
 }
 
+// ---- AZIK (拡張ローマ字入力) ----
+//
+// 「2 文字めに《ん》が来る」「二重母音」という日本語に多い並びを 2 打で入力する方式。
+// 標準のローマ字入力を土台にしている。
+//
+// **綴りは標準ローマ字への展開として持つ。** `kz` → `kann` → 「かん」。かなを直に
+// 書くと標準表と同じ知識を二重に持つことになり、片方だけ直して食い違う。
+
+/// 撥音拡張と二重母音拡張。母音キーの代わりに打つと、母音の後ろが付いてくる。
+///
+/// 撥音は「その母音キーの下のキー」、二重母音は「近くのキー」という覚え方。
+const AZIK_VOWELS: &[(char, &str)] = &[
+    // 撥音拡張 (母音 + ん)
+    ('z', "ann"),
+    ('k', "inn"),
+    ('j', "unn"),
+    ('d', "enn"),
+    ('l', "onn"),
+    // 二重母音拡張
+    ('q', "ai"),
+    ('h', "uu"),
+    ('w', "ei"),
+    ('p', "ou"),
+];
+
+/// シャ行・チャ行の子音を 1 打で。
+///
+/// `sh` `ch` は二重母音拡張 (`s`+`h` = すう) に使うので、子音の方を別のキーへ移す。
+/// シャ行は S の下の X、チャ行は Chocolate の C という覚え方。
+const AZIK_CONSONANT_ALT: &[(char, &str)] = &[('x', "sy"), ('c', "ty")];
+
+/// 小書きのかなは `l` を前置する。
+///
+/// 標準では `x` を前置するが、AZIK では `x` がシャ行の子音になるため。
+const AZIK_SMALL: &[(&str, &str)] = &[
+    ("la", "xa"),
+    ("li", "xi"),
+    ("lu", "xu"),
+    ("le", "xe"),
+    ("lo", "xo"),
+    ("lya", "xya"),
+    ("lyu", "xyu"),
+    ("lyo", "xyo"),
+    ("lwa", "xwa"),
+    ("ltu", "xtu"),
+];
+
+/// 拗音を `y` の代わりに `g` で打てる行 (きゃ にゃ ひゃ みゃ ぴゃ)。
+///
+/// 左右の交互打鍵になる。3 打めには母音も拡張キーも使える (`kgp` = きょう)。
+const AZIK_YOUON: &[char] = &['k', 'n', 'h', 'm', 'p'];
+
+/// 「あ段の撥音」を `n` でも打てる子音。
+///
+/// 原則の `z` は左手の子音と続くと打ちにくいため (`sz` より `sn`)。
+const AZIK_ANN_ALT: &[char] = &['d', 's', 'w', 'r', 'g', 'z', 't'];
+
+/// 同じ指が続いて打ちにくい綴りを、母音の代わりに `f` で打つ。
+const AZIK_SAME_FINGER: &[(&str, &str)] = &[
+    ("kf", "ki"),
+    ("jf", "ju"),
+    ("hf", "hu"),
+    ("yf", "yu"),
+    ("mf", "mu"),
+    ("nf", "nu"),
+    ("df", "de"),
+    ("cf", "tye"),
+    ("pf", "ponn"),
+];
+
+/// 特殊拡張。撥音でも二重母音でもない頻出の並びを 2 打にする。
+const AZIK_WORDS: &[(&str, &str)] = &[
+    ("kt", "koto"),
+    ("st", "sita"),
+    ("tt", "tati"),
+    ("ht", "hito"),
+    ("wt", "wata"),
+    ("mn", "mono"),
+    ("ms", "masu"),
+    ("ds", "desu"),
+    ("km", "kamo"),
+    ("tm", "tame"),
+    ("dm", "demo"),
+    ("kr", "kara"),
+    ("sr", "suru"),
+    ("tr", "tara"),
+    ("nr", "naru"),
+    ("yr", "yoru"),
+    ("rr", "rare"),
+    ("zr", "zaru"),
+    ("mt", "mata"),
+    ("tb", "tabi"),
+    ("nb", "neba"),
+    ("bt", "bito"),
+    ("gr", "gara"),
+    ("gt", "goto"),
+    ("nt", "niti"),
+    ("dt", "dati"),
+    ("wr", "ware"),
+];
+
+/// 外来語向けと、原則どおりでは打ちにくいものの個別の綴り。
+const AZIK_EXTRA: &[(&str, &str)] = &[
+    ("wso", "who"),
+    ("tgi", "thi"),
+    ("dci", "dhi"),
+    ("wf", "wai"),
+    ("sf", "sai"),
+    ("ss", "sei"),
+    ("zc", "za"),
+    ("zv", "zai"),
+    ("zf", "ze"),
+    ("zx", "zei"),
+];
+
+/// 標準ローマ字では書けない、かなを直に置くもの。
+const AZIK_DIRECT: &[(&str, &str)] = &[
+    // 単独の「ん」(nn でも打てる)
+    ("q", "ん"),
+    // 「っ」は常にこのキー
+    (";", "っ"),
+    // 長音記号
+    (":", "ー"),
+    ("wp", "うぉー"),
+    ("fp", "ふぉー"),
+];
+
+/// AZIK の変換表。標準表から組み立てるので、起動時に一度だけ作る。
+fn azik_table() -> &'static [(String, String)] {
+    static CACHE: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(build_azik).as_slice()
+}
+
+fn build_azik() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    // 個別に決めてあるものが先。あとから来る機械的な組み立てに負けないように。
+    for (spell, kana) in AZIK_DIRECT {
+        out.push((spell.to_string(), kana.to_string()));
+    }
+    let mut add = |spell: String, roman: &str| {
+        if let Some(kana) = convert_standard(roman)
+            && !out.iter().any(|(k, _)| *k == spell)
+        {
+            out.push((spell, kana));
+        }
+    };
+    // シャ行・チャ行の子音キー
+    for (key, cons) in AZIK_CONSONANT_ALT {
+        for v in ["a", "i", "u", "e", "o"] {
+            add(format!("{key}{v}"), &format!("{cons}{v}"));
+        }
+        for (ext, vowels) in AZIK_VOWELS {
+            add(format!("{key}{ext}"), &format!("{cons}{vowels}"));
+        }
+    }
+    for (spell, roman) in AZIK_SMALL {
+        add(spell.to_string(), roman);
+    }
+    // 子音 + 拡張キー。子音は標準表の見出しから集めるので、書き漏らしが起きない。
+    for cons in consonants() {
+        for (key, vowels) in AZIK_VOWELS {
+            add(format!("{cons}{key}"), &format!("{cons}{vowels}"));
+        }
+    }
+    // 拗音の y を g で打つ。3 打めは母音でも拡張キーでもよい。
+    for c in AZIK_YOUON {
+        for v in ["a", "i", "u", "e", "o"] {
+            add(format!("{c}g{v}"), &format!("{c}y{v}"));
+        }
+        for (key, vowels) in AZIK_VOWELS {
+            add(format!("{c}g{key}"), &format!("{c}y{vowels}"));
+        }
+    }
+    // あ段の撥音を n で
+    for c in AZIK_ANN_ALT {
+        add(format!("{c}n"), &format!("{c}ann"));
+    }
+    for (spell, roman) in AZIK_SAME_FINGER.iter().chain(AZIK_WORDS).chain(AZIK_EXTRA) {
+        add(spell.to_string(), roman);
+    }
+    out
+}
+
+/// 標準表の見出しから、母音の前に来る部分 (子音の並び) を集める。
+fn consonants() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (k, _, _) in TABLE {
+        let head = k.trim_end_matches(['a', 'i', 'u', 'e', 'o']);
+        if !head.is_empty() && head.len() < k.len() && !out.contains(&head) {
+            out.push(head);
+        }
+    }
+    out
+}
+
+/// 標準の表だけで最後まで変換できるなら、そのかなを返す。
+///
+/// 綴りの組み合わせを機械的に作るので、`yi` のようにかなにならないものが混ざる。
+/// 最後まで変換できたかどうかで振り分ける。
+fn convert_standard(roman: &str) -> Option<String> {
+    let mut r = Romaji::new();
+    let mut out = String::new();
+    for c in roman.chars() {
+        out.push_str(&r.feed(c));
+    }
+    let clean = r.is_empty() && !out.chars().any(|c| c.is_ascii_alphabetic());
+    clean.then_some(out)
+}
+
 /// `.` と `,` から出す句読点の組。
 ///
 /// 変換表そのものは「。、」を持ち、ここで指定された組へ差し替える。ddskk の
@@ -303,6 +512,8 @@ impl Kutouten {
 pub struct Romaji {
     buf: String,
     kutouten: Kutouten,
+    /// AZIK の拡張綴りも引くか。
+    azik: bool,
 }
 
 impl Romaji {
@@ -313,6 +524,33 @@ impl Romaji {
     /// 句読点の組を差し替える。設定の書き換えに追従するために使う。
     pub fn set_kutouten(&mut self, k: Kutouten) {
         self.kutouten = k;
+    }
+
+    /// AZIK (拡張ローマ字入力) を使うかどうか。
+    pub fn set_azik(&mut self, on: bool) {
+        self.azik = on;
+    }
+
+    /// いまの綴りで引く。AZIK が有効なら拡張綴りを先に見る。
+    fn lookup(&self, key: &str) -> Option<(String, String)> {
+        if self.azik
+            && let Some((_, kana)) = azik_table().iter().find(|(k, _)| k == key)
+        {
+            return Some((kana.clone(), String::new()));
+        }
+        lookup(key).map(|(kana, rest)| (kana.to_string(), rest.to_string()))
+    }
+
+    /// この綴りに続きがあるか (まだ確定させてはいけないか)。
+    fn has_prefix(&self, key: &str) -> bool {
+        if self.azik
+            && azik_table()
+                .iter()
+                .any(|(k, _)| k.len() > key.len() && k.starts_with(key))
+        {
+            return true;
+        }
+        has_prefix(key)
     }
 
     /// 未確定のローマ字。
@@ -341,12 +579,12 @@ impl Romaji {
             if self.buf.is_empty() {
                 break;
             }
-            if let Some((kana, rest)) = lookup(&self.buf) {
-                out.push_str(kana);
-                self.buf = rest.to_string();
+            if let Some((kana, rest)) = self.lookup(&self.buf) {
+                out.push_str(&kana);
+                self.buf = rest;
                 continue;
             }
-            if has_prefix(&self.buf) {
+            if self.has_prefix(&self.buf) {
                 break;
             }
             let mut chars = self.buf.chars();
@@ -526,6 +764,151 @@ mod tests {
 
     fn typed(r: &mut Romaji, s: &str) -> String {
         s.chars().map(|c| r.feed(c)).collect()
+    }
+
+    fn azik() -> Romaji {
+        let mut r = Romaji::new();
+        r.set_azik(true);
+        r
+    }
+
+    /// 撥音拡張。母音キーの代わりに「その下のキー」で「母音 + ん」になる。
+    #[test]
+    fn azik_expands_the_syllabic_n() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "kz"), "かん");
+        assert_eq!(typed(&mut r, "kk"), "きん");
+        assert_eq!(typed(&mut r, "kj"), "くん");
+        assert_eq!(typed(&mut r, "kd"), "けん");
+        assert_eq!(typed(&mut r, "kl"), "こん");
+        // 濁音・拗音の子音でも同じ
+        assert_eq!(typed(&mut r, "gz"), "がん");
+        assert_eq!(typed(&mut r, "kyz"), "きゃん");
+        // シャ行・チャ行の子音は x と c (sh / ch は拡張に使うため)
+        assert_eq!(typed(&mut r, "xz"), "しゃん");
+        assert_eq!(typed(&mut r, "cz"), "ちゃん");
+    }
+
+    /// 二重母音拡張。
+    #[test]
+    fn azik_expands_the_double_vowels() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "sq"), "さい");
+        assert_eq!(typed(&mut r, "kh"), "くう");
+        assert_eq!(typed(&mut r, "sw"), "せい");
+        assert_eq!(typed(&mut r, "kp"), "こう");
+    }
+
+    /// あ行には拡張を当てない。母音 + Q で「ん」を足す。
+    #[test]
+    fn azik_leaves_the_bare_vowels_alone() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "ai"), "あい");
+        assert_eq!(typed(&mut r, "aq"), "あん");
+        assert_eq!(typed(&mut r, "oq"), "おん");
+    }
+
+    /// 単打のキー。「っ」は常に `;`、長音は `:`、単独の「ん」は `q`。
+    #[test]
+    fn azik_single_strokes() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "a;ka:"), "あっかー");
+        assert_eq!(typed(&mut r, "q"), "ん");
+        assert_eq!(typed(&mut r, "nn"), "ん");
+    }
+
+    /// シャ行は X、チャ行は C。明け渡した `sh` `ch` は二重母音拡張になる。
+    #[test]
+    fn azik_sya_and_tya_move_to_x_and_c() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "xa"), "しゃ");
+        assert_eq!(typed(&mut r, "xu"), "しゅ");
+        assert_eq!(typed(&mut r, "xo"), "しょ");
+        assert_eq!(typed(&mut r, "ca"), "ちゃ");
+        assert_eq!(typed(&mut r, "cu"), "ちゅ");
+        assert_eq!(typed(&mut r, "co"), "ちょ");
+        assert_eq!(typed(&mut r, "sh"), "すう");
+        assert_eq!(typed(&mut r, "ch"), "ちゅう");
+    }
+
+    /// 小書きのかなは l を前置する (x はシャ行に使ってしまったため)。
+    #[test]
+    fn azik_small_kana_with_l() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "la"), "ぁ");
+        assert_eq!(typed(&mut r, "lyo"), "ょ");
+        assert_eq!(typed(&mut r, "kulwa"), "くゎ");
+    }
+
+    /// 拗音の Y を G でも打てる (左右の交互打鍵になる)。3 打めは拡張キーでもよい。
+    #[test]
+    fn azik_youon_with_g() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "kga"), "きゃ");
+        assert_eq!(typed(&mut r, "kgp"), "きょう");
+        assert_eq!(typed(&mut r, "ngz"), "にゃん");
+        // が行そのものは変わらない
+        assert_eq!(typed(&mut r, "ga"), "が");
+    }
+
+    /// あ段の撥音は N でも打てる (左手の子音と続くと Z が打ちにくいため)。
+    #[test]
+    fn azik_ann_with_n() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "sn"), "さん");
+        assert_eq!(typed(&mut r, "dn"), "だん");
+        assert_eq!(typed(&mut r, "tn"), "たん");
+    }
+
+    /// 同じ指が続く綴りは F で打てる。
+    #[test]
+    fn azik_same_finger_keys() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "kf"), "き");
+        assert_eq!(typed(&mut r, "mf"), "む");
+        assert_eq!(typed(&mut r, "pf"), "ぽん");
+    }
+
+    /// 特殊拡張。頻出の並びを 2 打で。
+    #[test]
+    fn azik_special_words() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "kt"), "こと");
+        assert_eq!(typed(&mut r, "ds"), "です");
+        assert_eq!(typed(&mut r, "mn"), "もの");
+        assert_eq!(typed(&mut r, "sr"), "する");
+    }
+
+    /// 外来語向けの綴り。
+    #[test]
+    fn azik_loanword_spellings() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "tgi"), "てぃ");
+        assert_eq!(typed(&mut r, "dci"), "でぃ");
+        assert_eq!(typed(&mut r, "wso"), "うぉ");
+        assert_eq!(typed(&mut r, "wp"), "うぉー");
+    }
+
+    /// 標準のローマ字も打てる。ただし sh / ch はシャ行・チャ行の子音に譲ってある。
+    #[test]
+    fn azik_keeps_the_standard_spellings() {
+        let mut r = azik();
+        assert_eq!(typed(&mut r, "konnnitiha"), "こんにちは");
+        assert_eq!(typed(&mut r, "kyou"), "きょう");
+        assert_eq!(typed(&mut r, "si"), "し");
+        assert_eq!(typed(&mut r, "ti"), "ち");
+        // 子音の重ねは拡張と衝突するので、促音は ; を使う (tt は「たち」)
+        assert_eq!(typed(&mut r, "tt"), "たち");
+        assert_eq!(typed(&mut r, ";ta"), "った");
+    }
+
+    /// 切っていれば拡張は効かない。
+    #[test]
+    fn azik_is_off_by_default() {
+        let mut r = Romaji::new();
+        // kz は綴りにならないので、k がそのまま出て z が残る
+        assert_eq!(typed(&mut r, "kz"), "k");
+        assert_eq!(r.pending(), "z");
     }
 
     /// 句読点は設定した組で出る (ddskk の skk-kutouten-type と同じ四通り)。
