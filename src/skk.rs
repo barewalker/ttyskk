@@ -5,6 +5,7 @@
 
 use crate::config::{Config, Layout, Marker};
 use crate::dict::{Candidate, Dict};
+use crate::input::{PASTE_END, PASTE_START};
 use crate::num;
 use crate::romaji::{self, Romaji};
 
@@ -49,6 +50,11 @@ pub enum Key {
     Tab,
     Esc,
     Raw(Vec<u8>),
+    /// 括弧付き貼り付けで届いた中身 (開始・終了の列は含まない)。
+    ///
+    /// 貼り付けは「打鍵」ではないので、ローマ字変換にもモード切り替えにも回さない。
+    /// 素朴に一文字ずつ流すと `hello` が `へ` + ASCII モードへの `l` になってしまう。
+    Paste(Vec<u8>),
 }
 
 /// 重ね描きする区間の見た目。
@@ -533,6 +539,14 @@ impl Skk {
         // 登録中。子へ出るはずだった文字は登録内容に溜める。
         if matches!(key, Key::Raw(_)) {
             // 矢印などは受け付けない。挟むと登録内容が壊れる。
+            return Response::default();
+        }
+        if let Key::Paste(text) = &key {
+            // 貼り付けた中身はそのまま登録内容にする (変換も囲みの列も挟まない)
+            if let Ok(s) = std::str::from_utf8(text) {
+                let reg = self.regs.last_mut().expect("登録中");
+                reg.buffer.extend(s.chars().filter(|c| !c.is_control()));
+            }
             return Response::default();
         }
         if self.phase == Phase::Direct {
@@ -1161,6 +1175,14 @@ fn raw_bytes(k: &Key) -> Vec<u8> {
         Key::Tab => vec![0x09],
         Key::Esc => vec![0x1b],
         Key::Raw(v) => v.clone(),
+        // 括弧付き貼り付けは子アプリも括弧で受け取る前提なので、囲みごと組み直す
+        Key::Paste(v) => {
+            let mut out = Vec::with_capacity(v.len() + PASTE_START.len() + PASTE_END.len());
+            out.extend_from_slice(PASTE_START);
+            out.extend_from_slice(v);
+            out.extend_from_slice(PASTE_END);
+            out
+        }
     }
 }
 
@@ -1361,6 +1383,61 @@ mod tests {
             Vec::<u8>::new()
         );
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 端末が送ってくるバイト列をそのまま食わせて、子へ出るものを見る。
+    fn pasted(skk: &mut Skk, text: &str) -> String {
+        let mut d = crate::input::Decoder::new(&Config::default());
+        let mut bytes = crate::input::PASTE_START.to_vec();
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(crate::input::PASTE_END);
+        let mut out = Vec::new();
+        for k in d.feed(&bytes) {
+            out.extend(skk.handle(k).to_child);
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    /// 貼り付けた中身はローマ字変換にもモード切り替えにも回さない。
+    ///
+    /// 直さないと `hello` が「へ」+ ASCII モードへの `l` + `lo` になる。
+    #[test]
+    fn pasted_text_is_not_converted() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(
+            pasted(&mut skk, "hello, world"),
+            "\x1b[200~hello, world\x1b[201~"
+        );
+        // モードも動いていない
+        assert_eq!(skk.mode, Mode::Hiragana);
+        // 続きの打鍵はこれまでどおり変換される
+        assert_eq!(typed(&mut skk, "ai"), "あい");
+    }
+
+    /// 変換の途中で貼ったら、先に見出し語・候補を確定してから貼り付けを流す。
+    #[test]
+    fn pasting_confirms_what_is_being_converted() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        assert_eq!(pasted(&mut skk, "x"), "かんじ\x1b[200~x\x1b[201~");
+        assert_eq!(preedit_text(&skk), "");
+
+        typed(&mut skk, "Kanji ");
+        assert_eq!(pasted(&mut skk, "x"), "漢字\x1b[200~x\x1b[201~");
+        assert_eq!(preedit_text(&skk), "");
+    }
+
+    /// 登録の途中では、貼り付けた中身がそのまま登録内容になる。
+    #[test]
+    fn pasting_into_the_registration_keeps_the_text() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(pasted(&mut skk, "漢字"), "");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]漢字");
+        assert_eq!(typed(&mut skk, "\r"), "漢字");
     }
 
     #[test]

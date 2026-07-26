@@ -6,6 +6,19 @@
 use crate::config::Config;
 use crate::skk::Key;
 
+/// 括弧付き貼り付け (bracketed paste) の囲み。
+///
+/// 端末は貼り付けた内容をこの二つで挟んで送る。挟まれた中身は「打鍵」ではないので、
+/// ローマ字変換にもモード切り替えにも回さず、丸ごと `Key::Paste` にまとめる。
+pub const PASTE_START: &[u8] = b"\x1b[200~";
+pub const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// 貼り付けを溜め込む上限。これを超えたら諦めて素通しに切り替える。
+///
+/// 端末が終了の列を送り損ねた場合や、貼り付けた中身にたまたま開始の列が含まれて
+/// いた場合に、際限なく溜め続けないための保険。
+const MAX_PASTE: usize = 1 << 20;
+
 pub struct Decoder {
     /// UTF-8 の途中で切れた分を次の読み込みまで持ち越す
     partial: Vec<u8>,
@@ -14,6 +27,8 @@ pub struct Decoder {
     /// 拡張鍵盤プロトコルで届いた形を素の制御文字に戻す対象。設定を書き換えたら
     /// `set_config` で入れ替える。
     ctrl: Vec<u8>,
+    /// 括弧付き貼り付けの最中なら、そこまでに溜めた中身。
+    pasting: Option<Vec<u8>>,
 }
 
 impl Decoder {
@@ -21,6 +36,7 @@ impl Decoder {
         Decoder {
             partial: Vec::new(),
             ctrl: cfg.ctrl_keys(),
+            pasting: None,
         }
     }
 
@@ -36,6 +52,34 @@ impl Decoder {
         let mut i = 0;
 
         while i < buf.len() {
+            // 貼り付けの最中は中身を一切解釈せず、終わりの列まで溜める
+            if let Some(acc) = self.pasting.as_mut() {
+                match find(&buf[i..], PASTE_END) {
+                    Some(at) => {
+                        acc.extend_from_slice(&buf[i..i + at]);
+                        keys.push(Key::Paste(std::mem::take(acc)));
+                        self.pasting = None;
+                        i += at + PASTE_END.len();
+                    }
+                    None => {
+                        // 終わりの列が読み込みの境界で切れていることがある。
+                        // その手前までを溜め、切れかけの分だけ持ち越す。
+                        let keep = trailing_prefix(&buf[i..], PASTE_END);
+                        let end = buf.len() - keep;
+                        acc.extend_from_slice(&buf[i..end]);
+                        if acc.len() > MAX_PASTE {
+                            // 終わりが来ない。溜めた分を囲みごとそのまま子へ流す。
+                            let mut raw = PASTE_START.to_vec();
+                            raw.append(acc);
+                            keys.push(Key::Raw(raw));
+                            self.pasting = None;
+                        }
+                        self.partial = buf[end..].to_vec();
+                        return keys;
+                    }
+                }
+                continue;
+            }
             let b = buf[i];
             match b {
                 0x1b => {
@@ -44,6 +88,11 @@ impl Decoder {
                         // 続きが届いていない見込み。持ち越す。
                         self.partial = buf[i..].to_vec();
                         return keys;
+                    }
+                    if key == Key::Raw(PASTE_START.to_vec()) {
+                        self.pasting = Some(Vec::new());
+                        i += len;
+                        continue;
                     }
                     keys.push(key);
                     i += len;
@@ -81,6 +130,20 @@ impl Decoder {
         }
         keys
     }
+}
+
+/// `pat` が最初に現れる位置。
+fn find(buf: &[u8], pat: &[u8]) -> Option<usize> {
+    buf.windows(pat.len()).position(|w| w == pat)
+}
+
+/// 末尾にある `pat` の前半部分の長さ。次の読み込みへ持ち越す分。
+fn trailing_prefix(buf: &[u8], pat: &[u8]) -> usize {
+    let max = (pat.len() - 1).min(buf.len());
+    (1..=max)
+        .rev()
+        .find(|&n| buf[buf.len() - n..] == pat[..n])
+        .unwrap_or(0)
 }
 
 fn utf8_len(b: u8) -> usize {
@@ -433,10 +496,74 @@ mod tests {
             &b"\x1b[100;5u"[..], // Ctrl+D
             &b"\x1b[106;1u"[..], // 修飾なしの J
             &b"\x1b[13;5u"[..],  // Ctrl+Enter
-            &b"\x1b[200~"[..],   // 括弧付き貼り付けの開始
         ] {
             assert_eq!(d.feed(seq), vec![Key::Raw(seq.to_vec())], "{seq:?}");
         }
+    }
+
+    /// 貼り付けは打鍵ではないので、中身を一つのキーにまとめる。
+    #[test]
+    fn bracketed_paste_becomes_one_key() {
+        let mut d = decoder();
+        assert_eq!(
+            d.feed(b"\x1b[200~hello, world\x1b[201~"),
+            vec![Key::Paste(b"hello, world".to_vec())]
+        );
+    }
+
+    /// 中身は一切解釈しない。矢印でもモード切り替えのキーでも、そのまま溜める。
+    #[test]
+    fn paste_content_is_never_interpreted() {
+        let mut d = decoder();
+        assert_eq!(
+            d.feed(b"\x1b[200~l\x1b[A\x0aq\x1b[201~"),
+            vec![Key::Paste(b"l\x1b[A\x0aq".to_vec())]
+        );
+    }
+
+    /// 大きな貼り付けは読み込みの境界で切れる。囲みの列そのものが切れることもある。
+    #[test]
+    fn split_paste_is_carried_over() {
+        let mut d = decoder();
+        assert_eq!(d.feed(b"\x1b[200~hel"), vec![]);
+        assert_eq!(d.feed(b"lo"), vec![]);
+        // 終わりの列の途中で切れても、前半を中身と取り違えない
+        assert_eq!(d.feed(b"\x1b[20"), vec![]);
+        assert_eq!(d.feed(b"1~"), vec![Key::Paste(b"hello".to_vec())]);
+
+        // 開始の列が切れる場合も同じ
+        assert_eq!(d.feed(b"\x1b[2"), vec![]);
+        assert_eq!(d.feed(b"00~ab\x1b[201~"), vec![Key::Paste(b"ab".to_vec())]);
+    }
+
+    /// 貼り付けの前後に打鍵が続いていても取りこぼさない。
+    #[test]
+    fn keys_around_a_paste_survive() {
+        let mut d = decoder();
+        assert_eq!(
+            d.feed(b"a\x1b[200~xy\x1b[201~b"),
+            vec![Key::Char('a'), Key::Paste(b"xy".to_vec()), Key::Char('b'),]
+        );
+    }
+
+    /// 終わりの列が来ないまま溜まり続けたら、囲みごと素通しに切り替える。
+    #[test]
+    fn a_paste_without_an_end_gives_up() {
+        let mut d = decoder();
+        let big = vec![b'x'; MAX_PASTE + 1];
+        let mut input = PASTE_START.to_vec();
+        input.extend_from_slice(&big);
+        let keys = d.feed(&input);
+        assert_eq!(keys.len(), 1);
+        match &keys[0] {
+            Key::Raw(v) => {
+                assert!(v.starts_with(PASTE_START));
+                assert_eq!(v.len(), PASTE_START.len() + big.len());
+            }
+            other => panic!("素通しになるはず: {other:?}"),
+        }
+        // 諦めたあとは普通の打鍵に戻る
+        assert_eq!(d.feed(b"a"), vec![Key::Char('a')]);
     }
 
     #[test]
