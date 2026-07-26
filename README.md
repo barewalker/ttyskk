@@ -15,7 +15,16 @@ ttyskk -- claude        # 特定のコマンドを包む
 ttyskk vim memo.txt
 ```
 
-## 作る
+## 入れる
+
+GitHub から直に入れられる。**端末で使うぶんにはこれだけでよい** — GUI の入力
+メソッド (`fcitx5/`) と C ABI (`capi/`) は付いてこない。
+
+```sh
+cargo install --git https://github.com/barewalker/ttyskk
+```
+
+更新は同じコマンドに `--force` を足す。手元にクローンしてあるなら次のとおり。
 
 ```sh
 cargo build --release
@@ -35,6 +44,33 @@ sudo pacman -S skk-jisyo    # Arch
 ```
 
 置き場所が違う場合は `TTYSKK_JISYO` で指定する。
+
+設定は無くても動く。変えたくなったら、設定できる項目を全部並べた見本を書き出す。
+
+```sh
+mkdir -p ~/.config/ttyskk
+ttyskk --config-example > ~/.config/ttyskk/config.toml
+```
+
+### GUI の入力メソッドとしても使う (Linux, fcitx5)
+
+同じ変換エンジンを fcitx5 の入力メソッドとして動かせる。**辞書と学習を端末の
+ttyskk と共有する**ので、どちらで覚えた語も両方で先頭に出る。設定 (`config.toml`)
+も同じものを読む。
+
+こちらはソースからの組み立てが要る (fcitx5 の addon は ABI が版に結びつくため、
+使っている fcitx5 と同じ環境で組む必要がある)。
+
+```sh
+sudo apt install fcitx5-modules-dev extra-cmake-modules cmake build-essential
+git clone https://github.com/barewalker/ttyskk && cd ttyskk/fcitx5
+cmake -B build -DCMAKE_INSTALL_PREFIX=/usr && cmake --build build
+sudo cmake --install build
+setsid fcitx5 -r -d >/dev/null 2>&1 </dev/null
+```
+
+`fcitx5-configtool` の入力メソッド一覧に **ttyskk** が出るので追加する。仕組みは
+[`docs/fcitx5-addon.md`](docs/fcitx5-addon.md)。
 
 ## キー操作
 
