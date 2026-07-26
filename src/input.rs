@@ -4,7 +4,7 @@
 //! 意味づけは子アプリの仕事で、入力メソッドが横取りする必要はない。
 
 use ttyskk::config::Config;
-use ttyskk::skk::{Key, PASTE_END, PASTE_START};
+use ttyskk::skk::{Key, PASTE_END, PASTE_START, SHIFT_TAB};
 
 /// 貼り付けを溜め込む上限。これを超えたら諦めて素通しに切り替える。
 ///
@@ -15,11 +15,11 @@ const MAX_PASTE: usize = 1 << 20;
 pub struct Decoder {
     /// UTF-8 の途中で切れた分を次の読み込みまで持ち越す
     partial: Vec<u8>,
-    /// SKK に割り当てられている Ctrl 付きキーの制御文字。
+    /// SKK に割り当てられているキー。
     ///
-    /// 拡張鍵盤プロトコルで届いた形を素の制御文字に戻す対象。設定を書き換えたら
+    /// 拡張鍵盤プロトコルで届いた形を素の形に戻す対象。設定を書き換えたら
     /// `set_config` で入れ替える。
-    ctrl: Vec<u8>,
+    bound: Vec<Key>,
     /// 括弧付き貼り付けの最中なら、そこまでに溜めた中身。
     pasting: Option<Vec<u8>>,
 }
@@ -28,14 +28,14 @@ impl Decoder {
     pub fn new(cfg: &Config) -> Self {
         Decoder {
             partial: Vec::new(),
-            ctrl: cfg.ctrl_keys(),
+            bound: cfg.bound_keys(),
             pasting: None,
         }
     }
 
     /// 設定の入れ替えに追従する。割り当てを変えたキーもその場で効くようになる。
     pub fn set_config(&mut self, cfg: &Config) {
-        self.ctrl = cfg.ctrl_keys();
+        self.bound = cfg.bound_keys();
     }
 
     pub fn feed(&mut self, data: &[u8]) -> Vec<Key> {
@@ -76,7 +76,7 @@ impl Decoder {
             let b = buf[i];
             match b {
                 0x1b => {
-                    let (len, key) = parse_escape(&buf[i..], &self.ctrl);
+                    let (len, key) = parse_escape(&buf[i..], &self.bound);
                     if len == 0 {
                         // 続きが届いていない見込み。持ち越す。
                         self.partial = buf[i..].to_vec();
@@ -150,7 +150,7 @@ fn utf8_len(b: u8) -> usize {
 }
 
 /// エスケープ列を切り出す。長さ 0 は「まだ足りない」の意。
-fn parse_escape(buf: &[u8], ctrl: &[u8]) -> (usize, Key) {
+fn parse_escape(buf: &[u8], bound: &[Key]) -> (usize, Key) {
     if buf.len() == 1 {
         // 単独の ESC。続きが来ないと判断する。
         return (1, Key::Esc);
@@ -166,7 +166,10 @@ fn parse_escape(buf: &[u8], ctrl: &[u8]) -> (usize, Key) {
                 return (0, Key::Esc);
             }
             let seq = &buf[..i + 1];
-            match decode_extended_key(seq, ctrl) {
+            if seq == SHIFT_TAB {
+                return (i + 1, Key::ShiftTab);
+            }
+            match decode_extended_key(seq, bound) {
                 Some(k) => (i + 1, k),
                 None => (i + 1, Key::Raw(seq.to_vec())),
             }
@@ -202,16 +205,16 @@ fn parse_escape(buf: &[u8], ctrl: &[u8]) -> (usize, Key) {
     }
 }
 
-/// 端末の拡張鍵盤プロトコルで届いたキーを、素の制御文字に戻す。
+/// 端末の拡張鍵盤プロトコルで届いたキーを、素の形に戻す。
 ///
 /// Claude Code のように `CSI > 1 u` (kitty) や `CSI > 4 ; 2 m` (modifyOtherKeys) を
 /// 有効にするアプリの下では、`Ctrl+J` が `0x0a` ではなく `CSI 106;5u` の形で届く。
 /// このままでは SKK のモード切り替えが効かない。
 ///
-/// 戻すのは **`ctrl` に挙がったキー、つまり設定で SKK に割り当てられているキーだけ**。
-/// 他のキーを素の制御文字に直してしまうと、子アプリが期待する元の形を壊してしまう
-/// ため、そのまま渡す。対象を設定から作るので、割り当てを変えても付いていく。
-fn decode_extended_key(seq: &[u8], ctrl: &[u8]) -> Option<Key> {
+/// 戻すのは **`bound` に挙がったキー、つまり設定で SKK に割り当てられているキーだけ**。
+/// 他のキーを素の形に直してしまうと、子アプリが期待する元の形を壊してしまうため、
+/// そのまま渡す。対象を設定から作るので、割り当てを変えても付いていく。
+fn decode_extended_key(seq: &[u8], bound: &[Key]) -> Option<Key> {
     let last = *seq.last()?;
     if last != b'u' && last != b'~' {
         return None;
@@ -239,26 +242,29 @@ fn decode_extended_key(seq: &[u8], ctrl: &[u8]) -> Option<Key> {
         _ => return None,
     };
 
-    // 修飾は 1 起点のビット並び (1=shift, 2=alt, 4=ctrl, 8=super)
-    let has_ctrl = mods.unwrap_or(1).saturating_sub(1) & 4 != 0;
-    if !has_ctrl {
-        return None;
-    }
-    let b = ctrl_byte(code)?;
-    ctrl.contains(&b).then_some(Key::Ctrl(b))
+    let k = named_key(code, mods.unwrap_or(1))?;
+    bound.contains(&k).then_some(k)
 }
 
-/// 拡張鍵盤プロトコルの記号を、Ctrl を押したときの制御文字に直す。
+/// 拡張鍵盤プロトコルの (記号, 修飾) を、素の形のキーに直す。
 ///
-/// 端末は Ctrl を押していても記号そのもの (小文字) を送るので、こちらで畳む。
-/// `C-a` = 0x01 … `C-z` = 0x1a、`C-space` = 0x00。設定が作れる Ctrl 付きキーは
-/// この範囲に限られる (`config::parse_key`)。
-fn ctrl_byte(code: u32) -> Option<u8> {
+/// 端末は修飾キーを押していても記号そのもの (小文字) を送るので、こちらで畳む。
+/// `C-a` = 0x01 … `C-z` = 0x1a、`C-space` = 0x00、`Shift+Tab` は `CSI Z` に相当。
+/// 設定が作れる修飾付きのキーはこれだけ (`config::parse_key`)。
+///
+/// 修飾の無い打鍵は対象外 — 印字文字は「曖昧さの解消」段階では素のまま届くので、
+/// 戻す必要がない。
+fn named_key(code: u32, mods: u32) -> Option<Key> {
+    // 修飾は 1 起点のビット並び (1=shift, 2=alt, 4=ctrl, 8=super)
+    let m = mods.saturating_sub(1);
+    let (shift, ctrl) = (m & 1 != 0, m & 4 != 0);
     match code {
         // 空白
-        0x20 => Some(0x00),
+        0x20 if ctrl => Some(Key::Ctrl(0x00)),
         // a-z
-        c @ 0x61..=0x7a => Some(c as u8 & 0x1f),
+        c @ 0x61..=0x7a if ctrl => Some(Key::Ctrl(c as u8 & 0x1f)),
+        // Tab
+        0x09 if shift && !ctrl => Some(Key::ShiftTab),
         _ => None,
     }
 }
@@ -492,6 +498,31 @@ mod tests {
         ] {
             assert_eq!(d.feed(seq), vec![Key::Raw(seq.to_vec())], "{seq:?}");
         }
+    }
+
+    /// Shift+Tab は名前のあるキーとして切り出す (端末は `CSI Z` として送る)。
+    ///
+    /// 設定に端末のバイト列が現れないので、GUI の入力メソッドからも同じキーを作れる。
+    #[test]
+    fn shift_tab_is_a_named_key() {
+        let mut d = decoder();
+        assert_eq!(d.feed(SHIFT_TAB), vec![Key::ShiftTab]);
+        // 拡張鍵盤プロトコルの下でも同じキーになる (Ctrl 付きと同じ扱い)
+        assert_eq!(d.feed(b"\x1b[9;2u"), vec![Key::ShiftTab]);
+        assert_eq!(d.feed(b"\x1b[27;2;9~"), vec![Key::ShiftTab]);
+        // 修飾なしの Tab は素の 0x09 で届くので、こちらは Tab のまま
+        assert_eq!(d.feed(b"\x09"), vec![Key::Tab]);
+    }
+
+    /// 割り当てが外れていれば Shift+Tab も復号しない。
+    #[test]
+    fn shift_tab_follows_the_bindings() {
+        let cfg = Config::parse("[keys]\ncomplete_previous = \"C-p\"\n").unwrap();
+        let mut d = Decoder::new(&cfg);
+        assert_eq!(d.feed(b"\x1b[9;2u"), vec![Key::Raw(b"\x1b[9;2u".to_vec())]);
+        assert_eq!(d.feed(b"\x1b[112;5u"), vec![Key::Ctrl(0x10)]);
+        // 素の CSI Z は端末の Shift+Tab そのものなので、割り当てに関わらず名前が付く
+        assert_eq!(d.feed(SHIFT_TAB), vec![Key::ShiftTab]);
     }
 
     /// 貼り付けは打鍵ではないので、中身を一つのキーにまとめる。

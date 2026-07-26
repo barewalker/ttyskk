@@ -136,7 +136,7 @@ impl Default for Config {
             convert: vec![Key::Char(' ')],
             previous: vec![Key::Char('x')],
             complete: vec![Key::Tab],
-            complete_previous: vec![Key::Raw(b"\x1b[Z".to_vec())],
+            complete_previous: vec![Key::ShiftTab],
             purge: vec![Key::Char('X')],
             affix: vec![Key::Char('>')],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
@@ -185,19 +185,17 @@ impl Config {
         ]
     }
 
-    /// いま SKK 自身の操作に割り当てられている Ctrl 付きキーの制御文字。
+    /// いま SKK 自身の操作に割り当てられているキー。
     ///
-    /// 拡張鍵盤プロトコルの下では Ctrl 付きのキーが `CSI 106;5u` のような形で
-    /// 届く。素の制御文字に戻すのはここに挙がったキーだけにして、割り当ての
-    /// 無いキーは元のバイト列のまま子へ渡す (`input::Decoder`)。
-    pub fn ctrl_keys(&self) -> Vec<u8> {
+    /// 拡張鍵盤プロトコルの下では修飾キーの付いた打鍵が `CSI 106;5u` のような形で
+    /// 届く。素の形に戻すのはここに挙がったキーだけにして、割り当ての無いキーは
+    /// 元のバイト列のまま子へ渡す (`input::Decoder`)。
+    pub fn bound_keys(&self) -> Vec<Key> {
         let mut out = Vec::new();
         for slot in self.key_slots() {
             for k in slot {
-                if let Key::Ctrl(b) = k
-                    && !out.contains(b)
-                {
-                    out.push(*b);
+                if !out.contains(k) {
+                    out.push(k.clone());
                 }
             }
         }
@@ -406,8 +404,7 @@ fn parse_key(spec: &str) -> Result<Key> {
         "tab" => return Ok(Key::Tab),
         "esc" | "escape" => return Ok(Key::Esc),
         "bs" | "backspace" | "del" => return Ok(Key::Backspace),
-        // 端末は Shift+Tab を CSI Z として送る
-        "s-tab" | "shift-tab" | "btab" => return Ok(Key::Raw(b"\x1b[Z".to_vec())),
+        "s-tab" | "shift-tab" | "btab" => return Ok(Key::ShiftTab),
         _ => {}
     }
     for prefix in ["c-", "ctrl-", "ctrl+", "control-"] {
@@ -497,21 +494,22 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_keys_lists_the_bound_control_characters() {
-        let c = Config::default().ctrl_keys();
-        assert!(c.contains(&0x0a), "C-j"); // kana / confirm
-        assert!(c.contains(&0x07), "C-g"); // cancel
-        assert!(c.contains(&0x11), "C-q"); // hankaku_katakana
+    fn bound_keys_lists_what_skk_uses() {
+        let c = Config::default().bound_keys();
+        assert!(c.contains(&Key::Ctrl(0x0a)), "C-j"); // kana / confirm
+        assert!(c.contains(&Key::Ctrl(0x07)), "C-g"); // cancel
+        assert!(c.contains(&Key::Ctrl(0x11)), "C-q"); // hankaku_katakana
+        assert!(c.contains(&Key::ShiftTab), "S-tab"); // complete_previous
         // 割り当ての無いキーは挙げない (子アプリの操作を奪わない)
-        assert!(!c.contains(&0x1a), "C-z");
+        assert!(!c.contains(&Key::Ctrl(0x1a)), "C-z");
         // ascii_keys は子アプリのキーへの便乗なので、形を変えずに渡す
-        assert!(!c.contains(&0x03), "C-c");
+        assert!(!c.contains(&Key::Ctrl(0x03)), "C-c");
     }
 
     /// キーの項目を足して `key_slots` に足し忘れると、そのキーだけ拡張鍵盤
     /// プロトコルを使うアプリの下で効かなくなる。全項目を Ctrl に割り当てて見張る。
     #[test]
-    fn ctrl_keys_covers_every_binding() {
+    fn bound_keys_covers_every_binding() {
         let names = [
             "kana",
             "confirm",
@@ -537,11 +535,17 @@ mod tests {
         }
         text.push_str("\n[behavior]\nascii_keys = [\"C-p\"]\n");
 
-        let got = Config::parse(&text).unwrap().ctrl_keys();
+        let got = Config::parse(&text).unwrap().bound_keys();
         for c in letters.chars() {
-            assert!(got.contains(&(c as u8 & 0x1f)), "C-{c} が漏れている");
+            assert!(
+                got.contains(&Key::Ctrl(c as u8 & 0x1f)),
+                "C-{c} が漏れている"
+            );
         }
-        assert!(!got.contains(&0x10), "ascii_keys の C-p は対象外");
+        assert!(
+            !got.contains(&Key::Ctrl(0x10)),
+            "ascii_keys の C-p は対象外"
+        );
     }
 
     #[test]

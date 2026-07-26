@@ -16,6 +16,9 @@ use crate::dict::{Candidate, Dict};
 /// 貼り付けを組み直すのがここ (`raw_bytes`) なので、定義もここに置いている。
 pub const PASTE_START: &[u8] = b"\x1b[200~";
 pub const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// 端末が Shift+Tab に使うバイト列 (`CSI Z`)。
+pub const SHIFT_TAB: &[u8] = b"\x1b[Z";
 use crate::num;
 use crate::romaji::{self, Romaji};
 
@@ -50,7 +53,11 @@ enum Phase {
     Selecting,
 }
 
-/// 押されたキー。エスケープ列は解釈せず素通しする。
+/// 押されたキー。
+///
+/// SKK が割り当てに使う分だけを名前で持ち、それ以外のエスケープ列は解釈せず
+/// [`Key::Raw`] のまま素通しする。**名前のあるものは端末のバイト列を含まない**ので、
+/// GUI の入力メソッドから組み立てるときも `Raw` を作る必要がない。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     Char(char),
@@ -58,7 +65,12 @@ pub enum Key {
     Enter,
     Backspace,
     Tab,
+    /// Shift+Tab。端末は `CSI Z` として送る。
+    ShiftTab,
     Esc,
+    /// 解釈しないキーの、端末から届いたままのバイト列。
+    ///
+    /// 矢印や機能キーがここに入る。エンジンは中身を見ず、そのまま返すだけ。
     Raw(Vec<u8>),
     /// 括弧付き貼り付けで届いた中身 (開始・終了の列は含まない)。
     ///
@@ -1262,6 +1274,7 @@ fn raw_bytes(k: &Key) -> Vec<u8> {
         Key::Enter => vec![0x0d],
         Key::Backspace => vec![0x7f],
         Key::Tab => vec![0x09],
+        Key::ShiftTab => SHIFT_TAB.to_vec(),
         Key::Esc => vec![0x1b],
         Key::Raw(v) => v.clone(),
         // 括弧付き貼り付けは子アプリも括弧で受け取る前提なので、囲みごと組み直す
@@ -1690,7 +1703,7 @@ mod tests {
         skk.handle(Key::Tab);
         assert_eq!(preedit_text(&skk), "▽かんじ");
         // Shift+Tab で戻る
-        skk.handle(Key::Raw(b"\x1b[Z".to_vec()));
+        skk.handle(Key::ShiftTab);
         assert_eq!(preedit_text(&skk), "▽かんきょう");
 
         // 補完したものはそのまま変換できる
