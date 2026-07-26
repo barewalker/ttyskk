@@ -254,15 +254,65 @@ fn is_consonant(c: char) -> bool {
     c.is_ascii_alphabetic() && !matches!(c.to_ascii_lowercase(), 'a' | 'i' | 'u' | 'e' | 'o')
 }
 
+/// `.` と `,` から出す句読点の組。
+///
+/// 変換表そのものは「。、」を持ち、ここで指定された組へ差し替える。ddskk の
+/// `skk-kutouten-type` と同じ四通り。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kutouten {
+    /// 。 、 (既定)
+    #[default]
+    Jp,
+    /// ． ，
+    En,
+    /// 。 ，
+    JpEn,
+    /// ． 、
+    EnJp,
+}
+
+impl Kutouten {
+    /// (句点, 読点)
+    fn pair(self) -> (char, char) {
+        match self {
+            Kutouten::Jp => ('。', '、'),
+            Kutouten::En => ('．', '，'),
+            Kutouten::JpEn => ('。', '，'),
+            Kutouten::EnJp => ('．', '、'),
+        }
+    }
+
+    /// 変換表から出たかなの句読点を、この組へ差し替える。
+    fn apply(self, s: String) -> String {
+        if self == Kutouten::Jp {
+            return s;
+        }
+        let (kuten, touten) = self.pair();
+        s.chars()
+            .map(|c| match c {
+                '。' => kuten,
+                '、' => touten,
+                c => c,
+            })
+            .collect()
+    }
+}
+
 /// ローマ字の入力途中を保持し、確定したかなを吐き出す。
 #[derive(Default)]
 pub struct Romaji {
     buf: String,
+    kutouten: Kutouten,
 }
 
 impl Romaji {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 句読点の組を差し替える。設定の書き換えに追従するために使う。
+    pub fn set_kutouten(&mut self, k: Kutouten) {
+        self.kutouten = k;
     }
 
     /// 未確定のローマ字。
@@ -324,7 +374,7 @@ impl Romaji {
                 }
             }
         }
-        out
+        self.kutouten.apply(out)
     }
 
     /// 入力を打ち切る。"n" だけは「ん」として確定し、それ以外の半端な子音は捨てる。
@@ -473,6 +523,41 @@ pub fn to_hankaku_katakana(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn typed(r: &mut Romaji, s: &str) -> String {
+        s.chars().map(|c| r.feed(c)).collect()
+    }
+
+    /// 句読点は設定した組で出る (ddskk の skk-kutouten-type と同じ四通り)。
+    #[test]
+    fn kutouten_follows_the_setting() {
+        for (k, want) in [
+            (Kutouten::Jp, "あ。い、"),
+            (Kutouten::En, "あ．い，"),
+            (Kutouten::JpEn, "あ。い，"),
+            (Kutouten::EnJp, "あ．い、"),
+        ] {
+            let mut r = Romaji::new();
+            r.set_kutouten(k);
+            assert_eq!(typed(&mut r, "a.i,"), want, "{k:?}");
+        }
+    }
+
+    /// 三点リーダなど、句読点を含まない記号は差し替えの対象外。
+    #[test]
+    fn kutouten_leaves_other_symbols_alone() {
+        let mut r = Romaji::new();
+        r.set_kutouten(Kutouten::En);
+        assert_eq!(typed(&mut r, "z.z,"), "…‥");
+    }
+
+    /// 撥音と句点が一度に出るときも差し替わる。
+    #[test]
+    fn kutouten_applies_to_a_flushed_n() {
+        let mut r = Romaji::new();
+        r.set_kutouten(Kutouten::En);
+        assert_eq!(typed(&mut r, "n."), "ん．");
+    }
 
     #[test]
     fn hankaku_katakana() {

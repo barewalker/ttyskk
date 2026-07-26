@@ -220,6 +220,8 @@ struct Registration {
     okuri_head: Option<char>,
     okuri_kana: String,
     abbrev: bool,
+    /// 自動変換の引き金になった文字 (登録を終えたら後ろに付ける)
+    auto_suffix: String,
 }
 
 impl Registration {
@@ -280,15 +282,23 @@ pub struct Skk {
     /// 直接入力で何か文字を出したら捨てる。接頭辞と次の語が画面上で隣り合って
     /// いることが繋げる条件なので (ddskk は `looking-at` で同じことを確かめる)。
     last_commit: Option<(String, String)>,
+    /// 自動変換 (auto-start-henkan) の引き金になった文字。
+    ///
+    /// 「ほんやくを」と打つと `を` の手前までで変換を始め、`を` はそのまま候補の
+    /// 後ろに置く。確定するまで候補と一緒に動くので、確定した文字列の一部として
+    /// 持っておく必要がある。
+    auto_suffix: String,
 }
 
 impl Skk {
     pub fn new(dict: Dict, cfg: Config) -> Self {
+        let mut romaji = Romaji::new();
+        romaji.set_kutouten(cfg.kutouten);
         Skk {
             cfg,
             mode: Mode::Ascii,
             phase: Phase::Direct,
-            romaji: Romaji::new(),
+            romaji,
             reading: String::new(),
             okuri_head: None,
             okuri_kana: String::new(),
@@ -301,6 +311,7 @@ impl Skk {
             regs: Vec::new(),
             completion: None,
             last_commit: None,
+            auto_suffix: String::new(),
         }
     }
 
@@ -319,6 +330,7 @@ impl Skk {
     /// 参照するのは次のキーを解釈するときだけだから。一覧の頁の大きさが変わると
     /// 表示中の頁の切れ目は変わるが、選んでいる候補そのものはずれない。
     pub fn set_config(&mut self, cfg: Config) {
+        self.romaji.set_kutouten(cfg.kutouten);
         self.cfg = cfg;
     }
 
@@ -384,7 +396,7 @@ impl Skk {
                     .unwrap_or_default();
                 segs.push(Segment {
                     style: Style::Candidate,
-                    text: format!("▼{}{}", cur, self.okuri_kana),
+                    text: format!("▼{}{}{}", cur, self.okuri_kana, self.auto_suffix),
                 });
                 if let Some(annot) = self
                     .current_candidate()
@@ -612,6 +624,7 @@ impl Skk {
         self.cand_index = 0;
         self.numbers.clear();
         self.dict_key.clear();
+        self.auto_suffix.clear();
     }
 
     /// かなをモードに合わせて整える。
@@ -709,6 +722,7 @@ impl Skk {
             okuri_head: self.okuri_head,
             okuri_kana: self.okuri_kana.clone(),
             abbrev: self.abbrev,
+            auto_suffix: std::mem::take(&mut self.auto_suffix),
         });
         self.reset();
     }
@@ -729,7 +743,7 @@ impl Skk {
             annotation: None,
         };
         self.dict.learn(&reg.key, &cand);
-        let text = format!("{}{}", reg.buffer, reg.okuri_kana);
+        let text = format!("{}{}{}", reg.buffer, reg.okuri_kana, reg.auto_suffix);
         self.capture(Response::text(&text))
     }
 
@@ -997,6 +1011,8 @@ impl Skk {
                     if !self.okuri_kana.is_empty() && self.romaji.is_empty() {
                         self.start_conversion();
                     }
+                } else if self.auto_start(&kana) {
+                    // 区切りの文字が来たので、その手前までで変換を始めた
                 } else {
                     self.reading.push_str(&kana);
                 }
@@ -1059,6 +1075,32 @@ impl Skk {
         if let Some(c) = self.completion.as_ref() {
             self.reading = c.words[c.index].clone();
         }
+    }
+
+    /// 自動変換 (auto-start-henkan)。区切りの文字が来たら、その手前までで変換を始める。
+    ///
+    /// 「ほんやくを」と打つと `を` の直前までの `ほんやく` で変換に入り、`を` は
+    /// 候補の後ろに置かれる (ddskk の `skk-auto-start-henkan`)。**引き金の文字は
+    /// 見出し語に含めない** — 含めると辞書を引けなくなる。
+    ///
+    /// 始めたなら true。呼ぶ側はかなを見出し語へ足さない。
+    fn auto_start(&mut self, kana: &str) -> bool {
+        let Some(last) = kana.chars().next_back() else {
+            return false;
+        };
+        if self.abbrev || !self.cfg.auto_start_henkan.contains(&last) {
+            return false;
+        }
+        // 引き金の手前までは見出し語の一部
+        let head = &kana[..kana.len() - last.len_utf8()];
+        if self.reading.is_empty() && head.is_empty() {
+            // 見出し語が空では引きようがない。ただの文字として扱う。
+            return false;
+        }
+        self.reading.push_str(head);
+        self.auto_suffix = last.to_string();
+        self.start_conversion();
+        true
     }
 
     fn start_conversion(&mut self) {
@@ -1257,7 +1299,7 @@ impl Skk {
                 self.dict.learn(&key, &cand);
                 let okuri = self.okuri_head.is_some();
                 self.note_commit(self.dict_key.clone(), shown.clone(), okuri);
-                format!("{}{}", shown, self.okuri_kana)
+                format!("{}{}{}", shown, self.okuri_kana, self.auto_suffix)
             }
             None => String::new(),
         };
@@ -1485,6 +1527,86 @@ mod tests {
             Vec::<u8>::new()
         );
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 区切りの文字が来たら、その手前までで自動的に変換を始める。
+    ///
+    /// 「ほんやくを」と打つと `を` の直前で変換に入り、`を` は候補の後ろに置かれる。
+    /// **引き金の文字は見出し語に含めない** — 含めると辞書を引けない。
+    #[test]
+    fn auto_start_henkan_converts_before_the_keyword() {
+        let mut skk = skk_with(&[("ほんやく", "/翻訳/飜訳/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Honnyaku");
+        assert_eq!(preedit_text(&skk), "▽ほんやく");
+
+        // 「を」で変換が始まり、「を」は候補の後ろに付く
+        typed(&mut skk, "wo");
+        assert_eq!(preedit_text(&skk), "▼翻訳を");
+        // 候補を送っても「を」はそのまま残る
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼飜訳を");
+        assert_eq!(typed(&mut skk, "\n"), "飜訳を");
+    }
+
+    /// 句点でも始まる。撥音と一度に出るときは「ん」までが見出し語。
+    #[test]
+    fn auto_start_henkan_keeps_the_kana_before_the_keyword() {
+        let mut skk = skk_with(&[("にほん", "/日本/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihon");
+        // 「n」はまだローマ字のまま。「.」で「ん」と「。」が一度に出る
+        assert_eq!(preedit_text(&skk), "▽にほn");
+        typed(&mut skk, ".");
+        assert_eq!(preedit_text(&skk), "▼日本。");
+        assert_eq!(typed(&mut skk, "\n"), "日本。");
+    }
+
+    /// 候補が無ければ登録へ移り、登録を終えると引き金の文字が後ろに付く。
+    #[test]
+    fn auto_start_henkan_survives_the_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Honnyaku");
+        typed(&mut skk, "wo");
+        assert_eq!(preedit_text(&skk), "[登録:ほんやく]");
+        typed(&mut skk, "honnyaku");
+        assert_eq!(preedit_text(&skk), "[登録:ほんやく]ほんやく");
+        assert_eq!(typed(&mut skk, "\r"), "ほんやくを");
+    }
+
+    /// 見出し語が空のときは、ただの文字として入る。
+    #[test]
+    fn auto_start_henkan_needs_a_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "wo"), "を");
+        // ▽ を始めた直後も同じ
+        typed(&mut skk, "Q");
+        assert_eq!(preedit_text(&skk), "▽");
+        typed(&mut skk, "wo");
+        assert_eq!(preedit_text(&skk), "▽を");
+    }
+
+    /// 空の並びを設定すると自動変換をしない。
+    #[test]
+    fn auto_start_henkan_can_be_turned_off() {
+        let mut skk = skk_with(&[("ほんやく", "/翻訳/")]);
+        let mut cfg = Config::default();
+        cfg.auto_start_henkan.clear();
+        skk.set_config(cfg);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Honnyakuwo");
+        assert_eq!(preedit_text(&skk), "▽ほんやくを");
+    }
+
+    /// abbrev (ASCII 見出し語) では働かない。記号がそのまま見出し語になる。
+    #[test]
+    fn auto_start_henkan_stays_out_of_abbrev() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "/ab.");
+        assert_eq!(preedit_text(&skk), "▽ab.");
     }
 
     /// 確定した文字列と、解釈しなかったキーは別々に取れる。

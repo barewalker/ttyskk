@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 
+use crate::romaji::Kutouten;
 use crate::skk::Key;
 use unicode_width::UnicodeWidthChar;
 
@@ -108,6 +109,14 @@ pub struct Config {
     /// そう)。文字として書いた色はそのまま届くので、色でモードを見分けたい場合は
     /// これを使う。ASCII モードでは何も描かないので、そのときの完全透過は保つ。
     pub mode_marker: Marker,
+    /// `.` と `,` から出す句読点の組。
+    pub kutouten: Kutouten,
+    /// 見出し語の入力中にこれらの文字が来たら、その手前までで変換を始める。
+    ///
+    /// 「ほんやくを」と打つと `を` の直前で変換に入り、`を` は候補の後ろに置かれる。
+    /// ddskk の `skk-auto-start-henkan-keyword-list` と同じ。空にすると自動変換を
+    /// しない。
+    pub auto_start_henkan: Vec<char>,
     /// 接頭辞・接尾辞に続けて確定した語を、繋げて辞書に覚えるか。
     ///
     /// 「さい>」→再 のあと「りよう」→利用 と確定したら `さいりよう /再利用/` を
@@ -144,6 +153,9 @@ impl Default for Config {
             layout: Layout::Inline,
             mode_symbols: ['~', '+', '-', '@'],
             mode_marker: Marker::Cell,
+            kutouten: Kutouten::Jp,
+            // ddskk の skk-auto-start-henkan-keyword-list と同じ顔ぶれ
+            auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
         }
@@ -286,6 +298,21 @@ impl Config {
                             cfg.mode_symbols[i] = parse_symbol(name, v)?;
                         }
                     }
+                    "kutouten" => {
+                        cfg.kutouten = match value.as_str() {
+                            Some("jp") => Kutouten::Jp,
+                            Some("en") => Kutouten::En,
+                            Some("jp-en") => Kutouten::JpEn,
+                            Some("en-jp") => Kutouten::EnJp,
+                            _ => bail!(
+                                "behavior.kutouten は \"jp\" (。、) / \"en\" (．，) / \"jp-en\" (。，) / \"en-jp\" (．、)"
+                            ),
+                        }
+                    }
+                    // ここも空の並びを許す (自動変換をやめる指定になる)
+                    "auto_start_henkan" => {
+                        cfg.auto_start_henkan = parse_chars("auto_start_henkan", value)?
+                    }
                     "learn_combined" => {
                         cfg.learn_combined = value
                             .as_bool()
@@ -370,6 +397,26 @@ fn parse_select(value: &toml::Value) -> Result<Vec<char>> {
         bail!("keys.select が空");
     }
     Ok(out)
+}
+
+/// 文字の集まり。まとめた文字列一つでも、一文字ずつの並びでも受ける。
+///
+/// 空の並びは「その働きをやめる」の意味になるので許す。
+fn parse_chars(name: &str, value: &toml::Value) -> Result<Vec<char>> {
+    match value {
+        toml::Value::String(s) => Ok(s.chars().collect()),
+        toml::Value::Array(a) => {
+            let mut out = Vec::new();
+            for v in a {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("behavior.{name} の並びは文字列だけ"))?;
+                out.extend(s.chars());
+            }
+            Ok(out)
+        }
+        _ => bail!("behavior.{name} は文字列か文字列の並び"),
+    }
 }
 
 /// モードの印に使う記号。半角の一文字だけを認める。
