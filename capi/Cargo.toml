@@ -9,9 +9,12 @@ rust-version = "1.88"
 publish = false
 
 [lib]
-# 共有ライブラリとして fcitx5 の addon から読む。名前は libttyskk.so になる。
+# fcitx5 の addon から静的に取り込む (libttyskk.a)。共有ライブラリも一応出す。
+#
+# rlib は出さない。ルートの crate も lib 名が ttyskk なので、両方が rlib を出すと
+# 「どちらの ttyskk か」が定まらず doc test のリンクで詰まる。
 name = "ttyskk"
-crate-type = ["cdylib", "staticlib", "rlib"]
+crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 # 端末側の実装は要らないので落とす。

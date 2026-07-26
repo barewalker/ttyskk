@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
@@ -62,6 +63,11 @@ pub struct Dict {
     /// 消し合ってしまう。保存時にディスクの内容を読み直し、この記録だけを
     /// 順に重ねることで、他のペインの学習を残したまま書ける。
     changes: Vec<Change>,
+    /// 利用者辞書を最後に読んだ (または書いた) ときの状態。
+    ///
+    /// 別のプロセスが書き換えたかどうかを、これと突き合わせて判る。自分で書いた
+    /// 直後にも更新するので、自分の保存で読み直しが走ることはない。
+    user_stamp: Option<(SystemTime, u64)>,
     /// 共有辞書の見出し語を並べ替えたもの。前方一致を二分探索で取り出す。
     ///
     /// 17 万語を毎回舐めると一回 5〜7 ms かかり、打鍵ごとに引く用途には重い。
@@ -154,12 +160,14 @@ impl Dict {
             .collect();
         system_sorted.sort_unstable();
 
+        let user_stamp = stamp(&user_path);
         Ok(Dict {
             system,
             user,
             user_path,
             import_path,
             changes: Vec::new(),
+            user_stamp,
             system_sorted,
         })
     }
@@ -167,6 +175,44 @@ impl Dict {
     /// 共有辞書の見出し語数。
     pub fn system_len(&self) -> usize {
         self.system.len()
+    }
+
+    /// 利用者辞書が別のプロセスに書き換えられていたら読み直す。読んだら true。
+    ///
+    /// GUI の入力メソッドや、別のペインの ttyskk が覚えたことを取り込むためのもの。
+    /// **この起動で覚えたことは保つ** — ディスクの内容を土台に、自分の記録
+    /// (`changes`) を上から重ねる。保存のときと同じ順序なので、どちらが先に書いても
+    /// 結果は変わらない。
+    ///
+    /// 自分で保存した直後は目印を更新してあるので、ここで読み直しは起きない。
+    pub fn reload_user(&mut self) -> Result<bool> {
+        let now = stamp(&self.user_path);
+        if now == self.user_stamp {
+            return Ok(false);
+        }
+        self.user_stamp = now;
+
+        let mut user = HashMap::new();
+        if self.user_path.exists() {
+            load_into(&mut user, &read_jisyo(&self.user_path)?);
+        }
+        for change in &self.changes {
+            match change {
+                Change::Learn(key, cand) => {
+                    move_to_front(user.entry(key.clone()).or_default(), cand)
+                }
+                Change::Purge(key, text) => {
+                    if let Some(v) = user.get_mut(key) {
+                        v.retain(|c| c.text != *text);
+                        if v.is_empty() {
+                            user.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+        self.user = user;
+        Ok(true)
     }
 
     /// 見出し語を引く。利用者辞書の順序を優先し、共有辞書の候補を後ろに足す。
@@ -310,8 +356,19 @@ impl Dict {
         }
         fs::rename(&tmp, &self.user_path)?;
         self.changes.clear();
+        self.user = merged;
+        self.user_stamp = stamp(&self.user_path);
         Ok(())
     }
+}
+
+/// ファイルの「いまの状態」。存在しない場合も含めて表す。
+///
+/// 更新時刻と大きさの組で見る。編集器が別名で書いて置き換える場合も、消してから
+/// 作り直す場合も同じように拾える (設定ファイルの見張りと同じ考え方)。
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let m = fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 fn move_to_front(entry: &mut Vec<Candidate>, cand: &Candidate) {
@@ -395,6 +452,7 @@ mod tests {
             user_path: PathBuf::from("/dev/null"),
             import_path: None,
             changes: Vec::new(),
+            user_stamp: None,
             system_sorted,
         };
         // 利用者辞書のものが先、そのあと共有辞書。同じ長さなら辞書順。
@@ -435,6 +493,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["漢字"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 別のプロセスが覚えたことを、起動し直さずに取り込む。
+    ///
+    /// GUI の入力メソッドと端末の ttyskk が同じ利用者辞書を使うので、**動いている
+    /// 最中に外から書き換わる**。自分がこの起動で覚えたことは失わない。
+    #[test]
+    fn reloads_what_another_process_learned() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("user.dict");
+        std::fs::write(&path, ";; okuri-nasi entries.\nかんじ /漢字/幹事/\n").unwrap();
+
+        let mut d = Dict::load(&[], path.clone(), None).unwrap();
+        // こちらは「にほん」を覚えた (まだ書き出していない)
+        d.learn(
+            "にほん",
+            &Candidate {
+                text: "日本".into(),
+                annotation: None,
+            },
+        );
+
+        // その間に別のプロセスが「かんじ」の並びを変え、「とうきょう」を足した
+        std::fs::write(
+            &path,
+            ";; okuri-nasi entries.\nかんじ /幹事/漢字/\nとうきょう /東京/\n",
+        )
+        .unwrap();
+
+        assert!(d.reload_user().unwrap(), "書き換わっていたので読み直す");
+        // 向こうの学習が入り
+        assert_eq!(d.lookup("かんじ")[0].text, "幹事");
+        assert_eq!(d.lookup("とうきょう")[0].text, "東京");
+        // こちらの学習も残る
+        assert_eq!(d.lookup("にほん")[0].text, "日本");
+
+        // 変わっていなければ読み直さない
+        assert!(!d.reload_user().unwrap());
+
+        // 自分で保存した直後も読み直しは起きない (目印を更新するため)
+        d.save().unwrap();
+        assert!(!d.reload_user().unwrap());
+        // 保存した内容には両方入っている
+        let fresh = Dict::load(&[], path.clone(), None).unwrap();
+        assert_eq!(fresh.lookup("にほん")[0].text, "日本");
+        assert_eq!(fresh.lookup("とうきょう")[0].text, "東京");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

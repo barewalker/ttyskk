@@ -65,6 +65,8 @@ enum Event {
     Winch,
     /// 設定ファイルが書き換わって読み直せた
     Reconfigured(Box<Config>),
+    /// 利用者辞書が別のプロセス (GUI の入力メソッドなど) に書き換えられた
+    DictChanged,
 }
 
 /// 端末を raw モードにし、終了時に必ず元へ戻す。
@@ -437,6 +439,15 @@ fn main() -> Result<()> {
         Event::Reconfigured(Box::new(c))
     });
 
+    // 利用者辞書の書き換えを見張る。GUI の入力メソッドや別のペインの ttyskk が
+    // 覚えたことを、起動し直さずに取り込む。
+    {
+        let tx = tx.clone();
+        config::watch_path(user_jisyo(), move || {
+            let _ = tx.send(Event::DictChanged);
+        });
+    }
+
     // 位置を尋ねている間に打たれた文字は、まだ処理していないので改めて流し込む
     if !typeahead.is_empty() {
         let _ = tx.send(Event::Input(typeahead));
@@ -585,6 +596,14 @@ fn main() -> Result<()> {
                 // 子が描き直し始めたら報告は古くなるので、その場合は捨てる。
                 request_cursor_report(&mut stdout);
                 awaiting_report = true;
+            }
+            Event::DictChanged => {
+                // 自分が保存した直後なら、目印が一致するので読み直しは起きない
+                match skk.dict_mut().reload_user() {
+                    Ok(true) => trace.log(format_args!("--- 利用者辞書を読み直した")),
+                    Ok(false) => {}
+                    Err(e) => trace.log(format_args!("--- 利用者辞書を読み直せない: {e}")),
+                }
             }
             Event::Reconfigured(cfg) => {
                 // 復号の対象は設定から作るので、切り出す側にも同じ設定を渡す

@@ -511,6 +511,22 @@ pub fn watch<F>(path: PathBuf, mut on_change: F)
 where
     F: FnMut(Config) + Send + 'static,
 {
+    let p = path.clone();
+    watch_path(path, move || {
+        if let Ok(cfg) = Config::load(&p) {
+            on_change(cfg);
+        }
+    });
+}
+
+/// ファイルの書き換えを見張り、変わるたびに知らせる。
+///
+/// 更新時刻と大きさだけを見るので、中身が何であっても使える。利用者辞書のように、
+/// **別のプロセスが書き換えるもの**を追うのにも使う。
+pub fn watch_path<F>(path: PathBuf, mut on_change: F)
+where
+    F: FnMut() + Send + 'static,
+{
     std::thread::spawn(move || {
         let mut last = stamp(&path);
         loop {
@@ -520,9 +536,7 @@ where
                 continue;
             }
             last = now;
-            if let Ok(cfg) = Config::load(&path) {
-                on_change(cfg);
-            }
+            on_change();
         }
     });
 }

@@ -8,6 +8,7 @@
 #ifndef FCITX5_TTYSKK_ENGINE_H
 #define FCITX5_TTYSKK_ENGINE_H
 
+#include <fcitx-utils/event.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
 #include <fcitx/addonmanager.h>
@@ -40,10 +41,16 @@ private:
     void updateUI(InputContext *ic);
     /* 設定ファイルを読み直してエンジンへ渡す。 */
     void reloadConfig() override;
+    /* 覚えたことの書き出しを予約する。 */
+    void scheduleSave();
+    /* いま書き出す (予約は取り消す)。 */
+    void saveNow();
 
     Instance *instance_;
     /* Rust 側の変換エンジン。作れなければ nullptr で、その場合は何も横取りしない。 */
     ::TtyskkEngine *engine_ = nullptr;
+    /* 書き出しの予約。打鍵のたびに書くとディスクを叩きすぎるので少し待つ。 */
+    std::unique_ptr<EventSourceTime> saveTimer_;
 };
 
 class TtyskkEngineFactory : public AddonFactory {

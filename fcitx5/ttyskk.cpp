@@ -63,8 +63,37 @@ TtyskkEngine::TtyskkEngine(Instance *instance) : instance_(instance) {
 TtyskkEngine::~TtyskkEngine() {
     if (engine_) {
         /* 覚えたことを書き出してから捨てる。 */
-        ttyskk_save(engine_);
+        saveNow();
         ttyskk_free(engine_);
+    }
+}
+
+/* 覚えたことを書き出すまでの待ち。
+ *
+ * 確定のたびに書くとディスクを叩きすぎる。逆に入力メソッドを離れるまで待つと、
+ * 端末の ttyskk から見えるようになるのが遅すぎる (窓ごとに入力コンテキストが
+ * 独立しているので、別の窓で切り替えても離れたことにならない)。 */
+static constexpr uint64_t SAVE_DELAY_USEC = 3 * 1000 * 1000;
+
+void TtyskkEngine::scheduleSave() {
+    if (!engine_ || saveTimer_) {
+        return; /* すでに予約してある */
+    }
+    saveTimer_ = instance_->eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + SAVE_DELAY_USEC, 0,
+        [this](EventSourceTime *, uint64_t) {
+            if (engine_) {
+                ttyskk_save(engine_);
+            }
+            saveTimer_.reset();
+            return true;
+        });
+}
+
+void TtyskkEngine::saveNow() {
+    saveTimer_.reset();
+    if (engine_) {
+        ttyskk_save(engine_);
     }
 }
 
@@ -91,6 +120,8 @@ void TtyskkEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
     const char *commit = ttyskk_commit(engine_);
     if (commit && *commit) {
         ic->commitString(commit);
+        /* 確定したということは何か覚えた見込みがある。少し置いて書き出す。 */
+        scheduleSave();
     }
     updateUI(ic);
 
@@ -129,11 +160,8 @@ void TtyskkEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
 
 void TtyskkEngine::deactivate(const InputMethodEntry &entry,
                               InputContextEvent &event) {
-    /* 入力メソッドを離れるときは、覚えたことを書き出しておく。
-     * fcitx5 は長く動き続けるので、終了時だけでは失われる。 */
-    if (engine_) {
-        ttyskk_save(engine_);
-    }
+    /* 入力メソッドを離れるときは、待たずに書き出す。 */
+    saveNow();
     reset(entry, event);
 }
 
