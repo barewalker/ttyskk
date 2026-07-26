@@ -21,8 +21,12 @@ GitHub から直に入れられる。**端末で使うぶんにはこれだけ�
 メソッド (`fcitx5/`) と C ABI (`capi/`) は付いてこない。
 
 ```sh
-cargo install --git https://github.com/barewalker/ttyskk
+cargo install --locked --git https://github.com/barewalker/ttyskk
 ```
+
+`--locked` を付けると、同梱の `Cargo.lock` がそのまま使われる。付けないと cargo が
+依存をその時点の最新で解決し直すので、依存の側が新しい Rust を要求していると止まる
+ことがある。**Rust は 1.88 以降**が要る。
 
 更新は同じコマンドに `--force` を足す。手元にクローンしてあるなら次のとおり。
 
