@@ -35,6 +35,11 @@
 #define TTYSKK_STYLE_CANDIDATE 2
 
 /**
+ * 見出し語の中でカーソルが乗っている一文字。入力メソッド側で位置を示すのに使う。
+ */
+#define TTYSKK_STYLE_READING_CURSOR 3
+
+/**
  * 変換エンジンひとつ分。C 側からは不透明な入れ物として扱う。
  */
 typedef struct TtyskkEngine TtyskkEngine;

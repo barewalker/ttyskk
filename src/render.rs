@@ -13,6 +13,9 @@ fn style_sgr(style: Style) -> &'static str {
     match style {
         // 変換対象は太字 + 下線
         Style::Reading => "\x1b[0;1;4m",
+        // 見出し語の中のカーソルは、そこだけ反転させる。重ね描きの間は端末の
+        // カーソルを隠しているので、位置はこの一文字でしか示せない。
+        Style::ReadingCursor => "\x1b[0;1;4;7m",
         // かなになっていないローマ字は緑
         Style::Romaji => "\x1b[0;1;32m",
         // 選択中の候補は太字 + 下線 + 赤

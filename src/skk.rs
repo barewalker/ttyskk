@@ -84,6 +84,12 @@ pub enum Key {
 pub enum Style {
     /// ▽ / ▼ の印と見出し語
     Reading,
+    /// ▽ の見出し語のうち、カーソルが乗っている一文字。
+    ///
+    /// 重ね描きしている間は端末のカーソルを隠している (`render::Overlay::draw`) ので、
+    /// 見出し語の中を動いている位置は文字の見た目でしか示せない。カーソルを末尾から
+    /// 動かしていないときは区間そのものが作られない。
+    ReadingCursor,
     /// かなになっていないローマ字
     Romaji,
     /// 選択中の候補
@@ -260,6 +266,11 @@ pub struct Skk {
     romaji: Romaji,
     /// 見出し語。常にひらがなで保持し、表示時にモードへ合わせる。
     reading: String,
+    /// 見出し語の中の書き込み位置 (`reading` のバイト位置)。
+    ///
+    /// 打っている間は常に末尾にあり、移動キーで動かしたときだけ途中を指す。
+    /// 送り仮名はこの位置の外側にあるので、動かせるのは見出し語の中だけ。
+    read_cursor: usize,
     /// 送り仮名のローマ字頭文字。送りあり変換の見出し語に使う。
     okuri_head: Option<char>,
     okuri_kana: String,
@@ -301,6 +312,7 @@ impl Skk {
             phase: Phase::Direct,
             romaji,
             reading: String::new(),
+            read_cursor: 0,
             okuri_head: None,
             okuri_kana: String::new(),
             abbrev: false,
@@ -425,9 +437,13 @@ impl Skk {
                 }
             }
             Phase::Composing => {
+                // カーソルの手前 → 打ちかけのローマ字 → カーソルの一文字 → 残り、の順。
+                // カーソルを末尾から動かしていなければ最初の区間だけになり、
+                // 見出し語も送り仮名も一続きに出る。
+                let (before, after) = self.reading.split_at(self.read_cursor);
                 let mut head = String::from("▽");
-                head.push_str(&self.display_reading());
-                if self.okuri_head.is_some() {
+                head.push_str(&self.shown_reading(before));
+                if after.is_empty() && self.okuri_head.is_some() {
                     head.push('*');
                     head.push_str(&self.okuri_kana);
                 }
@@ -440,6 +456,23 @@ impl Skk {
                         style: Style::Romaji,
                         text: self.romaji.pending().to_string(),
                     });
+                }
+                if let Some(c) = after.chars().next() {
+                    segs.push(Segment {
+                        style: Style::ReadingCursor,
+                        text: self.shown_reading(&c.to_string()),
+                    });
+                    let mut tail = self.shown_reading(&after[c.len_utf8()..]);
+                    if self.okuri_head.is_some() {
+                        tail.push('*');
+                        tail.push_str(&self.okuri_kana);
+                    }
+                    if !tail.is_empty() {
+                        segs.push(Segment {
+                            style: Style::Reading,
+                            text: tail,
+                        });
+                    }
                 }
             }
             Phase::Selecting => {
@@ -561,11 +594,12 @@ impl Skk {
         }
     }
 
-    fn display_reading(&self) -> String {
+    /// 見出し語を画面に出す形にする。`/` で始めた ASCII の見出し語はそのまま。
+    fn shown_reading(&self, kana: &str) -> String {
         if self.abbrev {
-            return self.reading.clone();
+            return kana.to_string();
         }
-        self.shape(&self.reading)
+        self.shape(kana)
     }
 
     fn current_candidate(&self) -> Option<&Choice> {
@@ -670,6 +704,7 @@ impl Skk {
         self.phase = Phase::Direct;
         self.romaji.clear();
         self.reading.clear();
+        self.read_cursor = 0;
         self.okuri_head = None;
         self.okuri_kana.clear();
         self.abbrev = false;
@@ -678,6 +713,78 @@ impl Skk {
         self.numbers.clear();
         self.dict_key.clear();
         self.auto_suffix.clear();
+    }
+
+    // ---- 見出し語の書き込み位置 ----
+    //
+    // 見出し語は打った順に伸びるだけなので、普段カーソルは末尾にいる。移動キーで
+    // 途中へ動かしたときだけ、差し込みと削除の位置が末尾から離れる。送り仮名は
+    // 見出し語の外側にあり、この位置の対象にはならない。
+
+    /// 見出し語のカーソル位置へ差し込み、カーソルをその後ろへ送る。
+    fn insert_reading(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.reading.insert_str(self.read_cursor, s);
+        self.read_cursor += s.len();
+    }
+
+    /// 見出し語を丸ごと置き換える。カーソルは末尾へ。
+    fn set_reading(&mut self, s: String) {
+        self.reading = s;
+        self.read_cursor = self.reading.len();
+    }
+
+    /// カーソルの手前の一文字を消す。消せたら true。
+    fn delete_before_cursor(&mut self) -> bool {
+        let Some(c) = self.reading[..self.read_cursor].chars().next_back() else {
+            return false;
+        };
+        self.read_cursor -= c.len_utf8();
+        self.reading.remove(self.read_cursor);
+        true
+    }
+
+    /// カーソル位置の一文字を消す。消せたら true。
+    fn delete_at_cursor(&mut self) -> bool {
+        if self.read_cursor >= self.reading.len() {
+            return false;
+        }
+        self.reading.remove(self.read_cursor);
+        true
+    }
+
+    /// カーソルを一文字ずらす。`dir` は -1 で左、1 で右。端では止まる。
+    fn move_cursor(&mut self, dir: i32) {
+        if dir < 0 {
+            if let Some(c) = self.reading[..self.read_cursor].chars().next_back() {
+                self.read_cursor -= c.len_utf8();
+            }
+        } else if let Some(c) = self.reading[self.read_cursor..].chars().next() {
+            self.read_cursor += c.len_utf8();
+        }
+    }
+
+    /// カーソルを見出し語の途中へ動かしてあるか。
+    fn cursor_inside_reading(&self) -> bool {
+        self.read_cursor < self.reading.len()
+    }
+
+    /// 打ちかけのローマ字を、いま打ち込んでいる先 (送り仮名か見出し語) へ落とす。
+    ///
+    /// [`Romaji::flush`] は `n` だけを「ん」にして、他の打ちかけの子音は捨てる。
+    /// 確定するときとまったく同じ扱いなので、見出し語にローマ字が紛れ込まない。
+    fn flush_pending(&mut self) {
+        let flushed = self.romaji.flush();
+        if flushed.is_empty() {
+            return;
+        }
+        if self.okuri_head.is_some() {
+            self.okuri_kana.push_str(&flushed);
+        } else {
+            self.insert_reading(&flushed);
+        }
     }
 
     /// かなをモードに合わせて整える。
@@ -809,7 +916,7 @@ impl Skk {
     fn resume_composing(&mut self, reg: Registration) -> Response {
         self.reset();
         self.phase = Phase::Composing;
-        self.reading = reg.reading;
+        self.set_reading(reg.reading);
         self.okuri_head = reg.okuri_head;
         self.okuri_kana = reg.okuri_kana;
         self.abbrev = reg.abbrev;
@@ -918,7 +1025,7 @@ impl Skk {
             Key::Char(c) if c.is_ascii_uppercase() => {
                 self.phase = Phase::Composing;
                 let kana = self.romaji.feed(c.to_ascii_lowercase());
-                self.reading.push_str(&kana);
+                self.insert_reading(&kana);
                 Response::default()
             }
             Key::Char(c) => {
@@ -957,7 +1064,7 @@ impl Skk {
             k if self.cfg.cancel.contains(&k) => {
                 // 補完の途中なら、まず補完を取り消して元の見出し語に戻す
                 if let Some(c) = self.completion.take() {
-                    self.reading = c.original;
+                    self.set_reading(c.original);
                     return Response::default();
                 }
                 // 取り消して何も出さない
@@ -976,13 +1083,43 @@ impl Skk {
                 self.reset();
                 Response::text(&text)
             }
+            // 見出し語の中を動く。打ちかけのローマ字はその場に落としてから動かす。
+            k if self.cfg.move_left.contains(&k) => {
+                self.flush_pending();
+                self.move_cursor(-1);
+                Response::default()
+            }
+            k if self.cfg.move_right.contains(&k) => {
+                self.flush_pending();
+                self.move_cursor(1);
+                Response::default()
+            }
+            k if self.cfg.move_home.contains(&k) => {
+                self.flush_pending();
+                self.read_cursor = 0;
+                Response::default()
+            }
+            k if self.cfg.move_end.contains(&k) => {
+                self.flush_pending();
+                self.read_cursor = self.reading.len();
+                Response::default()
+            }
+            k if self.cfg.delete_forward.contains(&k) => {
+                // カーソルの乗っている一文字。末尾では何も起きない。
+                self.delete_at_cursor();
+                Response::default()
+            }
             Key::Backspace => {
                 if self.romaji.backspace() {
+                } else if self.cursor_inside_reading() {
+                    // 途中へ動かしてある間は、送り仮名より先に見出し語のそこを直す
+                    // (先頭にいるなら何も起きない)
+                    self.delete_before_cursor();
                 } else if !self.okuri_kana.is_empty() {
                     self.okuri_kana.pop();
                 } else if self.okuri_head.is_some() {
                     self.okuri_head = None;
-                } else if self.reading.pop().is_none() {
+                } else if !self.delete_before_cursor() {
                     self.reset();
                 }
                 Response::default()
@@ -993,8 +1130,7 @@ impl Skk {
                 && !self.abbrev =>
             {
                 // 接頭辞。見出し語の末尾に `>` を足してすぐ変換する。
-                let flushed = self.romaji.flush();
-                self.reading.push_str(&flushed);
+                self.flush_pending();
                 self.reading.push('>');
                 self.start_conversion();
                 Response::default()
@@ -1014,8 +1150,7 @@ impl Skk {
             }
             k if !self.abbrev && self.cfg.hankaku_katakana.contains(&k) => {
                 // 見出し語を半角カタカナにして確定する
-                let flushed = self.romaji.flush();
-                self.reading.push_str(&flushed);
+                self.flush_pending();
                 let text = format!(
                     "{}{}",
                     romaji::to_hankaku_katakana(&self.reading),
@@ -1026,8 +1161,7 @@ impl Skk {
             }
             k if self.okuri_head.is_none() && !self.abbrev && self.cfg.katakana.contains(&k) => {
                 // 見出し語をカタカナ (カタカナモードならひらがな) にして確定
-                let flushed = self.romaji.flush();
-                self.reading.push_str(&flushed);
+                self.flush_pending();
                 let text = if self.mode == Mode::Katakana {
                     romaji::to_hiragana(&self.reading)
                 } else {
@@ -1037,7 +1171,7 @@ impl Skk {
                 Response::text(&text)
             }
             Key::Char(c) if self.abbrev => {
-                self.reading.push(c);
+                self.insert_reading(&c.to_string());
                 Response::default()
             }
             Key::Char(c) if c.is_ascii_uppercase() && !self.reading.is_empty() => {
@@ -1054,7 +1188,7 @@ impl Skk {
             }
             Key::Char(c) if c.is_ascii_uppercase() => {
                 let kana = self.romaji.feed(c.to_ascii_lowercase());
-                self.reading.push_str(&kana);
+                self.insert_reading(&kana);
                 Response::default()
             }
             Key::Char(c) => {
@@ -1067,7 +1201,7 @@ impl Skk {
                 } else if self.auto_start(&kana) {
                     // 区切りの文字が来たので、その手前までで変換を始めた
                 } else {
-                    self.reading.push_str(&kana);
+                    self.insert_reading(&kana);
                 }
                 Response::default()
             }
@@ -1086,17 +1220,8 @@ impl Skk {
 
     /// ▽ の内容をそのまま (かなのまま) 確定させた文字列。
     fn confirm_reading(&mut self) -> String {
-        let flushed = self.romaji.flush();
-        if self.okuri_head.is_some() {
-            self.okuri_kana.push_str(&flushed);
-        } else {
-            self.reading.push_str(&flushed);
-        }
-        let body = if self.abbrev {
-            self.reading.clone()
-        } else {
-            self.shape(&self.reading)
-        };
+        self.flush_pending();
+        let body = self.shown_reading(&self.reading);
         format!("{}{}", body, self.okuri_kana)
     }
 
@@ -1110,8 +1235,7 @@ impl Skk {
         }
         if self.completion.is_none() {
             // 途中のローマ字を確定してから探す
-            let flushed = self.romaji.flush();
-            self.reading.push_str(&flushed);
+            self.flush_pending();
             let words = self.dict.complete(&self.reading, COMPLETIONS);
             if words.is_empty() {
                 return;
@@ -1126,7 +1250,8 @@ impl Skk {
             c.index = ((c.index as i32 + dir).rem_euclid(n)) as usize;
         }
         if let Some(c) = self.completion.as_ref() {
-            self.reading = c.words[c.index].clone();
+            let word = c.words[c.index].clone();
+            self.set_reading(word);
         }
     }
 
@@ -1150,19 +1275,16 @@ impl Skk {
             // 見出し語が空では引きようがない。ただの文字として扱う。
             return false;
         }
-        self.reading.push_str(head);
+        self.insert_reading(head);
         self.auto_suffix = last.to_string();
         self.start_conversion();
         true
     }
 
     fn start_conversion(&mut self) {
-        let flushed = self.romaji.flush();
-        if self.okuri_head.is_some() {
-            self.okuri_kana.push_str(&flushed);
-        } else {
-            self.reading.push_str(&flushed);
-        }
+        self.flush_pending();
+        // 変換を始めたら書き込み位置は末尾へ。▼ から ▽ に戻したときも末尾から始まる。
+        self.read_cursor = self.reading.len();
         if self.reading.is_empty() {
             return;
         }
@@ -1225,7 +1347,7 @@ impl Skk {
                 // 接尾辞。いまの候補を確定し、`>` から始まる新しい見出し語を立てる。
                 let text = self.commit_candidate();
                 self.phase = Phase::Composing;
-                self.reading = ">".into();
+                self.set_reading(">".into());
                 Response::text(&text)
             }
             k if self.cfg.purge.contains(&k) => {
@@ -1435,6 +1557,16 @@ mod tests {
                         | Style::ModeZenkaku
                 )
             })
+            .map(|s| s.text)
+            .collect()
+    }
+
+    /// ▽ の中でカーソルが乗っている一文字。末尾にいるときは空。
+    fn cursor_char(skk: &Skk) -> String {
+        skk.preedit()
+            .at_cursor
+            .into_iter()
+            .filter(|s| s.style == Style::ReadingCursor)
             .map(|s| s.text)
             .collect()
     }
@@ -2463,6 +2595,176 @@ mod tests {
         assert_eq!(preedit_text(&skk), "▽かんじ");
         assert_eq!(typed(&mut skk, "\x07"), "");
         assert_eq!(preedit_text(&skk), "");
+    }
+
+    /// C-g で ▼ から ▽ に戻したあと、見出し語の途中を直して変換し直せる。
+    #[test]
+    fn the_reading_can_be_edited_after_cancelling_a_conversion() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/"), ("かじ", "/家事/火事/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+
+        // C-g で ▽ へ戻る。カーソルは末尾にあるので、区間はまだ分かれない。
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        assert_eq!(cursor_char(&skk), "");
+
+        // C-b で一文字ずつ戻る
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "じ");
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "ん");
+
+        // C-d でその一文字だけ消し、そのまま変換し直す
+        skk.handle(Key::Ctrl(0x04));
+        assert_eq!(preedit_text(&skk), "▽かじ");
+        assert_eq!(cursor_char(&skk), "じ");
+        assert_eq!(typed(&mut skk, " "), "");
+        assert_eq!(preedit_text(&skk), "▼家事");
+        assert_eq!(typed(&mut skk, "\n"), "家事");
+    }
+
+    /// 打ち足すのはカーソルの位置。
+    #[test]
+    fn typing_goes_where_the_cursor_is() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kaji");
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "じ");
+        typed(&mut skk, "nn");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        assert_eq!(cursor_char(&skk), "じ", "カーソルは打った文字の後ろに残る");
+        assert_eq!(typed(&mut skk, "\n"), "かんじ");
+    }
+
+    /// Backspace はカーソルの手前を消す。末尾にいる間はこれまでどおり。
+    #[test]
+    fn backspace_follows_the_cursor() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        typed(&mut skk, "\x7f");
+        assert_eq!(preedit_text(&skk), "▽かん", "末尾では末尾から消える");
+
+        typed(&mut skk, "ji");
+        skk.handle(Key::Ctrl(0x02));
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "ん");
+        typed(&mut skk, "\x7f");
+        assert_eq!(preedit_text(&skk), "▽んじ");
+        assert_eq!(cursor_char(&skk), "ん");
+    }
+
+    /// カーソルは見出し語の両端で止まる。先頭での Backspace は取り消しにならない。
+    #[test]
+    fn the_cursor_stops_at_both_ends() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+
+        skk.handle(Key::Ctrl(0x01)); // C-a
+        assert_eq!(cursor_char(&skk), "か");
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "か", "先頭より左へは行かない");
+        typed(&mut skk, "\x7f");
+        assert_eq!(
+            preedit_text(&skk),
+            "▽かんじ",
+            "消すものが無いだけで ▽ は残る"
+        );
+
+        skk.handle(Key::Ctrl(0x05)); // C-e
+        assert_eq!(cursor_char(&skk), "", "末尾では区間が分かれない");
+        skk.handle(Key::Ctrl(0x06));
+        assert_eq!(cursor_char(&skk), "");
+        skk.handle(Key::Ctrl(0x04));
+        assert_eq!(preedit_text(&skk), "▽かんじ", "末尾の C-d は何もしない");
+    }
+
+    /// 矢印でも動く。端末が送る形が変わっても同じ。
+    #[test]
+    fn arrows_move_the_cursor_too() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        skk.handle(Key::Raw(b"\x1b[D".to_vec()));
+        assert_eq!(cursor_char(&skk), "じ");
+        // アプリケーションカーソルキーモードの形
+        skk.handle(Key::Raw(b"\x1bOD".to_vec()));
+        assert_eq!(cursor_char(&skk), "ん");
+        skk.handle(Key::Raw(b"\x1b[C".to_vec()));
+        assert_eq!(cursor_char(&skk), "じ");
+    }
+
+    /// 打ちかけのローマ字は、動く前に始末される (確定するときと同じ扱い)。
+    #[test]
+    fn moving_settles_the_pending_romaji() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanjik");
+        assert_eq!(preedit_text(&skk), "▽かんじk");
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(preedit_text(&skk), "▽かんじ", "単独の子音は捨てられる");
+        assert_eq!(cursor_char(&skk), "じ");
+
+        // n だけは「ん」になってから見出し語に残る
+        skk.handle(Key::Ctrl(0x05));
+        typed(&mut skk, "n");
+        assert_eq!(preedit_text(&skk), "▽かんじn");
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(preedit_text(&skk), "▽かんじん");
+        assert_eq!(cursor_char(&skk), "ん");
+    }
+
+    /// 送りありでも、動かせるのは見出し語の中だけ。
+    #[test]
+    fn the_cursor_stays_inside_the_reading_when_there_is_okuri() {
+        let mut skk = skk_with(&[("うごk", "/動/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "UgoKu");
+        assert_eq!(preedit_text(&skk), "▼動く");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽うご*く");
+
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "ご");
+        assert_eq!(preedit_text(&skk), "▽うご*く", "送り仮名は末尾に残る");
+        skk.handle(Key::Ctrl(0x06));
+        skk.handle(Key::Ctrl(0x06));
+        assert_eq!(cursor_char(&skk), "", "送り仮名の中へは入らない");
+        // 末尾へ戻れば、Backspace はこれまでどおり送り仮名から削る
+        typed(&mut skk, "\x7f");
+        assert_eq!(preedit_text(&skk), "▽うご*");
+    }
+
+    /// カタカナモードでも、カーソルの一文字はモードに合わせて出る。
+    #[test]
+    fn the_cursor_segment_follows_the_mode() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "q");
+        typed(&mut skk, "Kanji");
+        assert_eq!(preedit_text(&skk), "▽カンジ");
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "ジ");
+        assert_eq!(preedit_text(&skk), "▽カンジ");
+    }
+
+    /// 移動キーは設定から取る。割り当てを変えれば別のキーで動く。
+    #[test]
+    fn the_cursor_keys_come_from_the_config() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[keys]\nmove_left = \"C-h\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        skk.handle(Key::Ctrl(0x08));
+        assert_eq!(cursor_char(&skk), "じ", "割り当てた C-h で動く");
+        // 割り当てを外した C-b は、これまでどおり見出し語を確定して素通しする
+        let r = skk.handle(Key::Ctrl(0x02));
+        assert_eq!(r.commit, "かんじ");
+        assert_eq!(r.passthrough, Some(Key::Ctrl(0x02)));
     }
 
     #[test]

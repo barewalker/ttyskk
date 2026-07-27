@@ -183,7 +183,7 @@ fn preedit_has_no_mode_marker() {
     for i in 0..unsafe { ttyskk_preedit_len(p) } {
         let st = unsafe { ttyskk_preedit_style(p, i) };
         assert!(
-            (TTYSKK_STYLE_READING..=TTYSKK_STYLE_CANDIDATE).contains(&st),
+            (TTYSKK_STYLE_READING..=TTYSKK_STYLE_READING_CURSOR).contains(&st),
             "GUI へ渡す装飾だけが残る"
         );
     }

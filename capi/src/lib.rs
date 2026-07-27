@@ -52,6 +52,8 @@ pub const TTYSKK_MODE_ZENKAKU_ASCII: i32 = 4;
 pub const TTYSKK_STYLE_READING: i32 = 0;
 pub const TTYSKK_STYLE_ROMAJI: i32 = 1;
 pub const TTYSKK_STYLE_CANDIDATE: i32 = 2;
+/// 見出し語の中でカーソルが乗っている一文字。入力メソッド側で位置を示すのに使う。
+pub const TTYSKK_STYLE_READING_CURSOR: i32 = 3;
 
 fn mode_code(m: Mode) -> i32 {
     match m {
@@ -70,6 +72,7 @@ fn mode_code(m: Mode) -> i32 {
 fn style_code(s: Style) -> Option<i32> {
     match s {
         Style::Reading => Some(TTYSKK_STYLE_READING),
+        Style::ReadingCursor => Some(TTYSKK_STYLE_READING_CURSOR),
         Style::Romaji => Some(TTYSKK_STYLE_ROMAJI),
         Style::Candidate => Some(TTYSKK_STYLE_CANDIDATE),
         Style::ListItem | Style::ListSelected => None,

@@ -17,6 +17,41 @@ use unicode_width::UnicodeWidthChar;
 /// 設定ファイルを見張る間隔。
 const POLL: Duration = Duration::from_secs(1);
 
+/// 名前で書けるエスケープ列と、その**ありうる形すべて**。
+///
+/// 矢印や Home / End は端末とその時の設定 (`DECCKM`) で送られる形が変わる。届いた
+/// バイト列をそのまま照合する作りなので、形を一つに決め打つとその端末でだけ効かない。
+/// 一つの名前に全部の形を割り当て、どれで届いても同じ働きになるようにしている。
+///
+/// 修飾キーの付かない矢印は拡張鍵盤プロトコルでも素の形のまま届くので、`Key::Raw` の
+/// バイト列で持つ。名前を足したら [`tests::named_sequences_are_escape_sequences`] の
+/// 見張りに合わせて `parse_key` の説明にも書き足す。
+const NAMED_SEQUENCES: &[(&str, &[&[u8]])] = &[
+    // CSI 形 (既定) と SS3 形 (アプリケーションカーソルキーモード)
+    ("left", &[b"\x1b[D", b"\x1bOD"]),
+    ("right", &[b"\x1b[C", b"\x1bOC"]),
+    ("up", &[b"\x1b[A", b"\x1bOA"]),
+    ("down", &[b"\x1b[B", b"\x1bOB"]),
+    // 末尾の二つは linux コンソールと rxvt の流儀
+    ("home", &[b"\x1b[H", b"\x1bOH", b"\x1b[1~", b"\x1b[7~"]),
+    ("end", &[b"\x1b[F", b"\x1bOF", b"\x1b[4~", b"\x1b[8~"]),
+];
+
+/// 名前の付いたエスケープ列を、ありうる形すべての [`Key`] にする。
+fn named_sequence(name: &str) -> Option<Vec<Key>> {
+    NAMED_SEQUENCES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, seqs)| seqs.iter().map(|s| Key::Raw(s.to_vec())).collect())
+}
+
+/// 制御キー一つと、名前の付いたエスケープ列を並べた割り当て。既定を組むのに使う。
+fn ctrl_or_sequence(ctrl: u8, name: &str) -> Vec<Key> {
+    let mut out = vec![Key::Ctrl(ctrl)];
+    out.extend(named_sequence(name).expect("NAMED_SEQUENCES に無い名前"));
+    out
+}
+
 /// 設定の見本。実行ファイルに埋め込んで `--config-example` で書き出す。
 ///
 /// 別に配らなくてよいうえ、版とずれない。中身が既定と食い違っていないことは
@@ -90,6 +125,16 @@ pub struct Config {
     pub purge: Vec<Key>,
     /// 接頭辞・接尾辞変換を始める (▽ の末尾に付けるか、▼ を確定して `>` から始める)
     pub affix: Vec<Key>,
+    /// ▽ の見出し語の中でカーソルを一文字左へ
+    pub move_left: Vec<Key>,
+    /// ▽ の見出し語の中でカーソルを一文字右へ
+    pub move_right: Vec<Key>,
+    /// ▽ の見出し語の先頭へ
+    pub move_home: Vec<Key>,
+    /// ▽ の見出し語の末尾へ
+    pub move_end: Vec<Key>,
+    /// ▽ のカーソル位置にある一文字を消す
+    pub delete_forward: Vec<Key>,
     /// 候補一覧から選ぶキー。並び順がそのまま一覧の並び順になる
     pub select: Vec<char>,
     /// 一覧を出さずに一つずつ送る候補数
@@ -153,6 +198,13 @@ impl Default for Config {
             complete_previous: vec![Key::ShiftTab],
             purge: vec![Key::Char('X')],
             affix: vec![Key::Char('>')],
+            // C-b / C-f / C-a / C-e は emacs と読み方の同じ移動。矢印でも動くように
+            // しておくと、行編集の流儀を持ち込まない人もそのまま使える。
+            move_left: ctrl_or_sequence(0x02, "left"),
+            move_right: ctrl_or_sequence(0x06, "right"),
+            move_home: ctrl_or_sequence(0x01, "home"),
+            move_end: ctrl_or_sequence(0x05, "end"),
+            delete_forward: vec![Key::Ctrl(0x04)],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
             layout: Layout::Inline,
@@ -183,7 +235,7 @@ impl Config {
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    fn key_slots(&self) -> [&Vec<Key>; 15] {
+    fn key_slots(&self) -> [&Vec<Key>; 20] {
         [
             &self.kana,
             &self.confirm,
@@ -200,6 +252,11 @@ impl Config {
             &self.complete_previous,
             &self.purge,
             &self.affix,
+            &self.move_left,
+            &self.move_right,
+            &self.move_home,
+            &self.move_end,
+            &self.delete_forward,
         ]
     }
 
@@ -254,6 +311,11 @@ impl Config {
                     "complete_previous" => &mut cfg.complete_previous,
                     "purge" => &mut cfg.purge,
                     "affix" => &mut cfg.affix,
+                    "move_left" => &mut cfg.move_left,
+                    "move_right" => &mut cfg.move_right,
+                    "move_home" => &mut cfg.move_home,
+                    "move_end" => &mut cfg.move_end,
+                    "delete_forward" => &mut cfg.delete_forward,
                     "select" => {
                         cfg.select = parse_select(value)?;
                         continue;
@@ -388,7 +450,11 @@ fn parse_keys(name: &str, value: &toml::Value) -> Result<Vec<Key>> {
     if specs.is_empty() {
         bail!("keys.{name} が空。割り当てを外したいなら項目ごと消す");
     }
-    specs.into_iter().map(parse_key).collect()
+    let mut out = Vec::new();
+    for spec in specs {
+        out.extend(parse_key(spec)?);
+    }
+    Ok(out)
 }
 
 fn parse_select(value: &toml::Value) -> Result<Vec<char>> {
@@ -451,27 +517,34 @@ fn parse_symbol(name: &str, value: &toml::Value) -> Result<char> {
 
 /// キーの書き方を `Key` にする。
 ///
-/// `C-j` `Ctrl-j` `ctrl+j` / `space` `enter` `tab` `esc` `bs` / 一文字そのもの。
-fn parse_key(spec: &str) -> Result<Key> {
+/// `C-j` `Ctrl-j` `ctrl+j` / `space` `enter` `tab` `esc` `bs` /
+/// `left` `right` `up` `down` `home` `end` / 一文字そのもの。
+///
+/// **返るのは一つとは限らない。** 矢印のように端末で送られる形が変わるキーは、
+/// ありうる形をすべて返す ([`NAMED_SEQUENCES`])。
+fn parse_key(spec: &str) -> Result<Vec<Key>> {
     let s = spec.trim();
     if s.is_empty() {
         bail!("キーの指定が空");
     }
     let lower = s.to_ascii_lowercase();
     match lower.as_str() {
-        "space" | "spc" => return Ok(Key::Char(' ')),
-        "enter" | "return" | "ret" => return Ok(Key::Enter),
-        "tab" => return Ok(Key::Tab),
-        "esc" | "escape" => return Ok(Key::Esc),
-        "bs" | "backspace" | "del" => return Ok(Key::Backspace),
-        "s-tab" | "shift-tab" | "btab" => return Ok(Key::ShiftTab),
+        "space" | "spc" => return Ok(vec![Key::Char(' ')]),
+        "enter" | "return" | "ret" => return Ok(vec![Key::Enter]),
+        "tab" => return Ok(vec![Key::Tab]),
+        "esc" | "escape" => return Ok(vec![Key::Esc]),
+        "bs" | "backspace" | "del" => return Ok(vec![Key::Backspace]),
+        "s-tab" | "shift-tab" | "btab" => return Ok(vec![Key::ShiftTab]),
         _ => {}
+    }
+    if let Some(keys) = named_sequence(&lower) {
+        return Ok(keys);
     }
     for prefix in ["c-", "ctrl-", "ctrl+", "control-"] {
         if let Some(rest) = lower.strip_prefix(prefix) {
             // 端末では Ctrl+Space は NUL として届く
             if matches!(rest, "space" | "spc") {
-                return Ok(Key::Ctrl(0x00));
+                return Ok(vec![Key::Ctrl(0x00)]);
             }
             let mut it = rest.chars();
             let (Some(c), None) = (it.next(), it.next()) else {
@@ -481,12 +554,12 @@ fn parse_key(spec: &str) -> Result<Key> {
                 bail!("{spec} は解せない (Ctrl は英字にだけ付く)");
             }
             // C-a = 0x01 … C-z = 0x1a
-            return Ok(Key::Ctrl(c as u8 & 0x1f));
+            return Ok(vec![Key::Ctrl(c as u8 & 0x1f)]);
         }
     }
     let mut it = s.chars();
     match (it.next(), it.next()) {
-        (Some(c), None) => Ok(Key::Char(c)),
+        (Some(c), None) => Ok(vec![Key::Char(c)]),
         _ => bail!("{spec} は解せない"),
     }
 }
@@ -600,8 +673,13 @@ mod tests {
             "complete_previous",
             "purge",
             "affix",
+            "move_left",
+            "move_right",
+            "move_home",
+            "move_end",
+            "delete_forward",
         ];
-        let letters = "abcdefghijklmno";
+        let letters = "abcdefghijklmnoqrstu";
         assert_eq!(names.len(), letters.len());
         let mut text = String::from("[keys]\n");
         for (name, c) in names.iter().zip(letters.chars()) {
@@ -624,19 +702,78 @@ mod tests {
 
     #[test]
     fn parses_key_spellings() {
-        assert_eq!(parse_key("C-j").unwrap(), Key::Ctrl(0x0a));
-        assert_eq!(parse_key("ctrl+g").unwrap(), Key::Ctrl(0x07));
-        assert_eq!(parse_key("Ctrl-A").unwrap(), Key::Ctrl(0x01));
-        assert_eq!(parse_key("space").unwrap(), Key::Char(' '));
-        assert_eq!(parse_key("Enter").unwrap(), Key::Enter);
-        assert_eq!(parse_key("esc").unwrap(), Key::Esc);
-        assert_eq!(parse_key("bs").unwrap(), Key::Backspace);
-        assert_eq!(parse_key("C-space").unwrap(), Key::Ctrl(0x00));
-        assert_eq!(parse_key("/").unwrap(), Key::Char('/'));
-        assert_eq!(parse_key("Q").unwrap(), Key::Char('Q'));
+        assert_eq!(parse_key("C-j").unwrap(), vec![Key::Ctrl(0x0a)]);
+        assert_eq!(parse_key("ctrl+g").unwrap(), vec![Key::Ctrl(0x07)]);
+        assert_eq!(parse_key("Ctrl-A").unwrap(), vec![Key::Ctrl(0x01)]);
+        assert_eq!(parse_key("space").unwrap(), vec![Key::Char(' ')]);
+        assert_eq!(parse_key("Enter").unwrap(), vec![Key::Enter]);
+        assert_eq!(parse_key("esc").unwrap(), vec![Key::Esc]);
+        assert_eq!(parse_key("bs").unwrap(), vec![Key::Backspace]);
+        assert_eq!(parse_key("C-space").unwrap(), vec![Key::Ctrl(0x00)]);
+        assert_eq!(parse_key("/").unwrap(), vec![Key::Char('/')]);
+        assert_eq!(parse_key("Q").unwrap(), vec![Key::Char('Q')]);
         assert!(parse_key("C-").is_err());
         assert!(parse_key("C-1").is_err());
         assert!(parse_key("").is_err());
+    }
+
+    /// 矢印は端末で形が変わるので、一つの名前がありうる形すべてに広がる。
+    #[test]
+    fn arrow_names_cover_every_shape_the_terminal_may_send() {
+        assert_eq!(
+            parse_key("left").unwrap(),
+            vec![Key::Raw(b"\x1b[D".to_vec()), Key::Raw(b"\x1bOD".to_vec()),],
+            "CSI 形と SS3 形 (アプリケーションカーソルキーモード) の両方"
+        );
+        assert_eq!(parse_key("Right").unwrap().len(), 2, "大文字でも引ける");
+        assert_eq!(parse_key("home").unwrap().len(), 4);
+
+        // 設定に書けば、その名前の全部の形が割り当てになる
+        let c = Config::parse("[keys]\nmove_left = [\"C-b\", \"left\"]\n").unwrap();
+        assert_eq!(
+            c.move_left,
+            vec![
+                Key::Ctrl(0x02),
+                Key::Raw(b"\x1b[D".to_vec()),
+                Key::Raw(b"\x1bOD".to_vec()),
+            ]
+        );
+    }
+
+    /// 名前の付いたエスケープ列は、本当にエスケープ列でなければならない。
+    ///
+    /// ここに素の文字を書くと、その文字が打てなくなる。
+    #[test]
+    fn named_sequences_are_escape_sequences() {
+        for (name, seqs) in NAMED_SEQUENCES {
+            assert!(!seqs.is_empty(), "{name} に形が無い");
+            for s in *seqs {
+                assert_eq!(
+                    s.first(),
+                    Some(&0x1b),
+                    "{name} の {s:?} が ESC で始まらない"
+                );
+            }
+        }
+    }
+
+    /// 既定の移動キーは C-b / C-f / C-a / C-e と矢印の両方。
+    #[test]
+    fn cursor_keys_default_to_both_control_and_arrows() {
+        let c = Config::default();
+        for (slot, ctrl, seq) in [
+            (&c.move_left, 0x02, "\x1b[D"),
+            (&c.move_right, 0x06, "\x1b[C"),
+            (&c.move_home, 0x01, "\x1b[H"),
+            (&c.move_end, 0x05, "\x1b[F"),
+        ] {
+            assert!(slot.contains(&Key::Ctrl(ctrl)), "C-{ctrl:#x} が無い");
+            assert!(
+                slot.contains(&Key::Raw(seq.as_bytes().to_vec())),
+                "{seq:?} が無い"
+            );
+        }
+        assert_eq!(c.delete_forward, vec![Key::Ctrl(0x04)]);
     }
 
     #[test]

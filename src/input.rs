@@ -492,7 +492,7 @@ mod tests {
         for seq in [
             &b"\x1b[99;5u"[..],  // Ctrl+C (ascii_keys)
             &b"\x1b[122;5u"[..], // Ctrl+Z
-            &b"\x1b[100;5u"[..], // Ctrl+D
+            &b"\x1b[119;5u"[..], // Ctrl+W
             &b"\x1b[106;1u"[..], // 修飾なしの J
             &b"\x1b[13;5u"[..],  // Ctrl+Enter
         ] {
