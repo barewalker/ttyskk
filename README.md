@@ -83,7 +83,13 @@ skkeleton や fcitx5-skk など、別の SKK 実装で溜めた学習を合流�
 ```sh
 ttyskk --import ~/.skkeleton              # skkeleton (nvim)
 ttyskk --import ~/.local/share/fcitx5/skk/user.dict
+# CorvusSKK (Windows)。WSL からは /mnt/c 経由で読める
+ttyskk --import /mnt/c/Users/<利用者>/AppData/Roaming/CorvusSKK/userdict.txt
 ```
+
+符号化は自動で見分ける — BOM があれば信じ、無ければ UTF-8、それも駄目なら EUC-JP。
+CorvusSKK の利用者辞書は **UTF-16LE + BOM** で書かれるが、そのまま渡してよい。
+送り仮名ブロック (`おくr /送/[り/送/]/` の `[...]`) は落とす。
 
 **既にある候補は動かさない。** 学習の順序は「最近使った順」なので、取り込んだものを
 先頭に置くと、いま使っている語より古い語が前に出てしまう。相手にしかない候補だけを

@@ -94,7 +94,14 @@ fn parse_line(line: &str) -> Option<(String, Vec<Candidate>)> {
     let body = rest.trim();
     let body = body.strip_prefix('/').unwrap_or(body);
     let body = body.strip_suffix('/').unwrap_or(body);
-    let cands: Vec<Candidate> = body.split('/').filter_map(Candidate::parse).collect();
+    // 送り仮名ブロック (`おくr /送/[り/送/]/` の `[...]`) から先は読み飛ばす。
+    // 送り仮名ごとに候補を絞る ddskk 由来の書き方で、CorvusSKK も書く。ttyskk は
+    // 扱わないが、**素朴に `/` で分けると `[り` や `]` が候補として紛れ込む**。
+    let cands: Vec<Candidate> = body
+        .split('/')
+        .take_while(|s| !s.starts_with('['))
+        .filter_map(Candidate::parse)
+        .collect();
     if cands.is_empty() {
         return None;
     }
@@ -104,12 +111,28 @@ fn parse_line(line: &str) -> Option<(String, Vec<Candidate>)> {
 /// EUC-JP でも UTF-8 でも読めるように、まず UTF-8 を試して駄目なら EUC-JP とみなす。
 fn read_jisyo(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("辞書を読めない: {}", path.display()))?;
-    match String::from_utf8(bytes) {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            let (s, _, _) = encoding_rs::EUC_JP.decode(e.as_bytes());
-            Ok(s.into_owned())
-        }
+    Ok(decode_jisyo(&bytes))
+}
+
+/// 辞書のバイト列を文字にする。
+///
+/// SKK の辞書は実装によって符号化が違う。**BOM があれば信じ、無ければ UTF-8 を
+/// 試して、駄目なら EUC-JP** とみなす。
+///
+/// - EUC-JP … `SKK-JISYO.L` など、古くからの配布物
+/// - UTF-8 … 最近の実装 (ttyskk 自身、skkeleton)
+/// - UTF-16 … CorvusSKK の利用者辞書 (`userdict.txt`) が LE + BOM で書く
+fn decode_jisyo(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        return encoding_rs::UTF_16LE.decode(rest).0.into_owned();
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        return encoding_rs::UTF_16BE.decode(rest).0.into_owned();
+    }
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => encoding_rs::EUC_JP.decode(bytes).0.into_owned(),
     }
 }
 
@@ -536,6 +559,42 @@ mod tests {
             ["漢字"]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CorvusSKK の利用者辞書 (UTF-16LE + BOM、送り仮名ブロック付き) を読める。
+    #[test]
+    fn reads_corvusskk_user_dictionary() {
+        // UTF-16LE + BOM で書かれた、送り仮名ブロックを含む辞書
+        let text = ";; okuri-ari entries.\n\
+                    おくr /送/[り/送/]/\n\
+                    ;; okuri-nasi entries.\n\
+                    かんじ /漢字/幹事/\n";
+        let mut bytes = vec![0xff, 0xfe];
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        let decoded = decode_jisyo(&bytes);
+        assert_eq!(decoded, text, "UTF-16LE を読める");
+
+        let mut map = HashMap::new();
+        load_into(&mut map, &decoded);
+        // 送り仮名ブロックは落として、候補だけを取る
+        let okuri: Vec<&str> = map["おくr"].iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(okuri, ["送"], "[り/送/] は候補に混ぜない");
+        assert_eq!(map["かんじ"].len(), 2);
+    }
+
+    /// 符号化は BOM を信じ、無ければ UTF-8 → EUC-JP の順に試す。
+    #[test]
+    fn decodes_the_usual_encodings() {
+        assert_eq!(decode_jisyo("かんじ /漢字/".as_bytes()), "かんじ /漢字/");
+        // BOM 付きの UTF-8
+        let mut utf8_bom = vec![0xef, 0xbb, 0xbf];
+        utf8_bom.extend_from_slice("あ /亜/".as_bytes());
+        assert_eq!(decode_jisyo(&utf8_bom), "あ /亜/");
+        // EUC-JP
+        let (euc, _, _) = encoding_rs::EUC_JP.encode("あ /亜/");
+        assert_eq!(decode_jisyo(&euc), "あ /亜/");
     }
 
     /// 他の実装で溜めた学習を合流させる。
