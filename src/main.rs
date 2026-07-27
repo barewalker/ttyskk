@@ -499,7 +499,29 @@ fn main() -> Result<()> {
         touched = true;
     }
 
-    for ev in rx {
+    // 覚えたことを書き出すまでの待ち。
+    //
+    // 終了時にだけ書くと、端末を開きっぱなしにしている間は他の環境へ渡らない
+    // (利用者辞書を共有している場合)。かといって確定のたびに書くとディスクを
+    // 叩きすぎるので、**入力が途切れてから**書く。
+    const SAVE_AFTER: Duration = Duration::from_secs(3);
+    let mut unsaved = false;
+
+    loop {
+        let ev = match rx.recv_timeout(SAVE_AFTER) {
+            Ok(ev) => ev,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 手が止まった。覚えたことがあれば、ここで書き出す。
+                if unsaved {
+                    unsaved = false;
+                    if let Err(e) = skk.dict_mut().save() {
+                        trace.log(format_args!("--- 利用者辞書を保存できない: {e}"));
+                    }
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match ev {
             Event::Child(data) => {
                 let had_overlay = !overlay.is_empty();
@@ -557,6 +579,8 @@ fn main() -> Result<()> {
                 let mut mode_changed = false;
                 for key in decoder.feed(&data) {
                     let r = skk.handle(key);
+                    // 確定したなら何か覚えた見込みがある。手が止まったら書き出す。
+                    unsaved |= !r.commit.is_empty();
                     to_child.extend(r.to_child());
                     mode_changed |= r.mode_changed;
                 }
