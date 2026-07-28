@@ -207,6 +207,78 @@ fn edit_snippets(prefix: &str) -> Result<()> {
     }
 }
 
+/// `read` を中断させるためだけの合図。何もしない。
+extern "C" fn wake_the_reader(_: libc::c_int) {}
+
+/// `SIGUSR1` を「握りつぶすが `read` は中断させる」形で捕まえる。
+///
+/// 既定のままだとプロセスが終わってしまう。`SA_RESTART` を付けないので、
+/// 受けた `read` は `EINTR` で戻る。
+fn catch_the_wakeup_signal() {
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = wake_the_reader as extern "C" fn(libc::c_int) as usize;
+        sa.sa_flags = 0;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut());
+    }
+}
+
+/// 標準入力を読む係を、外から一時的に止めるための門。
+///
+/// 編集器のように**自分で端末を読むもの**を起こす間は、ttyskk が読むのをやめないと
+/// 打鍵を横取りしてしまう。端末は一つしかないので、読む側が二人いると奪い合いになる。
+///
+/// 止めるときは、係が本当に手を離したことを確かめてから進む。`read` に入った直後に
+/// 止めても、その一回は端末を掴んだままだから。
+#[derive(Default)]
+struct InputGate {
+    closed: std::sync::atomic::AtomicBool,
+    /// 係が手を離しているか
+    idle: std::sync::atomic::AtomicBool,
+}
+
+impl InputGate {
+    /// 読む係が呼ぶ。閉じている間は待つ。待ったなら true。
+    fn wait_while_closed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if !self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        self.idle.store(true, Ordering::Release);
+        while self.closed.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.idle.store(false, Ordering::Release);
+        true
+    }
+
+    /// 門を閉じ、係が手を離すまで待つ。
+    ///
+    /// 係が `read` の途中なら、その一回が終わるまでは離せない。**打鍵を一つ待つ**
+    /// ことになるので、シグナルを送って `read` を中断させる。
+    fn close(&self, reader: Option<libc::pthread_t>) {
+        use std::sync::atomic::Ordering;
+        self.closed.store(true, Ordering::Release);
+        if let Some(t) = reader {
+            // SIGUSR1 は握りつぶす向きで登録してあるので、read が EINTR で戻るだけ
+            unsafe { libc::pthread_kill(t, libc::SIGUSR1) };
+        }
+        for _ in 0..200 {
+            if self.idle.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// 門を開ける。
+    fn open(&self) {
+        self.closed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// いまの地方時。定型文の `$CURRENT_YEAR` などを開くのに渡す。
 ///
 /// 地方時への直しは libc に任せる。エンジンの側は端末にも GUI にも載せられるよう
@@ -241,13 +313,18 @@ fn local_now() -> ttyskk::snippet::Now {
 /// いる (vim など) 場合はその手が使えないので、控えから描き直す。
 ///
 /// 失敗しても入力を続けられるようにする。ここで抜けると、包んでいる子ごと道連れになる。
+#[allow(clippy::too_many_arguments)]
 fn run_editor_over_the_screen(
     raw: &RawGuard,
+    gate: &InputGate,
+    reader: Option<libc::pthread_t>,
     stdout: &mut impl Write,
     screen: &Screen,
     word: &str,
     trace: &mut Trace,
 ) {
+    // 端末を読む係を止める。**止めないと打鍵を横取りして編集器に何も届かない。**
+    gate.close(reader);
     // 子が主画面にいるなら、副画面を借りれば端末が元に戻してくれる
     let borrow_alt = !screen.alt_screen;
     if borrow_alt {
@@ -259,6 +336,7 @@ fn run_editor_over_the_screen(
     raw.suspend();
     let result = edit_snippets(word);
     raw.resume();
+    gate.open();
 
     if borrow_alt {
         let _ = stdout.write_all(b"\x1b[?1049l");
@@ -604,14 +682,32 @@ fn main() -> Result<()> {
     }
 
     // 利用者の入力
+    let gate = std::sync::Arc::new(InputGate::default());
+    let reader_tid = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    catch_the_wakeup_signal();
     {
         let tx = tx.clone();
+        let gate = gate.clone();
+        let reader_tid = reader_tid.clone();
         std::thread::spawn(move || {
+            // 止めたいときに read を中断させるので、自分の居場所を知らせておく
+            reader_tid.store(
+                unsafe { libc::pthread_self() } as u64,
+                std::sync::atomic::Ordering::Release,
+            );
             let mut stdin = std::io::stdin();
             let mut buf = [0u8; 4096];
             loop {
+                // 編集器を起こしている間は端末に手を出さない。**読み続けると打鍵を
+                // 横取りしてしまい、編集器に何も届かない。**
+                if gate.wait_while_closed() {
+                    continue;
+                }
                 match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    // シグナルで中断されただけなら読み直す
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                     Ok(n) => {
                         if tx.send(Event::Input(buf[..n].to_vec())).is_err() {
                             break;
@@ -824,7 +920,17 @@ fn main() -> Result<()> {
                     stdout.flush()?;
                 }
                 if let Some(word) = wants_editor {
-                    run_editor_over_the_screen(&raw, &mut stdout, &screen, &word, &mut trace);
+                    let tid = reader_tid.load(std::sync::atomic::Ordering::Acquire);
+                    let tid = (tid != 0).then_some(tid as libc::pthread_t);
+                    run_editor_over_the_screen(
+                        &raw,
+                        &gate,
+                        tid,
+                        &mut stdout,
+                        &screen,
+                        &word,
+                        &mut trace,
+                    );
                     // 書いたものをその場で使えるようにする
                     let (_, failed) = skk.dict_mut().reload_snippets();
                     for (path, e) in &failed {
@@ -897,4 +1003,48 @@ fn main() -> Result<()> {
     let status = child.wait().context("子プロセスの終了を待てない")?;
     drop(raw);
     std::process::exit(status.exit_code() as i32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 門を閉じている間、読む係は端末に手を出さない。
+    ///
+    /// 閉じ忘れると編集器に打鍵が届かない (端末を読む側が二人になり奪い合う)。
+    #[test]
+    fn the_gate_holds_the_reader_until_opened() {
+        let gate = Arc::new(InputGate::default());
+        let ticks = Arc::new(AtomicUsize::new(0));
+        {
+            let gate = gate.clone();
+            let ticks = ticks.clone();
+            std::thread::spawn(move || {
+                loop {
+                    gate.wait_while_closed();
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+        }
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(ticks.load(Ordering::Relaxed) > 0, "開いている間は動く");
+
+        // シグナルは送らない (試験では read で止まっていないため)
+        gate.close(None);
+        let at_close = ticks.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            ticks.load(Ordering::Relaxed),
+            at_close,
+            "閉じている間は止まったまま"
+        );
+
+        gate.open();
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(ticks.load(Ordering::Relaxed) > at_close, "開ければ再び動く");
+    }
 }
