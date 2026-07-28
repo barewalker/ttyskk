@@ -312,6 +312,191 @@ pub fn expand_variables(text: &str, now: &Now) -> String {
     out
 }
 
+/// 定型文を組み立てるときの一片。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// そのまま出す文字列
+    Text(String),
+    /// 埋める場所。同じ番号が二つ以上あれば、同じ値がすべてに入る。
+    Stop {
+        /// `$1` の 1。**0 は「埋め終わったあとのカーソル位置」**で、入力は求めない。
+        index: u32,
+        /// `${1:既定値}` の既定値
+        default: String,
+        /// `${1|日本語,英語|}` の選択肢
+        choices: Vec<String>,
+    },
+}
+
+/// 本文を「そのまま出すところ」と「埋めるところ」に切り分ける。
+///
+/// TextMate (VS Code・LSP) の書き方に合わせる。
+///
+/// | 書き方 | 意味 |
+/// |---|---|
+/// | `$1` `${1}` | 埋める場所 |
+/// | `${1:既定値}` | 既定値つき (そのままでよければ触らず次へ) |
+/// | `${1\|日本語,英語\|}` | 選ぶ場所 |
+/// | `$0` | 埋め終わったあとのカーソル位置 |
+/// | `\$` | `$` そのもの |
+///
+/// 入れ子 (`${1:${2:…}}`) は扱わない。手で書く定型文にはまず出てこないし、
+/// 埋める順序の決め方が込み入る。
+pub fn split_placeholders(body: &str) -> Vec<Piece> {
+    let chars: Vec<char> = body.chars().collect();
+    let mut out: Vec<Piece> = Vec::new();
+    let mut text = String::new();
+    let mut i = 0;
+
+    let flush = |text: &mut String, out: &mut Vec<Piece>| {
+        if !text.is_empty() {
+            out.push(Piece::Text(std::mem::take(text)));
+        }
+    };
+
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'$') {
+            text.push('$');
+            i += 2;
+            continue;
+        }
+        if chars[i] != '$' {
+            text.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match parse_stop(&chars, i) {
+            Some((stop, next)) => {
+                flush(&mut text, &mut out);
+                out.push(stop);
+                i = next;
+            }
+            // 数字で始まらないものは変数か、ただの `$`。そのまま文字として置く。
+            None => {
+                text.push('$');
+                i += 1;
+            }
+        }
+    }
+    flush(&mut text, &mut out);
+    out
+}
+
+/// `$` の位置から埋める場所を一つ読む。読めたら (一片, 次の位置)。
+fn parse_stop(chars: &[char], at: usize) -> Option<(Piece, usize)> {
+    let braced = chars.get(at + 1) == Some(&'{');
+    let mut i = if braced { at + 2 } else { at + 1 };
+
+    let start = i;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let index: u32 = chars[start..i].iter().collect::<String>().parse().ok()?;
+
+    if !braced {
+        return Some((
+            Piece::Stop {
+                index,
+                default: String::new(),
+                choices: Vec::new(),
+            },
+            i,
+        ));
+    }
+    match chars.get(i) {
+        Some('}') => Some((
+            Piece::Stop {
+                index,
+                default: String::new(),
+                choices: Vec::new(),
+            },
+            i + 1,
+        )),
+        Some(':') => {
+            let (body, next) = take_until(chars, i + 1, '}')?;
+            Some((
+                Piece::Stop {
+                    index,
+                    default: body,
+                    choices: Vec::new(),
+                },
+                next,
+            ))
+        }
+        Some('|') => {
+            let (body, next) = take_until(chars, i + 1, '|')?;
+            // `|}` で閉じる
+            if chars.get(next) != Some(&'}') {
+                return None;
+            }
+            let choices: Vec<String> = body
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if choices.is_empty() {
+                return None;
+            }
+            Some((
+                Piece::Stop {
+                    index,
+                    default: choices[0].clone(),
+                    choices,
+                },
+                next + 1,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// 閉じ文字までを読む。`\` で閉じ文字を打ち消せる。
+fn take_until(chars: &[char], from: usize, close: char) -> Option<(String, usize)> {
+    let mut out = String::new();
+    let mut i = from;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1).is_some_and(|&c| c == close || c == '\\') {
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if chars[i] == close {
+            return Some((out, i + 1));
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    None
+}
+
+/// 埋める場所を既定値で埋めた姿。候補として見せるときに使う。
+///
+/// `${1:宛先} 様` を `宛先 様` と見せる。**選ぶ前に何が出るか分かる**ようにする
+/// ためのもので、`${1:…}` という書き方そのものを見せても手掛かりにならない。
+pub fn preview_placeholders(body: &str) -> String {
+    let mut out = String::new();
+    for p in split_placeholders(body) {
+        match p {
+            Piece::Text(t) => out.push_str(&t),
+            Piece::Stop { index: 0, .. } => {}
+            Piece::Stop {
+                default, choices, ..
+            } => out.push_str(choices.first().unwrap_or(&default)),
+        }
+    }
+    out
+}
+
+/// 埋める場所を持っているか。持たない定型文はそのまま確定する。
+pub fn has_placeholders(body: &str) -> bool {
+    split_placeholders(body)
+        .iter()
+        .any(|p| matches!(p, Piece::Stop { .. }))
+}
+
 /// 何も無いところに置く最初の中身。
 ///
 /// 空のファイルを編集器で開いても書き出しに困るので、書き方をその場に置いておく。
@@ -541,6 +726,115 @@ mod tests {
         let n = Now::default();
         assert_eq!(expand_variables("$CURRENT_YEAR", &n), "0000");
         assert_eq!(expand_variables("ふつうの文字列", &n), "ふつうの文字列");
+    }
+
+    fn stop(index: u32, default: &str, choices: &[&str]) -> Piece {
+        Piece::Stop {
+            index,
+            default: default.into(),
+            choices: choices.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn text(s: &str) -> Piece {
+        Piece::Text(s.into())
+    }
+
+    #[test]
+    fn splits_the_plain_tabstops() {
+        assert_eq!(
+            split_placeholders("$1 様\n\n$2 です。"),
+            vec![
+                stop(1, "", &[]),
+                text(" 様\n\n"),
+                stop(2, "", &[]),
+                text(" です。")
+            ]
+        );
+        // 括弧つきも同じ
+        assert_eq!(
+            split_placeholders("${1}円"),
+            vec![stop(1, "", &[]), text("円")]
+        );
+    }
+
+    #[test]
+    fn reads_defaults_and_choices() {
+        assert_eq!(
+            split_placeholders("${1:宛先} 様"),
+            vec![stop(1, "宛先", &[]), text(" 様")]
+        );
+        assert_eq!(
+            split_placeholders("${1|日本語,英語|}"),
+            vec![stop(1, "日本語", &["日本語", "英語"])]
+        );
+        // 選択肢は前後の空白を落とす
+        assert_eq!(
+            split_placeholders("${1| a , b |}"),
+            vec![stop(1, "a", &["a", "b"])]
+        );
+    }
+
+    /// 埋め終わったあとのカーソル位置。
+    #[test]
+    fn zero_is_the_final_position() {
+        assert_eq!(
+            split_placeholders("拝啓 $1\n$0\n敬具"),
+            vec![
+                text("拝啓 "),
+                stop(1, "", &[]),
+                text("\n"),
+                stop(0, "", &[]),
+                text("\n敬具")
+            ]
+        );
+    }
+
+    /// 数字で始まらないものは文字のまま。
+    #[test]
+    fn leaves_non_placeholders_alone() {
+        assert_eq!(split_placeholders("$HOME/bin"), vec![text("$HOME/bin")]);
+        // \$ は $ そのもの
+        assert_eq!(split_placeholders("\\$1"), vec![text("$1")]);
+        // 閉じていない括弧はそのまま
+        assert_eq!(split_placeholders("${1:あ"), vec![text("${1:あ")]);
+        assert!(has_placeholders("${1:宛先} 様"));
+        assert!(!has_placeholders("ただの文字列"));
+    }
+
+    /// `$100` は TextMate の決まりでは 100 番の埋め場所になる。
+    ///
+    /// VS Code も LuaSnip もそう読むので、同じファイルを分け合う以上ここも合わせる。
+    /// 金額として `$100` と出したいときは `\$100` と書く。**この解釈があるので、
+    /// 埋め場所を探すのは定型文の候補だけに限る** — 共有辞書に `$` を含む候補が
+    /// あっても巻き込まない。
+    #[test]
+    fn a_number_after_the_dollar_is_a_tabstop_by_the_spec() {
+        assert_eq!(
+            split_placeholders("$100 です"),
+            vec![stop(100, "", &[]), text(" です")]
+        );
+        assert_eq!(split_placeholders("\\$100 です"), vec![text("$100 です")]);
+    }
+
+    /// 同じ番号を二度書くと、同じ値がどちらにも入る。
+    #[test]
+    fn the_same_number_can_appear_twice() {
+        assert_eq!(
+            split_placeholders("$1 様\n\n$1 さんへ"),
+            vec![
+                stop(1, "", &[]),
+                text(" 様\n\n"),
+                stop(1, "", &[]),
+                text(" さんへ")
+            ]
+        );
+    }
+
+    /// 既定値の中の `}` は `\}` で書ける。
+    #[test]
+    fn escapes_inside_a_default() {
+        assert_eq!(split_placeholders("${1:a\\}b}"), vec![stop(1, "a}b", &[])]);
     }
 
     /// 何も無いところに足すと、書き方の見本ごと出来上がる。
