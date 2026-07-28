@@ -192,6 +192,97 @@ pub fn parse(text: &str) -> Result<Vec<Snippet>> {
     Ok(out)
 }
 
+/// 何も無いところに置く最初の中身。
+///
+/// 空のファイルを編集器で開いても書き出しに困るので、書き方をその場に置いておく。
+pub const TEMPLATE: &str = r#"{
+    // ttyskk の定型文。書式は VS Code のスニペット (*.code-snippets)。
+    //
+    //   prefix      … 見出し語 (かな)。並びにすると複数の見出し語で引ける
+    //   body        … 候補。並びにすると行として繋がる (改行を含む定型文)
+    //   description … 候補の右に出る注釈。日本語版と英語版の区別などに
+    //
+    // 注釈 (この行のような //) と末尾のカンマを書いてよい。保存した時点で
+    // ttyskk が読み直すので、起動し直さなくてよい。
+}
+"#;
+
+/// JSON の文字列に入れられる形にする。
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// まだ使われていない項目名を作る。
+///
+/// 項目名は JSON の鍵なので、同じものが二度あると後の一つしか残らない。見出し語を
+/// 種にして、既にあれば番号を足す。
+fn unique_name(text: &str, prefix: &str) -> String {
+    let base = if prefix.is_empty() {
+        "新しい定型文"
+    } else {
+        prefix
+    };
+    let used = |name: &str| text.contains(&format!("\"{}\"", escape(name)));
+    if !used(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|name| !used(name))
+        .expect("番号はいくらでもある")
+}
+
+/// 新しい項目の雛形を末尾へ足す。足したあと、書き始める行を返す (1 から数える)。
+///
+/// 編集器はその行にカーソルを置いて開く。**書き足す場所を探すところから始めずに
+/// 済ませる**ためのもので、一覧を見ながら書くという狙いの半分はここにある。
+///
+/// 見出し語が分かっていれば `prefix` に埋め、カーソルは本文へ置く。分からなければ
+/// 見出し語の側へ置く。
+pub fn append_template(text: &str, prefix: &str) -> (String, usize) {
+    let base = if text.trim().is_empty() {
+        TEMPLATE.to_string()
+    } else {
+        text.to_string()
+    };
+
+    // 最も外側の閉じ括弧を探す。そこより前が中身。
+    let Some(close) = base.rfind('}') else {
+        // 括弧が無いなら壊れている。触らずに先頭を指す。
+        return (base, 1);
+    };
+    let head = &base[..close];
+    let tail = &base[close..];
+
+    // 直前の項目にカンマが無ければ足す (末尾のカンマは許されるので付けたままでよい)。
+    // **注釈を外してから見る** — 「…よい。」で終わる注釈の後ろにカンマは要らない。
+    let needs_comma = strip_jsonc(head)
+        .trim_end()
+        .chars()
+        .next_back()
+        .is_some_and(|c| c != ',' && c != '{');
+    let comma = if needs_comma { "," } else { "" };
+
+    // 項目の名前は JSON の鍵なので、**同じ名前を二度書くと前のものが消える**。
+    // 空のまま足すと二つめで一つめを失うため、必ず被らない名前にする。
+    let escaped = escape(prefix);
+    let entry = format!(
+        "{comma}\n    \"{}\": {{\n        \"prefix\": \"{escaped}\",\n        \"body\": [\"\"],\n        \"description\": \"\"\n    }},\n",
+        escape(&unique_name(&base, prefix))
+    );
+
+    let out = format!("{}{}{}", head.trim_end(), entry, tail);
+    // 書き始める行。足した項目の最後の行 (`},`) から数え上げる。
+    // 見出し語が入っていれば本文へ、空なら見出し語へ置く。
+    let last = out[..out.len() - tail.len()].lines().count();
+    let line = if prefix.is_empty() {
+        last - 3 // "prefix" の行
+    } else {
+        last - 2 // "body" の行
+    };
+    (out, line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +370,73 @@ mod tests {
         .unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].prefix, "い");
+    }
+
+    /// 何も無いところに足すと、書き方の見本ごと出来上がる。
+    #[test]
+    fn creates_the_first_entry_from_nothing() {
+        let (text, line) = append_template("", "でんわ");
+        // 足した直後のものが読める形になっている (雛形の中身は空なので 0 件)
+        assert_eq!(parse(&text).unwrap().len(), 0);
+        // 見出し語は埋まっている
+        assert!(text.contains(r#""prefix": "でんわ""#), "{text}");
+        // カーソルは本文の行
+        assert_eq!(
+            text.lines().nth(line - 1).unwrap().trim(),
+            r#""body": [""],"#
+        );
+    }
+
+    /// 既にある項目の後ろへ足す。前の項目にカンマが無くても壊さない。
+    #[test]
+    fn appends_after_an_existing_entry() {
+        let before = "{\n    \"電話\": {\n        \"prefix\": \"でんわ\",\n        \"body\": \"03\"\n    }\n}\n";
+        let (text, line) = append_template(before, "");
+        let got = parse(&text).unwrap();
+        assert_eq!(got.len(), 1, "元の項目は残る: {text}");
+        assert_eq!(got[0].prefix, "でんわ");
+        // カーソルは見出し語の行 (見出し語が決まっていないので)
+        assert_eq!(
+            text.lines().nth(line - 1).unwrap().trim(),
+            r#""prefix": "","#
+        );
+    }
+
+    /// 末尾にカンマがある書き方でも二重にしない。
+    #[test]
+    fn does_not_double_the_comma() {
+        let before = "{\n    \"電話\": {\n        \"prefix\": \"でんわ\",\n        \"body\": \"03\"\n    },\n}\n";
+        let (text, _) = append_template(before, "しょめい");
+        assert!(!text.contains(",,"), "{text}");
+        assert_eq!(parse(&text).unwrap().len(), 1);
+    }
+
+    /// 見出し語に " が入っていても壊れない。
+    #[test]
+    fn escapes_the_prefix() {
+        let (text, _) = append_template("", "a\"b");
+        assert!(parse(&text).is_ok(), "{text}");
+    }
+
+    /// 続けて足しても前のものが消えない。
+    ///
+    /// 項目の名前は JSON の鍵なので、同じ名前で二度書くと前の一つが失われる。
+    #[test]
+    fn adding_twice_keeps_both() {
+        let (one, _) = append_template("", "でんわ");
+        let filled = one.replace(r#""body": [""]"#, r#""body": ["03"]"#);
+        let (two, _) = append_template(&filled, "しょめい");
+        let two = two.replace(r#""body": [""]"#, r#""body": ["竹内"]"#);
+
+        let got = parse(&two).unwrap();
+        assert_eq!(got.len(), 2, "両方残るはず: {two}");
+        let prefixes: Vec<&str> = got.iter().map(|s| s.prefix.as_str()).collect();
+        assert!(prefixes.contains(&"でんわ") && prefixes.contains(&"しょめい"));
+
+        // 同じ見出し語で足しても消えない (名前に番号が付く)
+        let (three, _) = append_template(&two, "でんわ");
+        let three = three.replace(r#""body": [""]"#, r#""body": ["+81"]"#);
+        assert_eq!(parse(&three).unwrap().len(), 3, "{three}");
     }
 
     #[test]
