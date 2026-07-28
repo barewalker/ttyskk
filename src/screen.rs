@@ -212,6 +212,34 @@ impl Screen {
         out
     }
 
+    /// 画面全体を描き直すバイト列。控えの中身をそのまま端末へ書き戻す。
+    ///
+    /// 別のアプリ (編集器など) に画面を明け渡したあと、元の見た目へ戻すためのもの。
+    /// **副画面にいる子には使えない手** — 副画面の出入りで端末に戻してもらう方法は
+    /// 入れ子にできないので、そのときはこちらで描き直す。
+    ///
+    /// 戻せるのは文字と色だけ。巻き上げた履歴や、子が設定した領域・カーソルの形までは
+    /// 戻らない (控えに持っていない)。子が描き直せばそちらが上書きする。
+    pub fn repaint(&self) -> String {
+        let mut out = String::from("\x1b[H\x1b[2J");
+        let blank = Cell::default();
+        for row in 0..self.rows {
+            // 消したあとなので、行末の何も無いところまで描く必要はない。
+            // mosh のような細い経路では、この差がそのまま応答の速さになる。
+            let mut end = self.cols;
+            while end > 0 && self.cell(row, end - 1) == blank {
+                end -= 1;
+            }
+            if end == 0 {
+                continue;
+            }
+            out.push_str(&self.restore_region(row, 0, end));
+        }
+        out.push_str("\x1b[0m");
+        out.push_str(&format!("\x1b[{};{}H", self.row + 1, self.col + 1));
+        out
+    }
+
     fn scroll_up(&mut self, n: usize) {
         for _ in 0..n {
             if self.scroll_top <= self.scroll_bot && self.scroll_bot < self.rows {
@@ -769,6 +797,21 @@ mod tests {
                 "境界 {at} で置換文字が入った: {shown:?}"
             );
         }
+    }
+
+    /// 画面全体を描き直すと、文字も色もカーソルの位置も戻る。
+    #[test]
+    fn repaint_puts_the_screen_back() {
+        let mut s = Screen::new(4, 20);
+        feed(&mut s, "\x1b[31mあか\x1b[0m\r\n二行目");
+        let out = s.repaint();
+        assert!(out.starts_with("\x1b[H\x1b[2J"), "まず消してから描く");
+        assert!(out.contains("あか") && out.contains("二行目"));
+        assert!(out.contains(";31m"), "色も戻す");
+        // 最後にカーソルを元の位置へ (「二行目」は全角 3 文字なので 7 桁目)
+        assert!(out.ends_with("\x1b[2;7H"), "{out:?}");
+        // 行末の空白までは描かない (消したあとなので要らない)
+        assert!(!out.contains("    "), "無駄な空白がある: {out:?}");
     }
 
     #[test]

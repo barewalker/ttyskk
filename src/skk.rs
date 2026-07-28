@@ -187,6 +187,12 @@ pub struct Response {
     pub passthrough: Option<Key>,
     /// 入力モードが変わったか (カーソル色の更新に使う)。
     pub mode_changed: bool,
+    /// 定型文の編集を求める。中身は見出し語 (決まっていなければ空)。
+    ///
+    /// この層は編集器を起こせない (擬似端末も画面も持たない) ので、呼ぶ側へ頼む。
+    /// 端末側は画面を退避して `$EDITOR` を起こし、GUI の入力メソッドは自分の作法で
+    /// 開く。戻ってきたら定型文を読み直す。
+    pub edit_snippet: Option<String>,
 }
 
 impl Response {
@@ -228,6 +234,12 @@ struct Registration {
     abbrev: bool,
     /// 自動変換の引き金になった文字 (登録を終えたら後ろに付ける)
     auto_suffix: String,
+    /// 「定型文にしますか」を出しているか。
+    ///
+    /// 何も打っていないところで変換キーを押すと出る。**この位置の変換キーは
+    /// もともと半角空白を溜めるだけ**で、登録内容の先頭に空白を置くことはまず
+    /// 無いので、ここを譲ってもらっている。覚えるキーが増えないのが取り柄。
+    offering_snippet: bool,
 }
 
 impl Registration {
@@ -425,6 +437,18 @@ impl Skk {
                     style: Style::Reading,
                     text: reg.buffer.clone(),
                 });
+            }
+            // 「定型文にしますか」。候補と同じ見た目にして、選ぶものだと判るようにする。
+            if reg.offering_snippet {
+                segs.push(Segment {
+                    style: Style::Candidate,
+                    text: "▼[スニペットを登録]".to_string(),
+                });
+                return Preedit {
+                    at_cursor: segs,
+                    floating,
+                    cursor_tint: None,
+                };
             }
         }
         match self.phase {
@@ -822,6 +846,10 @@ impl Skk {
             }
             return Response::default();
         }
+        // 「定型文にしますか」を出している間は、決めるか引っ込めるかの二択。
+        if self.regs.last().is_some_and(|r| r.offering_snippet) {
+            return self.answer_snippet_offer(key);
+        }
         if self.phase == Phase::Direct {
             if key == Key::Enter {
                 return self.finish_registration();
@@ -837,10 +865,41 @@ impl Skk {
                     }
                     return Response::default();
                 }
+                // 何も打っていないところでの変換キー。もともと半角空白を溜めるだけ
+                // なので、ここで「定型文にしますか」を出す。
+                if self.cfg.convert.contains(&key)
+                    && self.regs.last().is_some_and(|r| r.buffer.is_empty())
+                {
+                    self.regs.last_mut().expect("登録中").offering_snippet = true;
+                    return Response::default();
+                }
             }
         }
         let r = self.dispatch(key);
         self.capture(r)
+    }
+
+    /// 「定型文にしますか」への返事。
+    ///
+    /// 決める (確定キー / Enter) と、見出し語を添えて呼ぶ側へ頼む。取り消す
+    /// (`C-g`) と引っ込めて登録の続きへ戻る。**それ以外のキーも引っ込めてから
+    /// 改めて処理する** — 打ち始めた人を止めない。
+    fn answer_snippet_offer(&mut self, key: Key) -> Response {
+        let reg = self.regs.last_mut().expect("登録中");
+        reg.offering_snippet = false;
+
+        if key == Key::Enter || self.cfg.confirm.contains(&key) {
+            let key_word = reg.reading.clone();
+            // 登録そのものは畳む。定型文として書くので、辞書には入れない。
+            let reg = self.regs.pop().expect("登録中");
+            let mut r = self.resume_composing(reg);
+            r.edit_snippet = Some(key_word);
+            return r;
+        }
+        if self.cfg.cancel.contains(&key) {
+            return Response::default();
+        }
+        self.handle(key)
     }
 
     /// 子へ出るはずだった文字を、いちばん内側の登録内容へ回す。
@@ -883,6 +942,7 @@ impl Skk {
             okuri_kana: self.okuri_kana.clone(),
             abbrev: self.abbrev,
             auto_suffix: std::mem::take(&mut self.auto_suffix),
+            offering_snippet: false,
         });
         self.reset();
     }
@@ -1039,6 +1099,7 @@ impl Skk {
                     commit: self.shape(&flushed),
                     passthrough: Some(k),
                     mode_changed: false,
+                    edit_snippet: None,
                 }
             }
         }
@@ -1213,6 +1274,7 @@ impl Skk {
                     commit: text,
                     passthrough: Some(k),
                     mode_changed: false,
+                    edit_snippet: None,
                 }
             }
         }
@@ -1387,6 +1449,7 @@ impl Skk {
                     commit: text + &r.commit,
                     passthrough: r.passthrough,
                     mode_changed: r.mode_changed,
+                    edit_snippet: r.edit_snippet,
                 }
             }
             k => {
@@ -1395,6 +1458,7 @@ impl Skk {
                     commit: text,
                     passthrough: Some(k),
                     mode_changed: false,
+                    edit_snippet: None,
                 }
             }
         }
@@ -1935,6 +1999,73 @@ mod tests {
         typed(&mut skk, "Kanji ");
         assert_eq!(pasted(&mut skk, "x"), "漢字\x1b[200~x\x1b[201~");
         assert_eq!(preedit_text(&skk), "");
+    }
+
+    /// 候補が無くて登録に入ったところで、定型文にする道を出す。
+    ///
+    /// 覚えるキーを増やさないために、**何も打っていないところでの変換キー**に載せて
+    /// いる。そこはもともと半角空白を溜めるだけの位置。
+    #[test]
+    fn offers_to_write_a_snippet_from_the_registration() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kaisyadenwa ");
+        assert_eq!(preedit_text(&skk), "[登録:かいしゃでんわ]");
+
+        // 何も打っていないところで変換キー
+        skk.handle(Key::Char(' '));
+        assert_eq!(
+            preedit_text(&skk),
+            "[登録:かいしゃでんわ]▼[スニペットを登録]"
+        );
+
+        // 決めると、見出し語を添えて呼ぶ側へ頼む
+        let r = skk.handle(Key::Enter);
+        assert_eq!(r.edit_snippet.as_deref(), Some("かいしゃでんわ"));
+        assert!(r.commit.is_empty(), "子へは何も出さない");
+        // 登録は畳んで ▽ に戻る (定型文として書くので辞書には入れない)
+        assert_eq!(preedit_text(&skk), "▽かいしゃでんわ");
+    }
+
+    /// 出したあとに打ち始めたら引っ込めて、そのキーを普通に処理する。
+    #[test]
+    fn typing_dismisses_the_snippet_offer() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        skk.handle(Key::Char(' '));
+        assert!(preedit_text(&skk).contains("スニペット"));
+
+        // 打ち始めれば消えて、打った文字は登録内容に入る
+        typed(&mut skk, "ai");
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 取り消しは誘いを引っ込めるだけで、登録そのものは畳まない。
+    #[test]
+    fn cancel_dismisses_only_the_offer() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        skk.handle(Key::Char(' '));
+        assert!(preedit_text(&skk).contains("スニペット"));
+
+        skk.handle(Key::Ctrl(0x07));
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]", "登録は続いている");
+        // もう一度出せる
+        skk.handle(Key::Char(' '));
+        assert!(preedit_text(&skk).contains("スニペット"));
+    }
+
+    /// 何か打ったあとの変換キーは、これまでどおり登録内容の変換に使う。
+    #[test]
+    fn the_offer_only_appears_on_an_empty_registration() {
+        let mut skk = skk_with(&[("あい", "/愛/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        typed(&mut skk, "Ai ");
+        // ▼愛 が出る (スニペットの誘いではない)
+        assert_eq!(preedit_text(&skk), "[登録:かんじ]▼愛");
     }
 
     /// 登録の途中では、貼り付けた中身がそのまま登録内容になる。
