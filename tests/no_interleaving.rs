@@ -10,6 +10,10 @@
 //!
 //! 子には日本語を「文字の途中で切れる大きさ」で小刻みに書かせ、その最中に打鍵を
 //! 混ぜて重ね描きを何度も起こす。
+//!
+//! 打鍵の反響 (行規律が挟むもの) は子の出力を同じように断ち切るが、あれは端末
+//! ドライバの仕事で ttyskk の手が届かない。素の端末でも起きることなので、試験では
+//! `stty -echo` で黙らせ、**ttyskk が自分で書いた分だけ**を見る。
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -26,7 +30,9 @@ fn dribble_script() -> String {
         "あちらのローカルが wsl を見ているはずなので、git switch main で今回の分が入ります。"
             .repeat(40);
     let bytes = text.as_bytes();
-    let mut out = String::new();
+    // 打鍵の反響は行規律 (端末ドライバ) が挟むもので、ttyskk の手を離れている。
+    // 子の printf の途中にそれが刺さっても ttyskk のせいではないので、黙らせる。
+    let mut out = String::from("stty -echo\n");
     let mut i = 0;
     while i < bytes.len() {
         let n = if (i / 7) % 3 != 0 { 7 } else { 5 };
@@ -42,13 +48,7 @@ fn dribble_script() -> String {
     out
 }
 
-/// **いまは通らない。** 割り込む経路をいくつも塞いだが、まだ残っている
-/// (この試験で 18 箇所)。塞ぎきったらこの `ignore` を外して、`cargo test` の
-/// 並びに戻すこと。
-///
-/// 走らせるには `cargo test -- --ignored`。
 #[test]
-#[ignore = "重ね描きの割り込みがまだ残っている (既知の残件)"]
 fn the_overlay_never_splits_a_character() {
     let pty = native_pty_system()
         .openpty(PtySize {
@@ -83,27 +83,44 @@ fn the_overlay_never_splits_a_character() {
     drop(pty.slave);
 
     let mut reader = pty.master.try_clone_reader().expect("読めない");
-    let mut writer = pty.master.take_writer().expect("書けない");
+    // 位置の問い合わせに答える係と打鍵する係で分け合う
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(
+        pty.master.take_writer().expect("書けない"),
+    ));
 
     // 端末の役として受け取ったすべて
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     {
         let seen = seen.clone();
+        let writer = writer.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
+                // **カーソル位置を尋ねられたら必ず答える。** 答えないと ttyskk は
+                // 控えの原点が定まらず、壊すくらいならと重ね描きを一切描かない。
+                // そうなると割り込む機会が生まれず、この試験は空回りする。
+                if buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                    let mut w = writer.lock().unwrap();
+                    let _ = w.write_all(b"\x1b[1;1R");
+                    let _ = w.flush();
+                }
                 seen.lock().unwrap().extend_from_slice(&buf[..n]);
             }
         });
     }
 
+    let key = |k: &[u8]| {
+        let mut w = writer.lock().unwrap();
+        let _ = w.write_all(k);
+        let _ = w.flush();
+    };
+
     // 起動を待ち、かなモードへ入る
     std::thread::sleep(Duration::from_millis(600));
-    let _ = writer.write_all(b"\x0a");
-    let _ = writer.flush();
+    key(b"\x0a");
 
     // 子が書いている最中に打鍵を混ぜる。重ね描きが何度も起きる。
     let keys = b"Kanji Nihongo Aisatu Kaigi \r";
@@ -112,8 +129,7 @@ fn the_overlay_never_splits_a_character() {
         if Instant::now() > deadline {
             break;
         }
-        let _ = writer.write_all(&[*k]);
-        let _ = writer.flush();
+        key(&[*k]);
         std::thread::sleep(Duration::from_millis(40));
     }
 
@@ -142,6 +158,17 @@ fn the_overlay_never_splits_a_character() {
             &got[at..(at + 3).min(got.len())],
             String::from_utf8_lossy(&got[(at + 1).min(got.len())..hi]),
             String::from_utf8_lossy(&got).matches('\u{fffd}').count(),
+        );
+    }
+
+    // **壊れていないことだけでは足りない。** 重ね描きが一度も起きていなければ、
+    // 割り込む機会そのものが無かっただけで、何も見張れていない。見出し語 (▽) と
+    // 候補 (▼) の両方が端末に出ていることを確かめ、試験が空回りしていないと示す。
+    let text = String::from_utf8_lossy(&got);
+    for marker in ['▽', '▼'] {
+        assert!(
+            text.contains(marker),
+            "{marker} が端末に出ていない。重ね描きが起きておらず、試験が空回りしている"
         );
     }
 }
