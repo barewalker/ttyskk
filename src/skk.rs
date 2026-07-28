@@ -1100,7 +1100,7 @@ impl Skk {
                 if self.cfg.cancel.contains(&key) {
                     return self.abort_registration();
                 }
-                if key == Key::Backspace {
+                if self.cfg.backspace.contains(&key) {
                     let reg = self.regs.last_mut().expect("登録中");
                     if reg.buffer.pop().is_none() {
                         return self.abort_registration();
@@ -1282,10 +1282,13 @@ impl Skk {
                 self.romaji.clear();
                 Response::default()
             }
-            Key::Backspace => {
+            k if self.cfg.backspace.contains(&k) => {
                 if self.romaji.backspace() {
                     Response::default()
                 } else {
+                    // 消すものが無ければ子へ回す。**押されたキーそのものではなく
+                    // Backspace として渡す** — C-h を消すキーとして割り当てている
+                    // のだから、子アプリにもその意味で届いてほしい。
                     Response {
                         passthrough: Some(Key::Backspace),
                         ..Default::default()
@@ -1427,7 +1430,7 @@ impl Skk {
                 self.delete_at_cursor();
                 Response::default()
             }
-            Key::Backspace => {
+            k if self.cfg.backspace.contains(&k) => {
                 if self.romaji.backspace() {
                 } else if self.cursor_inside_reading() {
                     // 途中へ動かしてある間は、送り仮名より先に見出し語のそこを直す
@@ -1695,7 +1698,7 @@ impl Skk {
                 }
                 Response::default()
             }
-            Key::Backspace => {
+            k if self.cfg.backspace.contains(&k) => {
                 self.prev_candidate();
                 Response::default()
             }
@@ -1873,7 +1876,7 @@ impl Skk {
             self.fill_suffix.clear();
             return Response::default();
         }
-        if key == Key::Backspace && self.romaji.is_empty() {
+        if self.cfg.backspace.contains(&key) && self.romaji.is_empty() {
             let f = self.filling.as_mut().expect("埋め中");
             f.value_mut().pop();
             return Response::default();
@@ -3502,6 +3505,50 @@ mod tests {
         skk.handle(Key::Ctrl(0x02));
         assert_eq!(cursor_char(&skk), "ジ");
         assert_eq!(preedit_text(&skk), "▽カンジ");
+    }
+
+    /// C-h も一文字消すキー。Backspace 鍵と同じ道を通る。
+    ///
+    /// 端末では `0x08` で届き、拡張鍵盤プロトコルの下では `CSI 104;5u` になる。
+    /// どちらも `Key::Ctrl(0x08)` に落ちるので、ここが効けば両方効く。
+    #[test]
+    fn ctrl_h_deletes_one_character() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/幹事/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        skk.handle(Key::Ctrl(0x08));
+        assert_eq!(preedit_text(&skk), "▽かん", "▽ の見出し語から一文字消える");
+
+        // ▼ では前の候補へ戻る (Backspace 鍵と同じ)
+        typed(&mut skk, "ji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        skk.handle(Key::Char(' '));
+        assert_eq!(preedit_text(&skk), "▼幹事");
+        skk.handle(Key::Ctrl(0x08));
+        assert_eq!(preedit_text(&skk), "▼漢字");
+    }
+
+    /// 消すものが無ければ子へ回す。**押された C-h ではなく Backspace として渡す。**
+    ///
+    /// 消すキーとして割り当てているのだから、子アプリにもその意味で届いてほしい。
+    #[test]
+    fn ctrl_h_reaches_the_child_as_a_backspace() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        let r = skk.handle(Key::Ctrl(0x08));
+        assert_eq!(r.passthrough, Some(Key::Backspace));
+        assert_eq!(r.to_child(), vec![0x7f]);
+    }
+
+    /// 割り当てから外せば、C-h は子アプリの持ち物に戻る。
+    #[test]
+    fn ctrl_h_can_be_given_back_to_the_child() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[keys]\nbackspace = \"bs\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        let r = skk.handle(Key::Ctrl(0x08));
+        assert_eq!(r.to_child(), vec![0x08], "押されたとおり素通しする");
     }
 
     /// 移動キーは設定から取る。割り当てを変えれば別のキーで動く。

@@ -135,6 +135,16 @@ pub struct Config {
     pub move_end: Vec<Key>,
     /// ▽ のカーソル位置にある一文字を消す
     pub delete_forward: Vec<Key>,
+    /// 一文字消す (カーソルの手前)。
+    ///
+    /// 既定は Backspace 鍵と `C-h`。**ここに挙げないと、拡張鍵盤プロトコルを使う
+    /// アプリの下でそのキーが効かない** — 素の形に戻す対象がこの一覧だからで、
+    /// 戻せなかったキーは割り当ての無いキーとして子へ素通りする (▽ の途中なら
+    /// 見出し語がそこで確定してしまう)。
+    ///
+    /// 何も消すものが無ければ Backspace として子へ渡る。`C-h` を子アプリ自身の
+    /// 操作に使いたい場合は、ここから外す。
+    pub backspace: Vec<Key>,
     /// 候補一覧から選ぶキー。並び順がそのまま一覧の並び順になる
     pub select: Vec<char>,
     /// 一覧を出さずに一つずつ送る候補数
@@ -226,6 +236,9 @@ impl Default for Config {
             move_home: ctrl_or_sequence(0x01, "home"),
             move_end: ctrl_or_sequence(0x05, "end"),
             delete_forward: vec![Key::Ctrl(0x04)],
+            // C-h も一文字消す。emacs や readline と同じ読み方で、端末では昔から
+            // Backspace と同じ意味に使われてきた。
+            backspace: vec![Key::Backspace, Key::Ctrl(0x08)],
             select: vec!['a', 's', 'd', 'f', 'j', 'k', 'l'],
             inline_candidates: 4,
             layout: Layout::Inline,
@@ -258,7 +271,7 @@ impl Config {
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    fn key_slots(&self) -> [&Vec<Key>; 21] {
+    fn key_slots(&self) -> [&Vec<Key>; 22] {
         [
             &self.kana,
             &self.confirm,
@@ -280,6 +293,7 @@ impl Config {
             &self.move_home,
             &self.move_end,
             &self.delete_forward,
+            &self.backspace,
             &self.snippet_edit,
         ]
     }
@@ -340,6 +354,7 @@ impl Config {
                     "move_home" => &mut cfg.move_home,
                     "move_end" => &mut cfg.move_end,
                     "delete_forward" => &mut cfg.delete_forward,
+                    "backspace" => &mut cfg.backspace,
                     "snippet_edit" => &mut cfg.snippet_edit,
                     "select" => {
                         cfg.select = parse_select(value)?;

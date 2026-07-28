@@ -90,7 +90,9 @@ impl Decoder {
                     keys.push(key);
                     i += len;
                 }
-                0x7f | 0x08 => {
+                // `0x08` (C-h) はここでは制御キーのまま通す。backspace として扱うかは
+                // 設定 (`keys.backspace`) が決めることで、切り出す側の決め打ちにしない。
+                0x7f => {
                     keys.push(Key::Backspace);
                     i += 1;
                 }
@@ -457,6 +459,27 @@ mod tests {
         assert_eq!(d.feed(b"\x1b[113;5u"), vec![Key::Ctrl(0x11)]); // Ctrl+Q
         // 下位引数 (イベント種別) が付いていても読める
         assert_eq!(d.feed(b"\x1b[106;5:1u"), vec![Key::Ctrl(0x0a)]);
+    }
+
+    /// C-h は制御キーのまま切り出す。backspace として扱うかは設定が決める。
+    ///
+    /// ここを `Key::Backspace` に潰していると、押されたのが `0x08` だったのか
+    /// `0x7f` だったのかが分からなくなる。
+    #[test]
+    fn ctrl_h_stays_a_control_key() {
+        let mut d = decoder();
+        assert_eq!(d.feed(b"\x08"), vec![Key::Ctrl(0x08)]);
+        assert_eq!(d.feed(b"\x7f"), vec![Key::Backspace]);
+    }
+
+    /// **拡張鍵盤プロトコルの下でも C-h が届くこと。**
+    ///
+    /// `keys.backspace` に挙がっていないと `CSI 104;5u` が素通しされ、▽ の途中で
+    /// 押したときに見出し語がそこで確定してしまう (消すどころか出てしまう)。
+    #[test]
+    fn decodes_kitty_ctrl_h() {
+        let mut d = decoder();
+        assert_eq!(d.feed(b"\x1b[104;5u"), vec![Key::Ctrl(0x08)]);
     }
 
     /// 復号の対象は設定から作る。割り当てを変えたらそちらが復号される。
