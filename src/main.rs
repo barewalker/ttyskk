@@ -189,7 +189,15 @@ fn edit_snippets(prefix: &str) -> Result<Option<String>> {
     fs::write(&path, &with_template).with_context(|| format!("{} に書けない", path.display()))?;
 
     // 指定された編集器が無くて別のものに落ちたら、その旨が返る
-    let note = open_editor(&path, line)?;
+    let note = match open_editor(&path, line) {
+        Ok(note) => note,
+        Err(e) => {
+            // **開けなかったのだから、足した雛形は要らない。** 片付けずに戻ると、
+            // 試すたびに空の項目が溜まっていく。
+            let _ = fs::write(&path, &before);
+            return Err(e);
+        }
+    };
 
     let after = fs::read_to_string(&path)?;
     if after == with_template {
