@@ -560,6 +560,41 @@ mod tests {
         assert_eq!(d.feed(b"00~ab\x1b[201~"), vec![Key::Paste(b"ab".to_vec())]);
     }
 
+    /// 日本語を含む長い貼り付けが読み込みの境界で切れても、中身は一バイトも変わらない。
+    ///
+    /// 標準入力は 4096 バイトずつ読む。かなは 3 バイトなので境界はほぼ必ず文字の
+    /// 途中に落ちる。そこで一バイトでも落とすと、受け取った側で置換文字 (U+FFFD)
+    /// になる。**あらゆる境界で切って**中身が変わらないことを見張る。
+    #[test]
+    fn split_paste_keeps_multibyte_bytes_intact() {
+        let body = "ただ一点、私の計算違いでしたら申し訳ないのですが、".repeat(60);
+        let want = vec![Key::Paste(body.as_bytes().to_vec())];
+        let mut input = PASTE_START.to_vec();
+        input.extend_from_slice(body.as_bytes());
+        input.extend_from_slice(PASTE_END);
+
+        // 実際の読み込み単位で切る
+        let mut d = decoder();
+        let mut keys = Vec::new();
+        for chunk in input.chunks(4096) {
+            keys.extend(d.feed(chunk));
+        }
+        assert_eq!(keys, want, "4096 バイトずつ");
+
+        // 境界を一バイトずつずらして二つに切る。囲みの列そのものが切れる場合は
+        // split_paste_is_carried_over が見ているので、中身の途中だけを試す。
+        for at in PASTE_START.len()..input.len() - PASTE_END.len() {
+            let mut d = decoder();
+            let mut keys = d.feed(&input[..at]);
+            keys.extend(d.feed(&input[at..]));
+            assert!(
+                keys == want,
+                "境界 {at} で中身が変わった: キー {} 個",
+                keys.len()
+            );
+        }
+    }
+
     /// 貼り付けの前後に打鍵が続いていても取りこぼさない。
     #[test]
     fn keys_around_a_paste_survive() {

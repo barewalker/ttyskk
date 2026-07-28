@@ -749,6 +749,28 @@ mod tests {
         assert!(out.ends_with("cd"));
     }
 
+    /// 子の出力が文字の途中で切れても、控えの画面に置換文字が入らない。
+    ///
+    /// 子の出力は 8192 バイトずつ読む。かなは 3 バイトなので境界は文字の途中に
+    /// 落ちる。パーサが持ち越さないと控えに U+FFFD が入り、重ね描きを消すときに
+    /// **画面へ書き戻されてしまう**。
+    #[test]
+    fn split_utf8_output_keeps_the_grid_intact() {
+        let text = "ただ一点、私の計算違いでしたら申し訳ないのですが、";
+        let bytes = text.as_bytes();
+        for at in 1..bytes.len() {
+            let mut s = Screen::new(5, 80);
+            let mut p = Parser::new();
+            p.advance(&mut s, &bytes[..at]);
+            p.advance(&mut s, &bytes[at..]);
+            let shown = s.restore_region(0, 0, text.chars().count() * 2);
+            assert!(
+                !shown.contains('\u{fffd}'),
+                "境界 {at} で置換文字が入った: {shown:?}"
+            );
+        }
+    }
+
     #[test]
     fn restore_expands_over_wide_char() {
         let mut s = Screen::new(5, 20);
