@@ -821,6 +821,17 @@ impl Skk {
     }
 
     pub fn handle(&mut self, key: Key) -> Response {
+        // 定型文の編集はどの段からでも呼べる。割り当てが無ければ何も起きない。
+        // ASCII モードでは効かせない — 子アプリの持ち物であるキーを奪ってしまう。
+        if self.mode != Mode::Ascii
+            && !self.cfg.snippet_edit.is_empty()
+            && self.cfg.snippet_edit.contains(&key)
+        {
+            return Response {
+                edit_snippet: Some(self.word_in_hand()),
+                ..Default::default()
+            };
+        }
         if self.regs.is_empty() {
             // 挿入モードを抜けたときにかなが残らないようにする。vim / nvim で
             // Esc を押すと挿入モードを抜けるので、同じキーで ASCII へ戻す。
@@ -877,6 +888,20 @@ impl Skk {
         }
         let r = self.dispatch(key);
         self.capture(r)
+    }
+
+    /// いま手にしている見出し語。定型文を書きに行くときに持って行く。
+    ///
+    /// 登録の途中ならその見出し語、▽ や ▼ ならいま打っているもの。何も打って
+    /// いなければ空 (編集器の側で決める)。
+    fn word_in_hand(&self) -> String {
+        if let Some(reg) = self.regs.last() {
+            return reg.reading.clone();
+        }
+        match self.phase {
+            Phase::Composing | Phase::Selecting => self.reading.clone(),
+            Phase::Direct => String::new(),
+        }
     }
 
     /// 「定型文にしますか」への返事。
@@ -2039,6 +2064,42 @@ mod tests {
         // 打ち始めれば消えて、打った文字は登録内容に入る
         typed(&mut skk, "ai");
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 割り当てれば、変換に入る前からでも定型文を書きに行ける。
+    ///
+    /// 既定は空なので、何も設定しなければ普通の文字として扱われる。
+    #[test]
+    fn the_snippet_key_works_from_anywhere_when_bound() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[keys]\nsnippet_edit = \"C-t\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+
+        // 何も打っていないところから。見出し語は決まっていない
+        let r = skk.handle(Key::Ctrl(0x14));
+        assert_eq!(r.edit_snippet.as_deref(), Some(""));
+
+        // ▽ の途中なら、打っている見出し語を持って行く
+        typed(&mut skk, "Kaisya");
+        let r = skk.handle(Key::Ctrl(0x14));
+        assert_eq!(r.edit_snippet.as_deref(), Some("かいしゃ"));
+
+        // ASCII モードでは効かない (子アプリの持ち物なので奪わない)
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[keys]\nsnippet_edit = \"C-t\"\n").unwrap());
+        let r = skk.handle(Key::Ctrl(0x14));
+        assert_eq!(r.edit_snippet, None);
+        assert_eq!(r.passthrough, Some(Key::Ctrl(0x14)), "子へ渡す");
+    }
+
+    /// 割り当てが無ければ、そのキーはこれまでどおり素通しする。
+    #[test]
+    fn the_snippet_key_is_unbound_by_default() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        let r = skk.handle(Key::Ctrl(0x14));
+        assert_eq!(r.edit_snippet, None);
+        assert_eq!(r.passthrough, Some(Key::Ctrl(0x14)));
     }
 
     /// 取り消しは誘いを引っ込めるだけで、登録そのものは畳まない。
