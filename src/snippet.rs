@@ -192,6 +192,126 @@ pub fn parse(text: &str) -> Result<Vec<Snippet>> {
     Ok(out)
 }
 
+/// いまの日時。定型文の変数を開くのに使う。
+///
+/// **エンジンの側では日時を読まない。** 地方時に直すには libc が要り、この層は
+/// 端末にも GUI にも載せられるよう libc を持たない作りにしてある。呼ぶ側が
+/// 教える ([`crate::skk::Skk::set_now`])。教えなければ変数は開かず、書いたままの
+/// 姿で出る。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Now {
+    pub year: i32,
+    /// 1〜12
+    pub month: u32,
+    /// 1〜31
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    /// 0 = 日曜
+    pub weekday: u32,
+    /// Unix 時刻 (秒)
+    pub unix: i64,
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+const DAY_NAMES: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+impl Now {
+    /// 変数名に対する値。知らない名前なら `None`。
+    ///
+    /// 名前は TextMate (VS Code・LSP) のものに合わせる。日付と時刻だけを扱い、
+    /// ファイル名や選択範囲のように端末で意味を持たないものは持たない。
+    fn value(&self, name: &str) -> Option<String> {
+        let month = (self.month.clamp(1, 12) - 1) as usize;
+        let weekday = (self.weekday % 7) as usize;
+        Some(match name {
+            "CURRENT_YEAR" => format!("{:04}", self.year),
+            "CURRENT_YEAR_SHORT" => format!("{:02}", self.year.rem_euclid(100)),
+            "CURRENT_MONTH" => format!("{:02}", self.month),
+            "CURRENT_MONTH_NAME" => MONTH_NAMES[month].to_string(),
+            "CURRENT_MONTH_NAME_SHORT" => MONTH_NAMES[month][..3].to_string(),
+            "CURRENT_DATE" => format!("{:02}", self.day),
+            "CURRENT_DAY_NAME" => DAY_NAMES[weekday].to_string(),
+            "CURRENT_DAY_NAME_SHORT" => DAY_NAMES[weekday][..3].to_string(),
+            "CURRENT_HOUR" => format!("{:02}", self.hour),
+            "CURRENT_MINUTE" => format!("{:02}", self.minute),
+            "CURRENT_SECOND" => format!("{:02}", self.second),
+            "CURRENT_SECONDS_UNIX" => self.unix.to_string(),
+            _ => return None,
+        })
+    }
+}
+
+/// 定型文の中の変数を、いまの値に置き換える。
+///
+/// `$CURRENT_YEAR` と `${CURRENT_YEAR}` のどちらの書き方も通る。**知らない名前は
+/// そのまま残す** — `$100` のような普通の文字列を勝手に消さないため。`\$` と
+/// 書けば、変数として読まずに `$` そのものになる。
+pub fn expand_variables(text: &str, now: &Now) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'$') {
+            out.push('$');
+            i += 2;
+            continue;
+        }
+        if chars[i] != '$' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        // `${NAME}` と `$NAME` の両方を見る
+        let (name_start, braced) = match chars.get(i + 1) {
+            Some('{') => (i + 2, true),
+            _ => (i + 1, false),
+        };
+        let mut end = name_start;
+        while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+        let name: String = chars[name_start..end].iter().collect();
+        let closed = !braced || chars.get(end) == Some(&'}');
+        match now.value(&name).filter(|_| closed) {
+            Some(v) => {
+                out.push_str(&v);
+                i = if braced { end + 1 } else { end };
+            }
+            // 知らない名前や閉じていない括弧は、書いたまま残す
+            None => {
+                out.push('$');
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// 何も無いところに置く最初の中身。
 ///
 /// 空のファイルを編集器で開いても書き出しに困るので、書き方をその場に置いておく。
@@ -370,6 +490,57 @@ mod tests {
         .unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].prefix, "い");
+    }
+
+    fn now() -> Now {
+        // 2026-07-28 (火) 13:05:07
+        Now {
+            year: 2026,
+            month: 7,
+            day: 28,
+            hour: 13,
+            minute: 5,
+            second: 7,
+            weekday: 2,
+            unix: 1_785_243_907,
+        }
+    }
+
+    /// 日付や時刻を書いておくと、使うときの値に開く。
+    #[test]
+    fn expands_the_date_variables() {
+        let n = now();
+        assert_eq!(expand_variables("$CURRENT_YEAR", &n), "2026");
+        assert_eq!(
+            expand_variables("${CURRENT_YEAR}-${CURRENT_MONTH}-${CURRENT_DATE}", &n),
+            "2026-07-28"
+        );
+        assert_eq!(
+            expand_variables("$CURRENT_HOUR:$CURRENT_MINUTE", &n),
+            "13:05"
+        );
+        assert_eq!(expand_variables("$CURRENT_DAY_NAME_SHORT", &n), "Tue");
+        assert_eq!(expand_variables("$CURRENT_MONTH_NAME", &n), "July");
+        assert_eq!(expand_variables("$CURRENT_YEAR_SHORT", &n), "26");
+    }
+
+    /// 知らない名前は書いたまま残す。金額や変数名を勝手に消さない。
+    #[test]
+    fn leaves_unknown_variables_alone() {
+        let n = now();
+        assert_eq!(expand_variables("$100 と $200", &n), "$100 と $200");
+        assert_eq!(expand_variables("$HOME/bin", &n), "$HOME/bin");
+        assert_eq!(expand_variables("${CURRENT_YEAR", &n), "${CURRENT_YEAR");
+        // \$ と書けば $ そのもの
+        assert_eq!(expand_variables("\\$CURRENT_YEAR", &n), "$CURRENT_YEAR");
+    }
+
+    /// 日時を教えられていなければ (既定の Now)、年は 0000 になるだけで壊れない。
+    #[test]
+    fn works_without_a_clock() {
+        let n = Now::default();
+        assert_eq!(expand_variables("$CURRENT_YEAR", &n), "0000");
+        assert_eq!(expand_variables("ふつうの文字列", &n), "ふつうの文字列");
     }
 
     /// 何も無いところに足すと、書き方の見本ごと出来上がる。
