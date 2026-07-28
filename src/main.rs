@@ -93,6 +93,22 @@ impl RawGuard {
     }
 }
 
+impl RawGuard {
+    /// 元の設定へ戻す。編集器のように、自分で端末を整えるものを起こす間だけ。
+    fn suspend(&self) {
+        use nix::sys::termios::{SetArg, tcsetattr};
+        let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, &self.original);
+    }
+
+    /// raw モードへ戻す。
+    fn resume(&self) {
+        use nix::sys::termios::{SetArg, cfmakeraw, tcsetattr};
+        let mut raw = self.original.clone();
+        cfmakeraw(&mut raw);
+        let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, &raw);
+    }
+}
+
 impl Drop for RawGuard {
     fn drop(&mut self) {
         use nix::sys::termios::{SetArg, tcsetattr};
@@ -188,6 +204,45 @@ fn edit_snippets(prefix: &str) -> Result<()> {
         }
         // 直すのは書いた本人なので、消したり戻したりはしない
         Err(e) => Err(e).with_context(|| format!("{} を読み直せない", path.display())),
+    }
+}
+
+/// 画面を明け渡して編集器を起こし、終わったら元の見た目へ戻す。
+///
+/// 子プロセスは動いたままなので、**画面をどう返すかが要**になる。子が主画面にいる
+/// なら副画面で編集器を動かし、抜ければ端末が元の内容を戻してくれる。子が既に副画面に
+/// いる (vim など) 場合はその手が使えないので、控えから描き直す。
+///
+/// 失敗しても入力を続けられるようにする。ここで抜けると、包んでいる子ごと道連れになる。
+fn run_editor_over_the_screen(
+    raw: &RawGuard,
+    stdout: &mut impl Write,
+    screen: &Screen,
+    word: &str,
+    trace: &mut Trace,
+) {
+    // 子が主画面にいるなら、副画面を借りれば端末が元に戻してくれる
+    let borrow_alt = !screen.alt_screen;
+    if borrow_alt {
+        let _ = stdout.write_all(b"\x1b[?1049h");
+    }
+    let _ = stdout.write_all(b"\x1b[H\x1b[2J");
+    let _ = stdout.flush();
+
+    raw.suspend();
+    let result = edit_snippets(word);
+    raw.resume();
+
+    if borrow_alt {
+        let _ = stdout.write_all(b"\x1b[?1049l");
+    } else {
+        let _ = stdout.write_all(screen.repaint().as_bytes());
+    }
+    let _ = stdout.flush();
+
+    match result {
+        Ok(()) => trace.log(format_args!("--- 定型文を編集した ({word})")),
+        Err(e) => trace.log(format_args!("--- 定型文を編集できない: {e}")),
     }
 }
 
@@ -688,12 +743,14 @@ fn main() -> Result<()> {
                 }
                 let mut to_child = Vec::new();
                 let mut mode_changed = false;
+                let mut wants_editor = None;
                 for key in decoder.feed(&data) {
                     let r = skk.handle(key);
                     // 確定したなら何か覚えた見込みがある。手が止まったら書き出す。
                     unsaved |= !r.commit.is_empty();
                     to_child.extend(r.to_child());
                     mode_changed |= r.mode_changed;
+                    wants_editor = wants_editor.or(r.edit_snippet);
                 }
                 let had_overlay = !overlay.is_empty();
                 // 子の反響が届く前に重ね描きを消しておく
@@ -731,6 +788,17 @@ fn main() -> Result<()> {
                 if !out.is_empty() {
                     stdout.write_all(&out)?;
                     stdout.flush()?;
+                }
+                if let Some(word) = wants_editor {
+                    run_editor_over_the_screen(&raw, &mut stdout, &screen, &word, &mut trace);
+                    // 書いたものをその場で使えるようにする
+                    let (_, failed) = skk.dict_mut().reload_snippets();
+                    for (path, e) in &failed {
+                        trace.log(format_args!("--- {} を読めない: {e}", path.display()));
+                    }
+                    // 画面を作り直したので、重ね描きの控えは当てにならない
+                    overlay = Overlay::new();
+                    touched = true;
                 }
             }
             Event::Winch => {
