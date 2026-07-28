@@ -851,8 +851,19 @@ fn main() -> Result<()> {
     let mut decoder = Decoder::new(skk.config());
     let mut tracker = input::SeqTracker::new();
     let mut mid_sequence = false;
-    // 尋ねたカーソル位置の報告を待っているか
+    // 尋ねたカーソル位置の報告を、まだ受け取っていないか。
+    //
+    // **受け取るまで下ろさない。** 報告は端末から**入力として**返ってくるので、
+    // 取り除かないと子アプリが打鍵として受け取る (`CSI 12;1R` が打ち込まれ、
+    // ▽ の途中なら見出し語がそこで確定して流れ出る)。多重化の分割を増減すると
+    // アプリは必ず描き直すため、描き直しを合図に下ろすと毎回これが起きる。
     let mut awaiting_report = false;
+    // その報告をカーソル位置として使ってよいか。
+    //
+    // 子が描き直したあとの報告は、尋ねた時点の古い位置を指している。使わずに
+    // 取り除くだけにする — 描き直しは控え (`screen`) が追えているので、位置は
+    // そちらが持っている。
+    let mut report_usable = false;
     // 列の途中で尋ねられず、持ち越している問い合わせがあるか
     let mut want_report = false;
     // 一度でもカーソル位置の報告を受け取れたか。
@@ -889,6 +900,11 @@ fn main() -> Result<()> {
         let ev = match rx.recv_timeout(SAVE_AFTER) {
             Ok(ev) => ev,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 位置を尋ねたきり返事が来ない (報告に応えない端末もある)。
+                // 待ち続けると、子アプリが自分で尋ねた分の返事まで横取りして
+                // しまうので、手が止まったところで諦める。
+                awaiting_report = false;
+                report_usable = false;
                 // 手が止まった。覚えたことがあれば、ここで書き出す。
                 if unsaved {
                     unsaved = false;
@@ -939,13 +955,15 @@ fn main() -> Result<()> {
                     out.extend_from_slice(cursor_indicator(skk.mode, skk.marker()).as_bytes());
                     cursor_dirty = false;
                 }
-                // 子が描き直したので、待っていた位置報告はもう古い
-                awaiting_report = false;
+                // 子が描き直したので、待っていた位置報告はもう古い。**待つのは
+                // やめない** — 返事は取り除かないと打鍵として子へ流れ込む。
+                report_usable = false;
                 // 大きさが変わったときに送れなかった問い合わせを、切れ目で送る
                 if want_report && !mid_sequence {
                     want_report = false;
                     out.extend_from_slice(CURSOR_QUERY);
                     awaiting_report = true;
+                    report_usable = true;
                 }
                 let preedit = skk.preedit();
                 if !preedit.is_empty() && !mid_sequence && anchored {
@@ -971,11 +989,16 @@ fn main() -> Result<()> {
                 stdout.flush()?;
             }
             Event::Input(mut data) => {
-                // 画面の大きさが変わった直後は、尋ねておいた位置報告が紛れている
+                // 画面の大きさが変わった直後は、尋ねておいた位置報告が紛れている。
+                // 古くて使えないときも**取り除くことだけはする** — 残すと子アプリが
+                // 打鍵として受け取ってしまう。
                 if awaiting_report && let Some((pos, rest)) = input::take_cursor_report(&data) {
-                    screen.set_cursor(pos.0, pos.1);
+                    if report_usable {
+                        screen.set_cursor(pos.0, pos.1);
+                        anchored = true;
+                    }
                     awaiting_report = false;
-                    anchored = true;
+                    report_usable = false;
                     data = rest;
                 }
                 let mut to_child = Vec::new();
@@ -1098,6 +1121,7 @@ fn main() -> Result<()> {
                 } else {
                     request_cursor_report(&mut stdout);
                     awaiting_report = true;
+                    report_usable = true;
                 }
             }
             Event::DictChanged => {
