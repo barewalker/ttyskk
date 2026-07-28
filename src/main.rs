@@ -68,6 +68,8 @@ enum Event {
     Reconfigured(Box<Config>),
     /// 利用者辞書が別のプロセス (GUI の入力メソッドなど) に書き換えられた
     DictChanged,
+    /// スニペットが編集器で書き換えられた
+    SnippetsChanged,
 }
 
 /// 端末を raw モードにし、終了時に必ず元へ戻す。
@@ -133,6 +135,18 @@ fn user_jisyo() -> PathBuf {
     std::env::var_os("TTYSKK_USER_JISYO")
         .map(PathBuf::from)
         .unwrap_or_else(|| data_home().join("ttyskk/user.dict"))
+}
+
+/// スニペットの置き場所。設定が空なら既定の一つだけを読む。
+///
+/// 既定を利用者辞書と同じところに置くので、辞書を git に載せて職場と自宅で
+/// 分け合っている場合、定型文もそのまま行き来する。
+fn snippet_paths(cfg: &Config) -> Vec<PathBuf> {
+    if cfg.snippets.is_empty() {
+        vec![data_home().join("ttyskk/snippets.code-snippets")]
+    } else {
+        cfg.snippets.clone()
+    }
 }
 
 /// 端末にカーソル位置を尋ねる (DSR 6)。
@@ -325,7 +339,7 @@ fn main() -> Result<()> {
 
     let import = std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join(".local/share/fcitx5/skk/user.dict"));
-    let dict = Dict::load(&default_system_jisyo(), user_jisyo(), import.as_deref())?;
+    let mut dict = Dict::load(&default_system_jisyo(), user_jisyo(), import.as_deref())?;
     if dict.system_len() == 0 {
         eprintln!(
             "ttyskk: 共有辞書が見つからない。TTYSKK_JISYO でパスを指定できる。変換はできないが起動は続ける。"
@@ -335,6 +349,15 @@ fn main() -> Result<()> {
     let config_path = config::config_path();
     let cfg = Config::load(&config_path)
         .with_context(|| format!("設定 {} を読めない", config_path.display()))?;
+
+    // 定型文。手で書くものなので、壊れていても起動は続けてここで知らせる
+    // (画面を触る前でないと、この知らせが重ね描きに埋もれる)。
+    let snippets = snippet_paths(&cfg);
+    let (snippet_count, failed) = dict.load_snippets(&snippets);
+    for (path, e) in &failed {
+        eprintln!("ttyskk: {} を読めない: {e}", path.display());
+    }
+
     let mut skk = Skk::new(dict, cfg);
 
     let (rows, cols) = winsize();
@@ -352,7 +375,7 @@ fn main() -> Result<()> {
 
     let mut trace = Trace::new();
     trace.log(format_args!(
-        "--- 起動 画面 {rows}x{cols} 位置の報告 {origin:?} 先走り {} バイト",
+        "--- 起動 画面 {rows}x{cols} 位置の報告 {origin:?} 先走り {} バイト 定型文 {snippet_count} 語",
         typeahead.len()
     ));
 
@@ -462,6 +485,14 @@ fn main() -> Result<()> {
         let tx = tx.clone();
         config::watch_path(user_jisyo(), move || {
             let _ = tx.send(Event::DictChanged);
+        });
+    }
+
+    // 定型文の書き換えを見張る。編集器で保存した時点で使えるようにする。
+    for path in &snippets {
+        let tx = tx.clone();
+        config::watch_path(path.clone(), move || {
+            let _ = tx.send(Event::SnippetsChanged);
         });
     }
 
@@ -644,6 +675,16 @@ fn main() -> Result<()> {
                     Ok(true) => trace.log(format_args!("--- 利用者辞書を読み直した")),
                     Ok(false) => {}
                     Err(e) => trace.log(format_args!("--- 利用者辞書を読み直せない: {e}")),
+                }
+            }
+            Event::SnippetsChanged => {
+                let (reloaded, failed) = skk.dict_mut().reload_snippets();
+                if reloaded {
+                    trace.log(format_args!("--- 定型文を読み直した"));
+                }
+                // 書きかけで壊れていることは珍しくない。画面を汚さず控えに残す。
+                for (path, e) in &failed {
+                    trace.log(format_args!("--- {} を読めない: {e}", path.display()));
                 }
             }
             Event::Reconfigured(cfg) => {
