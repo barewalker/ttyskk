@@ -8,8 +8,9 @@ mod input;
 mod render;
 mod screen;
 
+use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,9 @@ ttyskk — 端末の中で完結する SKK 日本語入力
     --check-config    設定ファイルを検査して終わる
     --config-example  設定の見本を書き出す (全項目を既定値のまま # で無効にしたもの)
     --import <辞書>   別の SKK 辞書を利用者辞書に取り込む (他の実装からの移行)
+    --edit-snippets [見出し語]
+                      定型文を $EDITOR で編集する。新しい項目の雛形を末尾に足し、
+                      その行を開く。見出し語を渡すとそれを埋めておく
 
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
@@ -147,6 +151,79 @@ fn snippet_paths(cfg: &Config) -> Vec<PathBuf> {
     } else {
         cfg.snippets.clone()
     }
+}
+
+/// 定型文を編集器で開く。新しい項目の雛形を末尾に足し、その行から始める。
+///
+/// **書き足す場所を探すところから始めずに済ませる**ためのもの。一覧が目の前に
+/// あるので、見出し語を先に決めなくてよいし、既にある定型文を見ながら足せる。
+/// 手つかずのまま閉じたら雛形は残さない。
+fn edit_snippets(prefix: &str) -> Result<()> {
+    let cfg = Config::load(&config::config_path())?;
+    let path = snippet_paths(&cfg)
+        .into_iter()
+        .next()
+        .expect("置き場所は必ず一つ以上ある");
+
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let before = fs::read_to_string(&path).unwrap_or_default();
+    let (with_template, line) = ttyskk::snippet::append_template(&before, prefix);
+    fs::write(&path, &with_template).with_context(|| format!("{} に書けない", path.display()))?;
+
+    open_editor(&path, line)?;
+
+    let after = fs::read_to_string(&path)?;
+    if after == with_template {
+        // 何も書かずに閉じた。足した雛形を片付ける。
+        fs::write(&path, &before)?;
+        println!("ttyskk: 変更なし");
+        return Ok(());
+    }
+    match ttyskk::snippet::parse(&after) {
+        Ok(list) => {
+            println!("ttyskk: {} に {} 語", path.display(), list.len());
+            Ok(())
+        }
+        // 直すのは書いた本人なので、消したり戻したりはしない
+        Err(e) => Err(e).with_context(|| format!("{} を読み直せない", path.display())),
+    }
+}
+
+/// 編集器を起動して待つ。行を指定できる編集器には行も渡す。
+fn open_editor(path: &Path, line: usize) -> Result<()> {
+    let spec = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    // `EDITOR="code -w"` のように引数付きで書かれることがある
+    let mut parts = spec.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let args: Vec<&str> = parts.collect();
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(&args);
+    // `+N` は vi 系・emacs・nano・helix・kakoune で通じる。知らないものには渡さない
+    // (引数として解されずファイル名と見なされると、空のファイルを作ってしまう)。
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program);
+    if matches!(
+        name,
+        "vi" | "vim" | "nvim" | "view" | "emacs" | "emacsclient" | "nano" | "hx" | "helix" | "kak"
+    ) {
+        cmd.arg(format!("+{line}"));
+    }
+    cmd.arg(path);
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("編集器を起こせない: {spec}"))?;
+    if !status.success() {
+        bail!("編集器が {status} で終わった");
+    }
+    Ok(())
 }
 
 /// 端末にカーソル位置を尋ねる (DSR 6)。
@@ -299,6 +376,9 @@ fn main() -> Result<()> {
                     user_jisyo().display()
                 );
                 return Ok(());
+            }
+            "--edit-snippets" => {
+                return edit_snippets(iter.next().as_deref().unwrap_or(""));
             }
             "--check-config" => {
                 let path = config::config_path();
