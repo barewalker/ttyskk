@@ -51,10 +51,18 @@ impl Candidate {
     }
 }
 
-/// 辞書一式。利用者辞書を先に引き、次に共有辞書を引く。
+/// 辞書一式。利用者辞書を先に引き、次にスニペット、最後に共有辞書を引く。
 pub struct Dict {
     system: HashMap<String, Vec<Candidate>>,
     user: HashMap<String, Vec<Candidate>>,
+    /// 定型文 (`*.code-snippets`)。**手元の編集器で書くもの**で、学習では動かさない。
+    ///
+    /// 並びはファイルに書いた順がそのまま出る。住所を書き換えたときに古い候補が
+    /// 先頭に残らないよう、確定しても利用者辞書へは写さない ([`Dict::learn`])。
+    snippets: HashMap<String, Vec<Candidate>>,
+    snippet_paths: Vec<PathBuf>,
+    /// スニペットを最後に読んだときの状態。編集器で保存されたら読み直す。
+    snippet_stamps: Vec<Option<(SystemTime, u64)>>,
     user_path: PathBuf,
     import_path: Option<PathBuf>,
     /// この起動で辞書に加えた変更を、起きた順に記録する。
@@ -187,12 +195,71 @@ impl Dict {
         Ok(Dict {
             system,
             user,
+            snippets: HashMap::new(),
+            snippet_paths: Vec::new(),
+            snippet_stamps: Vec::new(),
             user_path,
             import_path,
             changes: Vec::new(),
             user_stamp,
             system_sorted,
         })
+    }
+
+    /// スニペットのファイルを読む。読めた見出し語の数を返す。
+    ///
+    /// 何度呼んでもよい (そのつど読み直す)。**壊れたファイルがあっても他は読む** —
+    /// 手で書くものなので、書きかけの一つで全部が使えなくなると困る。読めなかった
+    /// ファイルは呼んだ側へ返し、知らせるかどうかは任せる。
+    pub fn load_snippets(&mut self, paths: &[PathBuf]) -> (usize, Vec<(PathBuf, anyhow::Error)>) {
+        self.snippet_paths = paths.to_vec();
+        self.snippet_stamps = paths.iter().map(|p| stamp(p)).collect();
+        self.snippets.clear();
+
+        let mut failed = Vec::new();
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
+            let text = match read_jisyo(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    failed.push((path.clone(), e));
+                    continue;
+                }
+            };
+            match crate::snippet::parse(&text) {
+                Ok(list) => {
+                    for s in list {
+                        let entry = self.snippets.entry(s.prefix).or_default();
+                        if !entry.iter().any(|c| c.text == s.body) {
+                            entry.push(Candidate {
+                                text: s.body,
+                                annotation: s.description,
+                            });
+                        }
+                    }
+                }
+                Err(e) => failed.push((path.clone(), e)),
+            }
+        }
+        (self.snippets.len(), failed)
+    }
+
+    /// スニペットが編集器で書き換えられていたら読み直す。読んだら true。
+    pub fn reload_snippets(&mut self) -> (bool, Vec<(PathBuf, anyhow::Error)>) {
+        let now: Vec<_> = self.snippet_paths.iter().map(|p| stamp(p)).collect();
+        if now == self.snippet_stamps {
+            return (false, Vec::new());
+        }
+        let paths = std::mem::take(&mut self.snippet_paths);
+        let (_, failed) = self.load_snippets(&paths);
+        (true, failed)
+    }
+
+    /// スニペットの見出し語の数。
+    pub fn snippet_len(&self) -> usize {
+        self.snippets.len()
     }
 
     /// 共有辞書の見出し語数。
@@ -267,16 +334,21 @@ impl Dict {
         Ok(true)
     }
 
-    /// 見出し語を引く。利用者辞書の順序を優先し、共有辞書の候補を後ろに足す。
+    /// 見出し語を引く。利用者辞書・スニペット・共有辞書の順に重ねる。
+    ///
+    /// スニペットが共有辞書より前に来るのは、手で書いたものだから — 「でんわ」に
+    /// 自分の番号を書いたなら、`SKK-JISYO.L` の「電話」より先に出したい。
     pub fn lookup(&self, key: &str) -> Vec<Candidate> {
         let mut out: Vec<Candidate> = Vec::new();
         if let Some(v) = self.user.get(key) {
             out.extend(v.iter().cloned());
         }
-        if let Some(v) = self.system.get(key) {
-            for c in v {
-                if !out.iter().any(|e| e.text == c.text) {
-                    out.push(c.clone());
+        for src in [&self.snippets, &self.system] {
+            if let Some(v) = src.get(key) {
+                for c in v {
+                    if !out.iter().any(|e| e.text == c.text) {
+                        out.push(c.clone());
+                    }
                 }
             }
         }
@@ -295,14 +367,16 @@ impl Dict {
         let order =
             |a: &String, b: &String| a.chars().count().cmp(&b.chars().count()).then(a.cmp(b));
 
-        // 利用者辞書は数千語なので素直に舐める (学習で増減するため索引を持たない)
+        // 利用者辞書とスニペットは数千語なので素直に舐める (増減するため索引を持たない)
         let mut out: Vec<String> = self
             .user
             .keys()
+            .chain(self.snippets.keys())
             .filter(|k| k.len() > prefix.len() && k.starts_with(prefix) && !is_okuri_ari(k))
             .cloned()
             .collect();
         out.sort_by(&order);
+        out.dedup();
         out.truncate(limit);
 
         let mut rest: Vec<String> = self
@@ -332,7 +406,18 @@ impl Dict {
     }
 
     /// 確定した候補を利用者辞書の先頭に移す (学習)。
+    ///
+    /// **スニペットの候補は覚えない。** あれは編集器で書いて編集器で直すもので、
+    /// 並びもファイルの順がそのまま出る。写してしまうと、住所を書き換えたときに
+    /// 古い住所が利用者辞書に残って先頭に出続ける。
     pub fn learn(&mut self, key: &str, cand: &Candidate) {
+        if self
+            .snippets
+            .get(key)
+            .is_some_and(|v| v.iter().any(|c| c.text == cand.text))
+        {
+            return;
+        }
         move_to_front(self.user.entry(key.to_string()).or_default(), cand);
         self.changes
             .push(Change::Learn(key.to_string(), cand.clone()));
@@ -514,6 +599,9 @@ mod tests {
         let d = Dict {
             system: sys,
             user,
+            snippets: HashMap::new(),
+            snippet_paths: Vec::new(),
+            snippet_stamps: Vec::new(),
             user_path: PathBuf::from("/dev/null"),
             import_path: None,
             changes: Vec::new(),
@@ -678,6 +766,106 @@ mod tests {
         let fresh = Dict::load(&[], path.clone(), None).unwrap();
         assert_eq!(fresh.lookup("にほん")[0].text, "日本");
         assert_eq!(fresh.lookup("とうきょう")[0].text, "東京");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// スニペットは共有辞書より先に出て、確定しても利用者辞書へ写らない。
+    ///
+    /// 写してしまうと、住所を書き換えたときに古い住所が先頭に残り続ける。
+    #[test]
+    fn snippets_come_before_the_shared_dictionary_and_are_never_learned() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-snip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sys = dir.join("sys.dict");
+        std::fs::write(&sys, "でんわ /電話/\n").unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(
+            &snip,
+            r#"{"会社の電話": {"prefix": "でんわ", "body": "03-1111-2222", "description": "会社"}}"#,
+        )
+        .unwrap();
+
+        let mut d = Dict::load(std::slice::from_ref(&sys), dir.join("user.dict"), None).unwrap();
+        let (n, failed) = d.load_snippets(std::slice::from_ref(&snip));
+        assert_eq!((n, failed.len()), (1, 0));
+
+        // スニペットが先、共有辞書は後ろ
+        let got: Vec<String> = d.lookup("でんわ").into_iter().map(|c| c.text).collect();
+        assert_eq!(got, ["03-1111-2222", "電話"]);
+        assert_eq!(d.lookup("でんわ")[0].annotation.as_deref(), Some("会社"));
+
+        // 確定しても利用者辞書へ写らない (保存するものが無い)
+        let cand = d.lookup("でんわ")[0].clone();
+        d.learn("でんわ", &cand);
+        d.save().unwrap();
+        assert!(!dir.join("user.dict").exists(), "書き出すものは無いはず");
+
+        // 共有辞書の候補はこれまでどおり覚える
+        let denwa = Candidate {
+            text: "電話".into(),
+            annotation: None,
+        };
+        d.learn("でんわ", &denwa);
+        d.save().unwrap();
+        let fresh = Dict::load(&[], dir.join("user.dict"), None).unwrap();
+        assert_eq!(fresh.lookup("でんわ")[0].text, "電話");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 編集器で保存されたら読み直す。壊れていても前の内容を捨てない。
+    #[test]
+    fn reloads_snippets_when_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-snipre-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(
+            &snip,
+            r#"{"住所": {"prefix": "じゅうしょ", "body": "港区"}}"#,
+        )
+        .unwrap();
+
+        let mut d = Dict::load(&[], dir.join("user.dict"), None).unwrap();
+        d.load_snippets(std::slice::from_ref(&snip));
+        assert_eq!(d.lookup("じゅうしょ")[0].text, "港区");
+        // 変わっていなければ読み直さない
+        assert!(!d.reload_snippets().0);
+
+        // 引っ越したので書き換える。時刻の粒度に負けないよう長さも変える。
+        std::fs::write(
+            &snip,
+            r#"{"住所": {"prefix": "じゅうしょ", "body": "千代田区一番町"}}"#,
+        )
+        .unwrap();
+        let (reloaded, failed) = d.reload_snippets();
+        assert!(reloaded && failed.is_empty());
+        // 古い住所は残らない
+        let got: Vec<String> = d.lookup("じゅうしょ").into_iter().map(|c| c.text).collect();
+        assert_eq!(got, ["千代田区一番町"]);
+
+        // 補完でも見つかる
+        assert!(d.complete("じゅう", 10).contains(&"じゅうしょ".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 壊れたファイルがあっても、他のファイルは読める。
+    #[test]
+    fn a_broken_file_does_not_stop_the_others() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-snipbad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.code-snippets");
+        let good = dir.join("good.code-snippets");
+        std::fs::write(&bad, r#"{"壊れ": {"prefix": "あ" "body": "亜"}}"#).unwrap();
+        std::fs::write(&good, r#"{"良": {"prefix": "い", "body": "居"}}"#).unwrap();
+
+        let mut d = Dict::load(&[], dir.join("user.dict"), None).unwrap();
+        let (n, failed) = d.load_snippets(&[bad.clone(), good]);
+        assert_eq!(n, 1, "良い方は読める");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, bad);
+        assert_eq!(d.lookup("い")[0].text, "居");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -178,6 +178,16 @@ pub struct Config {
     /// 既定は `Esc` と `C-c` — nvim で実測したところ、この二つは挿入モードを
     /// 抜けるが `C-d` は抜けない (インデントを一段戻す)。
     pub ascii_keys: Vec<Key>,
+    /// スニペット (定型文) を書いたファイル。
+    ///
+    /// 住所や電話番号、メールの署名のような「打つのが面倒で、内容が決まっている」
+    /// 文字列を、変換の候補として引けるようにする。書式は VS Code の
+    /// `*.code-snippets` ([`crate::snippet`])。
+    ///
+    /// **空なら既定の置き場所を一つだけ読む** (`~/.local/share/ttyskk/` の
+    /// `snippets.code-snippets`)。書けば、そこに挙げたものだけを読む。学習と
+    /// 混ぜたくない場合や、他の人と分け合いたい場合に置き場所を移せる。
+    pub snippets: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -216,6 +226,7 @@ impl Default for Config {
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
+            snippets: Vec::new(),
         }
     }
 }
@@ -425,13 +436,58 @@ impl Config {
             }
         }
 
+        if let Some(s) = table.get("snippets") {
+            let s = s
+                .as_table()
+                .ok_or_else(|| anyhow::anyhow!("[snippets] は表でなければならない"))?;
+            for (name, value) in s {
+                match name.as_str() {
+                    "files" => cfg.snippets = parse_paths(name, value)?,
+                    other => bail!("snippets.{other} は知らない項目"),
+                }
+            }
+        }
+
         for (name, value) in &table {
-            if !matches!(name.as_str(), "keys" | "candidates" | "behavior") {
+            if !matches!(
+                name.as_str(),
+                "keys" | "candidates" | "behavior" | "snippets"
+            ) {
                 let _ = value;
                 bail!("[{name}] は知らない節");
             }
         }
         Ok(cfg)
+    }
+}
+
+/// 置き場所の並びを読む。文字列一つでも並びでもよい。
+///
+/// 先頭の `~/` は自分のホームに開く。設定ファイルは手で書くものなので、
+/// `/home/…` を書かせずに済ませたい。
+fn parse_paths(name: &str, value: &toml::Value) -> Result<Vec<PathBuf>> {
+    let list = match value {
+        toml::Value::String(s) => vec![s.as_str()],
+        toml::Value::Array(a) => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .ok_or_else(|| anyhow::anyhow!("snippets.{name} の並びは文字列だけ"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => bail!("snippets.{name} は文字列か文字列の並び"),
+    };
+    Ok(list.into_iter().map(expand_home).collect())
+}
+
+/// 先頭の `~/` をホームに開く。開けなければそのまま返す。
+fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(path),
+        },
+        None => PathBuf::from(path),
     }
 }
 

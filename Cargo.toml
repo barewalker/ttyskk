@@ -35,6 +35,9 @@ tty = ["dep:libc", "dep:nix", "dep:portable-pty", "dep:signal-hook", "dep:vte"]
 [dependencies]
 anyhow = "1.0.104"
 encoding_rs = "0.8.35"
+# スニペット (VS Code 形式の *.code-snippets) を読むため。toml が既に serde と
+# serde_json を引き込んでいるので、直接の依存にしても crate は増えない。
+serde_json = "1.0.151"
 toml = "1.1.3"
 unicode-width = "0.2.2"
 
