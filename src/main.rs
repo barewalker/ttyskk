@@ -898,8 +898,15 @@ fn main() -> Result<()> {
         match ev {
             Event::Child(data) => {
                 let had_overlay = !overlay.is_empty();
-                // 消去は直前の切れ目 (安全な位置) で行う
-                let mut out = overlay.erase(&screen);
+                // 消去は直前の切れ目 (安全な位置) で行う。**前回の出力が文字や
+                // 列の途中で終わっているなら消しにいかない** — 書き戻す列がその
+                // 真ん中に刺さり、端末はそこで文字を壊す。まず子の出力を流して
+                // 切れ目を作り、消すのは次の機会にする。
+                let mut out = if mid_sequence {
+                    Vec::new()
+                } else {
+                    overlay.erase(&screen)
+                };
                 if !out.is_empty() {
                     // 書き戻しはカーソルと表示属性を動かす。子は自分が居た場所に
                     // 書くつもりなので、出力を流す前に必ず戻す。戻さないと子の
@@ -934,8 +941,20 @@ fn main() -> Result<()> {
                     out.extend(overlay.draw(&screen, &preedit));
                     out.extend(Overlay::restore_terminal(&screen));
                     touched = true;
-                } else if had_overlay {
+                } else if had_overlay && !mid_sequence {
+                    // **`mid_sequence` を見落とさないこと。** ここは子の出力を
+                    // 流した直後なので、その出力が文字やエスケープ列の途中で
+                    // 切れていると、カーソルを戻す列がその真ん中に刺さる。
+                    // 端末はそこで文字を壊し、置換文字 (U+FFFD) になる。
                     out.extend(Overlay::restore_terminal(&screen));
+                }
+                if trace.on() && !out.is_empty() {
+                    trace.log(format_args!(
+                        "→端末[子] {} バイト 途中={} {:?}",
+                        out.len(),
+                        mid_sequence,
+                        String::from_utf8_lossy(&out[..out.len().min(50)])
+                    ));
                 }
                 stdout.write_all(&out)?;
                 stdout.flush()?;
@@ -967,15 +986,27 @@ fn main() -> Result<()> {
                     wants_editor = wants_editor.or(r.edit_snippet);
                 }
                 let had_overlay = !overlay.is_empty();
-                // 子の反響が届く前に重ね描きを消しておく
-                let mut out = overlay.erase(&screen);
+                // 子の反響が届く前に重ね描きを消しておく。ただし子の出力が途中で
+                // 切れているあいだは触らない (上と同じ理由)。
+                let mut out = if mid_sequence {
+                    Vec::new()
+                } else {
+                    overlay.erase(&screen)
+                };
                 if !to_child.is_empty() {
                     writer.write_all(&to_child)?;
                     writer.flush()?;
                 }
                 if mode_changed && show_cursor_color {
-                    out.extend_from_slice(cursor_indicator(skk.mode, skk.marker()).as_bytes());
-                    touched = true;
+                    // 子の出力が途中で切れているあいだは塗らない。カーソルの形と色の
+                    // 列がその真ん中に刺さり、端末はそこで文字を壊す。書けるように
+                    // なるまで持ち越す (子の出力を処理する側が塗り直す)。
+                    if mid_sequence {
+                        cursor_dirty = true;
+                    } else {
+                        out.extend_from_slice(cursor_indicator(skk.mode, skk.marker()).as_bytes());
+                        touched = true;
+                    }
                 }
                 let preedit = skk.preedit();
                 if trace.on() {
@@ -996,10 +1027,20 @@ fn main() -> Result<()> {
                     out.extend(overlay.draw(&screen, &preedit));
                     out.extend(Overlay::restore_terminal(&screen));
                     touched = true;
-                } else if had_overlay {
+                } else if had_overlay && !mid_sequence {
+                    // 子の出力が途中で切れているあいだは触らない (上と同じ理由)
                     out.extend(Overlay::restore_terminal(&screen));
                 }
                 if !out.is_empty() {
+                    if trace.on() {
+                        trace.log(format_args!(
+                            "→端末[鍵] {} バイト 途中={} 重ね描きあり={} {:?}",
+                            out.len(),
+                            mid_sequence,
+                            had_overlay,
+                            String::from_utf8_lossy(&out[..out.len().min(50)])
+                        ));
+                    }
                     stdout.write_all(&out)?;
                     stdout.flush()?;
                 }
