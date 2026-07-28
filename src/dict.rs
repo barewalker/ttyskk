@@ -262,6 +262,17 @@ impl Dict {
         self.snippets.len()
     }
 
+    /// その候補が定型文から来たものか。
+    ///
+    /// 埋める場所 (`$1` など) を探すのは定型文だけに限るために要る。TextMate の
+    /// 決まりでは `$100` も埋め場所なので、共有辞書に `$` を含む候補があっても
+    /// 巻き込まないようにする。
+    pub fn is_snippet(&self, key: &str, text: &str) -> bool {
+        self.snippets
+            .get(key)
+            .is_some_and(|v| v.iter().any(|c| c.text == text))
+    }
+
     /// 共有辞書の見出し語数。
     pub fn system_len(&self) -> usize {
         self.system.len()

@@ -778,6 +778,11 @@ fn main() -> Result<()> {
                     // 確定したなら何か覚えた見込みがある。手が止まったら書き出す。
                     unsaved |= !r.commit.is_empty();
                     to_child.extend(r.to_child());
+                    // 定型文の `$0` は、渡したあとにカーソルを戻して合わせる。
+                    // 子アプリの行編集に任せるので左矢印を送る (同じ行のときだけ)。
+                    for _ in 0..r.cursor_back {
+                        to_child.extend_from_slice(b"\x1b[D");
+                    }
                     mode_changed |= r.mode_changed;
                     wants_editor = wants_editor.or(r.edit_snippet);
                 }

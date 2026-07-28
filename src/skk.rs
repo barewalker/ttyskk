@@ -21,6 +21,7 @@ pub const PASTE_END: &[u8] = b"\x1b[201~";
 pub const SHIFT_TAB: &[u8] = b"\x1b[Z";
 use crate::num;
 use crate::romaji::{self, Romaji};
+use crate::snippet;
 
 /// TAB 補完で拾う見出し語の上限。多すぎると巡るのに手間がかかる。
 const COMPLETIONS: usize = 64;
@@ -187,6 +188,12 @@ pub struct Response {
     pub passthrough: Option<Key>,
     /// 入力モードが変わったか (カーソル色の更新に使う)。
     pub mode_changed: bool,
+    /// 確定したあと、カーソルを何文字ぶん左へ戻すか (`$0` の位置)。
+    ///
+    /// 子アプリの行編集に任せる (左矢印を送る) ので、**行をまたぐ戻しはしない**。
+    /// 日本語を打つ場面は必ず行編集の効くところなので同じ行なら通じるが、上の行へ
+    /// 移ると編集器ごとに振る舞いが違う。またぐ場合は末尾に丸める。
+    pub cursor_back: usize,
     /// 定型文の編集を求める。中身は見出し語 (決まっていなければ空)。
     ///
     /// この層は編集器を起こせない (擬似端末も画面も持たない) ので、呼ぶ側へ頼む。
@@ -210,6 +217,12 @@ impl Response {
             out.extend(raw_bytes(k));
         }
         out
+    }
+
+    /// カーソルの戻し幅を添える。
+    fn with_cursor_back(mut self, back: usize) -> Self {
+        self.cursor_back = back;
+        self
     }
 
     /// 子へ出るものが何も無いか。
@@ -249,6 +262,150 @@ impl Registration {
             Some(_) => format!("{}*{}", self.reading, self.okuri_kana),
             None => self.reading.clone(),
         }
+    }
+}
+
+/// 定型文の埋める場所を順に埋めている途中。
+///
+/// 登録の途中 ([`Registration`]) と同じ作りで、**打った文字はここに溜まる**。
+/// 溜めている間も変換は使えるので、日本語をそのまま埋められる。子アプリの
+/// カーソルを動かして回るのではなく、組み上がってから一度に渡す — 途中の姿は
+/// 子に見えないので、shell でも編集器でも同じように動く。
+struct Filling {
+    /// 元の姿 (そのまま出すところと埋めるところ)
+    pieces: Vec<snippet::Piece>,
+    /// 埋める順の番号。`$0` は最後のカーソル位置なので入らない。
+    order: Vec<u32>,
+    /// いま何番目を埋めているか (`order` の添字)
+    at: usize,
+    /// 番号ごとに埋まった値。同じ番号が二つ以上あれば、どちらにも同じ値が入る。
+    values: std::collections::HashMap<u32, String>,
+}
+
+impl Filling {
+    /// 候補の本文から作る。埋める場所が無ければ `None`。
+    fn new(body: &str) -> Option<Self> {
+        let pieces = snippet::split_placeholders(body);
+        let mut order: Vec<u32> = Vec::new();
+        let mut values = std::collections::HashMap::new();
+        for p in &pieces {
+            if let snippet::Piece::Stop {
+                index,
+                default,
+                choices,
+            } = p
+            {
+                // 0 は「埋め終わったあとのカーソル位置」なので、埋める番号に入れない
+                if *index != 0 && !order.contains(index) {
+                    order.push(*index);
+                }
+                let seed = if choices.is_empty() {
+                    default.clone()
+                } else {
+                    choices[0].clone()
+                };
+                values.entry(*index).or_insert(seed);
+            }
+        }
+        if order.is_empty() {
+            return None;
+        }
+        order.sort_unstable();
+        Some(Filling {
+            pieces,
+            order,
+            at: 0,
+            values,
+        })
+    }
+
+    /// いま埋めている番号。
+    fn current(&self) -> u32 {
+        self.order[self.at.min(self.order.len() - 1)]
+    }
+
+    /// いま埋めている場所の選択肢 (無ければ空)。
+    fn choices(&self) -> Vec<String> {
+        let now = self.current();
+        self.pieces
+            .iter()
+            .find_map(|p| match p {
+                snippet::Piece::Stop { index, choices, .. } if *index == now => {
+                    Some(choices.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// いま埋めている値。
+    fn value(&self) -> &str {
+        self.values.get(&self.current()).map_or("", |s| s.as_str())
+    }
+
+    fn value_mut(&mut self) -> &mut String {
+        let now = self.current();
+        self.values.entry(now).or_default()
+    }
+
+    /// 組み上げた文字列と、末尾から数えたカーソルの戻し幅 (`$0` の位置)。
+    ///
+    /// 戻すのは子アプリに左矢印を送ってもらう形なので、**`$0` から先に改行が
+    /// あるなら戻さない**。上の行へ移る動きは編集器ごとに違い、当てにできない。
+    fn build(&self) -> (String, usize) {
+        let mut out = String::new();
+        let mut zero_at = None;
+        for p in &self.pieces {
+            match p {
+                snippet::Piece::Text(t) => out.push_str(t),
+                snippet::Piece::Stop { index: 0, .. } => zero_at = Some(out.chars().count()),
+                snippet::Piece::Stop { index, .. } => {
+                    out.push_str(self.values.get(index).map_or("", |s| s.as_str()))
+                }
+            }
+        }
+        let back = match zero_at {
+            Some(at) => {
+                let tail: String = out.chars().skip(at).collect();
+                if tail.contains('\n') {
+                    0
+                } else {
+                    tail.chars().count()
+                }
+            }
+            None => 0,
+        };
+        (out, back)
+    }
+
+    /// 組み上がりつつある姿。重ね描きは一行なので、改行は印に置き換えて縮める。
+    ///
+    /// 打ちかけのもの (`▽たなか` や `▼田中`) は、いま埋めている場所へ差し込んで
+    /// 見せる。**打っている中身が全体のどこに入るのかが、その場で分かる。**
+    fn preview_with(&self, pending: &str) -> String {
+        let now = self.current();
+        let mut text = String::new();
+        for p in &self.pieces {
+            match p {
+                snippet::Piece::Text(t) => text.push_str(t),
+                snippet::Piece::Stop { index: 0, .. } => {}
+                snippet::Piece::Stop { index, .. } => {
+                    text.push_str(self.values.get(index).map_or("", |s| s.as_str()));
+                    if *index == now {
+                        text.push_str(pending);
+                    }
+                }
+            }
+        }
+        let one_line = text.replace('\n', "⏎");
+        // 長すぎると行からはみ出す。いま埋めているところを真ん中に置いて切る。
+        const MAX: usize = 40;
+        let chars: Vec<char> = one_line.chars().collect();
+        if chars.len() <= MAX {
+            return one_line;
+        }
+        let head: String = chars[..MAX - 1].iter().collect();
+        format!("{head}…")
     }
 }
 
@@ -306,7 +463,11 @@ pub struct Skk {
     /// いることが繋げる条件なので (ddskk は `looking-at` で同じことを確かめる)。
     last_commit: Option<(String, String)>,
     /// いまの日時 ([`Skk::set_now`])。定型文の変数を開くのに使う。
-    now: crate::snippet::Now,
+    now: snippet::Now,
+    /// 定型文の埋める場所を埋めている途中 ([`Filling`])。
+    filling: Option<Filling>,
+    /// 埋め終わったあとに後ろへ付けるもの (送り仮名・自動変換の引き金)。
+    fill_suffix: String,
     /// 自動変換 (auto-start-henkan) の引き金になった文字。
     ///
     /// 「ほんやくを」と打つと `を` の手前までで変換を始め、`を` はそのまま候補の
@@ -338,7 +499,9 @@ impl Skk {
             regs: Vec::new(),
             completion: None,
             last_commit: None,
-            now: crate::snippet::Now::default(),
+            now: snippet::Now::default(),
+            filling: None,
+            fill_suffix: String::new(),
             auto_suffix: String::new(),
         }
     }
@@ -369,7 +532,7 @@ impl Skk {
     /// 載せられるよう libc を持たない作りにしてある。教えなければ変数は開かず、
     /// 書いたままの姿で出る。打鍵のたびに教えてよい (日付の変わり目をまたいでも
     /// 正しく出る)。
-    pub fn set_now(&mut self, now: crate::snippet::Now) {
+    pub fn set_now(&mut self, now: snippet::Now) {
         self.now = now;
     }
 
@@ -433,6 +596,29 @@ impl Skk {
     pub fn preedit(&self) -> Preedit {
         let mut segs = Vec::new();
         let mut floating = Vec::new();
+        // 定型文を埋めている最中。いま何番目かと、組み上がりつつある姿を出す。
+        if let Some(f) = &self.filling {
+            segs.push(Segment {
+                style: Style::ListItem,
+                text: format!("[埋め {}/{}]", f.at + 1, f.order.len()),
+            });
+            segs.push(Segment {
+                style: Style::Candidate,
+                text: f.preview_with(&self.pending_text()),
+            });
+            let choices = f.choices();
+            if choices.len() > 1 {
+                segs.push(Segment {
+                    style: Style::ListItem,
+                    text: format!(" ; {} 択", choices.len()),
+                });
+            }
+            return Preedit {
+                at_cursor: segs,
+                floating,
+                cursor_tint: None,
+            };
+        }
         // 登録中は見出しと打ち込み済みの内容を前に置く。入れ子は括弧の重なりで表す。
         if let Some(reg) = self.regs.last() {
             let depth = self.regs.len();
@@ -639,6 +825,24 @@ impl Skk {
         self.shape(kana)
     }
 
+    /// いま打ちかけのものを一続きの文字にする (定型文を埋めている最中の表示用)。
+    fn pending_text(&self) -> String {
+        match self.phase {
+            Phase::Direct => self.romaji.pending().to_string(),
+            Phase::Composing => format!(
+                "▽{}{}",
+                self.shown_reading(&self.reading),
+                self.romaji.pending()
+            ),
+            Phase::Selecting => format!(
+                "▼{}",
+                self.current_candidate()
+                    .map(|c| self.shown(c))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+
     fn current_candidate(&self) -> Option<&Choice> {
         self.candidates.get(self.cand_index)
     }
@@ -675,7 +879,14 @@ impl Skk {
         let t = num::expand(&c.cand.text, &self.numbers);
         // 定型文に書いた日付や時刻を、いまの値に開く。知らない名前は残るので、
         // `$100` のような普通の候補は素通りする。
-        let t = crate::snippet::expand_variables(&t, &self.now);
+        let t = snippet::expand_variables(&t, &self.now);
+        // 定型文の埋める場所は、既定値を入れた姿で見せる。`${1:宛先}` という
+        // 書き方そのものを見せても、選ぶ手掛かりにならない。
+        let t = if self.dict.is_snippet(&c.key, &c.cand.text) {
+            snippet::preview_placeholders(&t)
+        } else {
+            t
+        };
         if c.key.ends_with('>') {
             t.trim_end_matches('>').to_string()
         } else if c.key.starts_with('>') {
@@ -847,6 +1058,10 @@ impl Skk {
                 edit_snippet: Some(self.word_in_hand()),
                 ..Default::default()
             };
+        }
+        // 定型文の埋める場所を埋めている最中。打った文字はそこへ溜まる。
+        if self.filling.is_some() {
+            return self.handle_filling(key);
         }
         if self.regs.is_empty() {
             // 挿入モードを抜けたときにかなが残らないようにする。vim / nvim で
@@ -1140,6 +1355,7 @@ impl Skk {
                     commit: self.shape(&flushed),
                     passthrough: Some(k),
                     mode_changed: false,
+                    cursor_back: 0,
                     edit_snippet: None,
                 }
             }
@@ -1315,6 +1531,7 @@ impl Skk {
                     commit: text,
                     passthrough: Some(k),
                     mode_changed: false,
+                    cursor_back: 0,
                     edit_snippet: None,
                 }
             }
@@ -1490,6 +1707,7 @@ impl Skk {
                     commit: text + &r.commit,
                     passthrough: r.passthrough,
                     mode_changed: r.mode_changed,
+                    cursor_back: r.cursor_back,
                     edit_snippet: r.edit_snippet,
                 }
             }
@@ -1499,6 +1717,7 @@ impl Skk {
                     commit: text,
                     passthrough: Some(k),
                     mode_changed: false,
+                    cursor_back: 0,
                     edit_snippet: None,
                 }
             }
@@ -1576,11 +1795,26 @@ impl Skk {
                 let shown = num::expand(&cand.text, &self.numbers);
                 // 定型文の日付なども、出す側だけ開く。画面に見えている姿と
                 // 子へ渡す姿を揃える。
-                let shown = crate::snippet::expand_variables(&shown, &self.now);
+                let shown = snippet::expand_variables(&shown, &self.now);
                 // 辞書へ書き戻すのは `#` のままの形。数字を戻した形で覚えると
                 // その数字専用の項目になってしまう。
                 self.dict.learn(&key, &cand);
                 let okuri = self.okuri_head.is_some();
+
+                // 埋める場所があるなら、確定せずに埋める段へ移る。**定型文の候補
+                // だけを見る** — TextMate の決まりでは `$100` も埋め場所なので、
+                // 共有辞書に `$` を含む候補があっても巻き込まない。
+                if self.dict.is_snippet(&key, &cand.text)
+                    && let Some(f) = Filling::new(&shown)
+                {
+                    let suffix = format!("{}{}", self.okuri_kana, self.auto_suffix);
+                    self.note_commit(self.dict_key.clone(), shown, okuri);
+                    self.reset();
+                    self.filling = Some(f);
+                    self.fill_suffix = suffix;
+                    return String::new();
+                }
+
                 self.note_commit(self.dict_key.clone(), shown.clone(), okuri);
                 format!("{}{}{}", shown, self.okuri_kana, self.auto_suffix)
             }
@@ -1588,6 +1822,132 @@ impl Skk {
         };
         self.reset();
         text
+    }
+
+    /// 埋めている最中のキー。
+    ///
+    /// 打った文字はいまの場所へ溜まる (変換も使えるので日本語をそのまま埋められる)。
+    /// `TAB` で次へ、最後まで行くか `Enter` で組み上げて渡す。`C-g` は捨てる。
+    fn handle_filling(&mut self, key: Key) -> Response {
+        // 選ぶ場所では、変換キーで選択肢を回す
+        let choices = self.filling.as_ref().expect("埋め中").choices();
+        if !choices.is_empty()
+            && (self.cfg.convert.contains(&key) || self.cfg.previous.contains(&key))
+        {
+            let f = self.filling.as_mut().expect("埋め中");
+            let at = choices.iter().position(|c| c == f.value()).unwrap_or(0);
+            let next = if self.cfg.previous.contains(&key) {
+                (at + choices.len() - 1) % choices.len()
+            } else {
+                (at + 1) % choices.len()
+            };
+            *f.value_mut() = choices[next].clone();
+            return Response::default();
+        }
+
+        if key == Key::Tab || key == Key::ShiftTab {
+            self.settle_into_the_slot();
+            let f = self.filling.as_mut().expect("埋め中");
+            if key == Key::ShiftTab {
+                f.at = f.at.saturating_sub(1);
+                return Response::default();
+            }
+            if f.at + 1 < f.order.len() {
+                f.at += 1;
+                return Response::default();
+            }
+            return self.finish_filling();
+        }
+        if key == Key::Enter || self.cfg.confirm.contains(&key) {
+            // 変換の途中なら、まずその変換を確定する。ここを分けないと**埋めながら
+            // 日本語を変換できない** — 候補を決めるキーと埋め終わりのキーが同じ
+            // なので、一つめを変換した時点で全体が出てしまう。
+            if self.phase != Phase::Direct || !self.romaji.is_empty() {
+                self.settle_into_the_slot();
+                return Response::default();
+            }
+            return self.finish_filling();
+        }
+        if self.cfg.cancel.contains(&key) && self.romaji.is_empty() {
+            self.filling = None;
+            self.fill_suffix.clear();
+            return Response::default();
+        }
+        if key == Key::Backspace && self.romaji.is_empty() {
+            let f = self.filling.as_mut().expect("埋め中");
+            f.value_mut().pop();
+            return Response::default();
+        }
+
+        // それ以外は普通に打つ。出るはずだった文字をいまの場所へ回す。
+        let r = self.dispatch(key);
+        if !r.commit.is_empty() {
+            let commit = r.commit.clone();
+            self.filling
+                .as_mut()
+                .expect("埋め中")
+                .value_mut()
+                .push_str(&commit);
+        }
+        // 埋めている最中に未知語へ当たっても、辞書登録までは連れて行かない。
+        // 見出し語をそのまま値にして戻す — 定型文を埋めながら新しい語を覚える
+        // 場面は考えにくいし、**登録の段を重ねると戻り道が分かりにくくなる**。
+        if !self.regs.is_empty() {
+            let reg = self.regs.pop().expect("登録中");
+            let reading = reg.reading.clone();
+            self.regs.clear();
+            self.reset();
+            self.filling
+                .as_mut()
+                .expect("埋め中")
+                .value_mut()
+                .push_str(&reading);
+        }
+        Response {
+            commit: String::new(),
+            passthrough: None,
+            mode_changed: r.mode_changed,
+            cursor_back: 0,
+            edit_snippet: None,
+        }
+    }
+
+    /// 打ちかけのものを、いま埋めている場所へ落とす。
+    ///
+    /// ▽ や ▼ のまま次へ移ろうとしたら、まず確定させる。打ちかけのローマ字も閉じる。
+    /// これをしないと、変換中の候補が黙って消える。
+    fn settle_into_the_slot(&mut self) {
+        let mut settled = String::new();
+        if self.phase != Phase::Direct {
+            settled.push_str(&self.dispatch(Key::Enter).commit);
+        }
+        let flushed = self.romaji.flush();
+        if !flushed.is_empty() {
+            settled.push_str(&self.shape(&flushed));
+        }
+        if !settled.is_empty() {
+            self.filling
+                .as_mut()
+                .expect("埋め中")
+                .value_mut()
+                .push_str(&settled);
+        }
+    }
+
+    /// 埋め終わり。組み上げて子へ渡す。
+    fn finish_filling(&mut self) -> Response {
+        let f = self.filling.take().expect("埋め中");
+        let (text, back) = f.build();
+        let suffix = std::mem::take(&mut self.fill_suffix);
+        self.reset();
+        Response {
+            commit: format!("{text}{suffix}"),
+            passthrough: None,
+            mode_changed: false,
+            cursor_back: 0,
+            edit_snippet: None,
+        }
+        .with_cursor_back(back)
     }
 }
 
@@ -2083,6 +2443,159 @@ mod tests {
         // 打ち始めれば消えて、打った文字は登録内容に入る
         typed(&mut skk, "ai");
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 定型文に埋める場所があると、確定せずに順に埋める段へ移る。
+    #[test]
+    fn fills_the_placeholders_in_order() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-fill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(
+            &snip,
+            r#"{"挨拶": {"prefix": "あいさつ", "body": "${1:宛先} 様、$2 です。"}}"#,
+        )
+        .unwrap();
+        let mut skk = skk_with(&[("たなか", "/田中/"), ("たけうち", "/竹内/")]);
+        skk.dict_mut().load_snippets(std::slice::from_ref(&snip));
+
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Aisatu ");
+        // 埋める場所は既定値を入れた姿で見せる (注釈は項目の名前)
+        assert_eq!(preedit_text(&skk), "▼宛先 様、 です。 ; 挨拶");
+
+        // 確定すると、子へは出さずに埋める段へ移る
+        assert_eq!(typed(&mut skk, "\r"), "");
+        assert_eq!(preedit_text(&skk), "[埋め 1/2]宛先 様、 です。");
+
+        // 打った文字はいまの場所へ。既定値は打ち直しで消える
+        skk.handle(Key::Backspace);
+        skk.handle(Key::Backspace);
+        typed(&mut skk, "Tanaka ");
+        // 打ちかけのものは、埋める場所に差し込んで見せる
+        assert_eq!(preedit_text(&skk), "[埋め 1/2]▼田中 様、 です。");
+
+        // TAB で確定して次へ
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "[埋め 2/2]田中 様、 です。");
+        typed(&mut skk, "Takeuti ");
+        // 最後の TAB で組み上げて渡す
+        let r = skk.handle(Key::Tab);
+        assert_eq!(r.commit, "田中 様、竹内 です。");
+        assert_eq!(preedit_text(&skk), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同じ番号は同じ値になり、`$0` はカーソルを戻す幅になる。
+    #[test]
+    fn mirrors_the_same_number_and_reports_the_final_position() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-fill2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(
+            &snip,
+            r#"{"括弧": {"prefix": "かっこ", "body": "「$1」$0 と$1"}}"#,
+        )
+        .unwrap();
+        let mut skk = skk_with(&[("あい", "/愛/")]);
+        skk.dict_mut().load_snippets(std::slice::from_ref(&snip));
+
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kakko ");
+        typed(&mut skk, "\r");
+        typed(&mut skk, "Ai ");
+        // 変換の途中の Enter は、その変換を決めるだけ (埋め終わりにはしない)
+        assert_eq!(skk.handle(Key::Enter).commit, "");
+        let r = skk.handle(Key::Enter);
+        assert_eq!(r.commit, "「愛」 と愛", "同じ番号は同じ値");
+        assert_eq!(r.cursor_back, 3, "$0 から末尾までの 3 文字ぶん戻す");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 選ぶ場所は変換キーで回す。
+    #[test]
+    fn cycles_through_the_choices() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-fill3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(
+            &snip,
+            r#"{"返事": {"prefix": "へんじ", "body": "${1|承知しました,検討します|}。"}}"#,
+        )
+        .unwrap();
+        let mut skk = skk_with(&[]);
+        skk.dict_mut().load_snippets(std::slice::from_ref(&snip));
+
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Henzi ");
+        typed(&mut skk, "\r");
+        assert_eq!(preedit_text(&skk), "[埋め 1/1]承知しました。 ; 2 択");
+        skk.handle(Key::Char(' '));
+        assert_eq!(preedit_text(&skk), "[埋め 1/1]検討します。 ; 2 択");
+        // 一周する
+        skk.handle(Key::Char(' '));
+        assert_eq!(preedit_text(&skk), "[埋め 1/1]承知しました。 ; 2 択");
+        assert_eq!(skk.handle(Key::Enter).commit, "承知しました。");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 共有辞書の候補は、`$` を含んでいても埋める段へ入らない。
+    ///
+    /// TextMate の決まりでは `$100` も埋め場所なので、限らないと巻き込む。
+    #[test]
+    fn only_snippets_enter_the_filling_stage() {
+        let mut skk = skk_with(&[("ねだん", "/$100/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nedan ");
+        assert_eq!(typed(&mut skk, "\r"), "$100", "そのまま確定する");
+        assert_eq!(preedit_text(&skk), "");
+    }
+
+    /// 埋めている最中に未知語へ当たっても、辞書登録までは連れて行かない。
+    ///
+    /// 登録の段を重ねると戻り道が分かりにくくなる。読みをそのまま値にして続ける。
+    #[test]
+    fn an_unknown_word_while_filling_falls_back_to_the_reading() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-fill5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(&snip, r#"{"礼": {"prefix": "れい", "body": "$1 さんへ"}}"#).unwrap();
+        let mut skk = skk_with(&[]);
+        skk.dict_mut().load_snippets(std::slice::from_ref(&snip));
+
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Rei ");
+        typed(&mut skk, "\r");
+        // 辞書に無い語を変換しようとする
+        typed(&mut skk, "Tanaka ");
+        assert_eq!(preedit_text(&skk), "[埋め 1/1]たなか さんへ", "読みが入る");
+        assert_eq!(skk.handle(Key::Enter).commit, "たなか さんへ");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 埋めるのをやめたら、何も出さずに消える。
+    #[test]
+    fn cancelling_the_filling_emits_nothing() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-fill4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snip = dir.join("s.code-snippets");
+        std::fs::write(&snip, r#"{"礼": {"prefix": "れい", "body": "$1 さんへ"}}"#).unwrap();
+        let mut skk = skk_with(&[]);
+        skk.dict_mut().load_snippets(std::slice::from_ref(&snip));
+
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Rei ");
+        typed(&mut skk, "\r");
+        assert!(preedit_text(&skk).starts_with("[埋め"));
+        let r = skk.handle(Key::Ctrl(0x07));
+        assert_eq!(r.commit, "");
+        assert_eq!(preedit_text(&skk), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 定型文に書いた日付は、候補に出る時点でもう開いている。
