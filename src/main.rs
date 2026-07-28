@@ -174,7 +174,7 @@ fn snippet_paths(cfg: &Config) -> Vec<PathBuf> {
 /// **書き足す場所を探すところから始めずに済ませる**ためのもの。一覧が目の前に
 /// あるので、見出し語を先に決めなくてよいし、既にある定型文を見ながら足せる。
 /// 手つかずのまま閉じたら雛形は残さない。
-fn edit_snippets(prefix: &str) -> Result<()> {
+fn edit_snippets(prefix: &str) -> Result<Option<String>> {
     let cfg = Config::load(&config::config_path())?;
     let path = snippet_paths(&cfg)
         .into_iter()
@@ -188,19 +188,22 @@ fn edit_snippets(prefix: &str) -> Result<()> {
     let (with_template, line) = ttyskk::snippet::append_template(&before, prefix);
     fs::write(&path, &with_template).with_context(|| format!("{} に書けない", path.display()))?;
 
-    open_editor(&path, line)?;
+    // 指定された編集器が無くて別のものに落ちたら、その旨が返る
+    let note = open_editor(&path, line)?;
 
     let after = fs::read_to_string(&path)?;
     if after == with_template {
         // 何も書かずに閉じた。足した雛形を片付ける。
         fs::write(&path, &before)?;
-        println!("ttyskk: 変更なし");
-        return Ok(());
+        return Ok(note.or_else(|| Some("変更なし".into())));
     }
     match ttyskk::snippet::parse(&after) {
         Ok(list) => {
-            println!("ttyskk: {} に {} 語", path.display(), list.len());
-            Ok(())
+            let done = format!("{} に {} 語", path.display(), list.len());
+            Ok(Some(match note {
+                Some(n) => format!("{n}。{done}"),
+                None => done,
+            }))
         }
         // 直すのは書いた本人なので、消したり戻したりはしない
         Err(e) => Err(e).with_context(|| format!("{} を読み直せない", path.display())),
@@ -335,6 +338,15 @@ fn run_editor_over_the_screen(
 
     raw.suspend();
     let result = edit_snippets(word);
+    // **しくじったら必ず知らせる。** 画面を返してしまうと何も起きなかったように
+    // 見えて、利用者は原因に辿り着けない (記録を取らない限り分からない)。
+    // 画面はまだこちらのものなので、戻す前に書く。
+    match &result {
+        Ok(None) => {}
+        Ok(Some(note)) => tell_before_returning(stdout, &format!("ttyskk: {note}"), false),
+        Err(e) => tell_before_returning(stdout, &format!("ttyskk: {e:#}"), true),
+    }
+
     raw.resume();
     gate.open();
 
@@ -346,16 +358,79 @@ fn run_editor_over_the_screen(
     let _ = stdout.flush();
 
     match result {
-        Ok(()) => trace.log(format_args!("--- 定型文を編集した ({word})")),
-        Err(e) => trace.log(format_args!("--- 定型文を編集できない: {e}")),
+        Ok(_) => trace.log(format_args!("--- 定型文を編集した ({word})")),
+        Err(e) => trace.log(format_args!("--- 定型文を編集できない: {e:#}")),
+    }
+}
+
+/// 画面を返す前に一言知らせる。`wait` なら打鍵を一つ待つ。
+///
+/// 端末を読む係は止めたままなので、ここでは自分で読む。
+fn tell_before_returning(stdout: &mut impl Write, msg: &str, wait: bool) {
+    let _ = write!(stdout, "\r\n{msg}\r\n");
+    if !wait {
+        let _ = stdout.flush();
+        std::thread::sleep(Duration::from_millis(900));
+        return;
+    }
+    let _ = write!(stdout, "\r\n何かキーを押すと戻ります…");
+    let _ = stdout.flush();
+
+    let mut pfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // 誰も押さないまま置き去りにされることもあるので、待ちきりにはしない
+    if unsafe { libc::poll(&raw mut pfd, 1, 15_000) } > 0 {
+        let mut buf = [0u8; 64];
+        unsafe {
+            libc::read(
+                libc::STDIN_FILENO,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
+        };
     }
 }
 
 /// 編集器を起動して待つ。行を指定できる編集器には行も渡す。
-fn open_editor(path: &Path, line: usize) -> Result<()> {
-    let spec = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".into());
+///
+/// `$VISUAL` → `$EDITOR` → `vi` の順に試し、**見つからないものは飛ばして次へ落とす**。
+/// 端末の中と外で入っているものが違うことがあり (distrobox の中には nvim があるが
+/// ホストには無い、など)、指定が空振りするだけで何も書けなくなるのは困る。
+///
+/// 落としたことは呼んだ側へ返す。黙って別の編集器が開くと驚くので、後で知らせる。
+fn open_editor(path: &Path, line: usize) -> Result<Option<String>> {
+    let mut missing = Vec::new();
+    let candidates = [
+        ("VISUAL", std::env::var("VISUAL").ok()),
+        ("EDITOR", std::env::var("EDITOR").ok()),
+        ("既定", Some("vi".to_string())),
+    ];
+    for (source, spec) in candidates {
+        let Some(spec) = spec.filter(|s| !s.trim().is_empty()) else {
+            continue;
+        };
+        match run_editor(&spec, path, line) {
+            Ok(()) => {
+                return Ok((!missing.is_empty())
+                    .then(|| format!("{} が無いので {spec} で開いた", missing.join(" と "))));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(format!("{source}={spec}"));
+            }
+            Err(e) => bail!("{spec} を起こせない: {e}"),
+        }
+    }
+    bail!(
+        "編集器が見つからない ({})。$EDITOR にこの環境で使えるものを指定する",
+        missing.join(", ")
+    )
+}
+
+/// 編集器を一つ起こして終わりまで待つ。
+fn run_editor(spec: &str, path: &Path, line: usize) -> std::io::Result<()> {
     // `EDITOR="code -w"` のように引数付きで書かれることがある
     let mut parts = spec.split_whitespace();
     let program = parts.next().unwrap_or("vi");
@@ -377,11 +452,9 @@ fn open_editor(path: &Path, line: usize) -> Result<()> {
     }
     cmd.arg(path);
 
-    let status = cmd
-        .status()
-        .with_context(|| format!("編集器を起こせない: {spec}"))?;
+    let status = cmd.status()?;
     if !status.success() {
-        bail!("編集器が {status} で終わった");
+        return Err(std::io::Error::other(format!("{status} で終わった")));
     }
     Ok(())
 }
@@ -538,7 +611,10 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--edit-snippets" => {
-                return edit_snippets(iter.next().as_deref().unwrap_or(""));
+                if let Some(note) = edit_snippets(iter.next().as_deref().unwrap_or(""))? {
+                    println!("ttyskk: {note}");
+                }
+                return Ok(());
             }
             "--check-config" => {
                 let path = config::config_path();
