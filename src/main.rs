@@ -468,8 +468,11 @@ fn run_editor(spec: &str, path: &Path, line: usize) -> std::io::Result<()> {
 }
 
 /// 端末にカーソル位置を尋ねる (DSR 6)。
+/// カーソル位置を尋ねる列。
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
 fn request_cursor_report(out: &mut impl Write) {
-    let _ = out.write_all(b"\x1b[6n");
+    let _ = out.write_all(CURSOR_QUERY);
     let _ = out.flush();
 }
 
@@ -850,6 +853,8 @@ fn main() -> Result<()> {
     let mut mid_sequence = false;
     // 尋ねたカーソル位置の報告を待っているか
     let mut awaiting_report = false;
+    // 列の途中で尋ねられず、持ち越している問い合わせがあるか
+    let mut want_report = false;
     // 一度でもカーソル位置の報告を受け取れたか。
     //
     // 受け取れていないと控えの原点が当てずっぽうになる。その状態で重ね描きすると
@@ -936,6 +941,12 @@ fn main() -> Result<()> {
                 }
                 // 子が描き直したので、待っていた位置報告はもう古い
                 awaiting_report = false;
+                // 大きさが変わったときに送れなかった問い合わせを、切れ目で送る
+                if want_report && !mid_sequence {
+                    want_report = false;
+                    out.extend_from_slice(CURSOR_QUERY);
+                    awaiting_report = true;
+                }
                 let preedit = skk.preedit();
                 if !preedit.is_empty() && !mid_sequence && anchored {
                     out.extend(overlay.draw(&screen, &preedit));
@@ -1079,8 +1090,15 @@ fn main() -> Result<()> {
                 overlay.forget();
                 // 折り返しが組み直されてカーソルの絶対位置が変わる。改めて尋ねる。
                 // 子が描き直し始めたら報告は古くなるので、その場合は捨てる。
-                request_cursor_report(&mut stdout);
-                awaiting_report = true;
+                //
+                // ここも列の途中では書けない。問い合わせは端末へ送るバイト列なので、
+                // 子の文字の真ん中に刺さればそこで壊れる。書けるようになるまで持ち越す。
+                if mid_sequence {
+                    want_report = true;
+                } else {
+                    request_cursor_report(&mut stdout);
+                    awaiting_report = true;
+                }
             }
             Event::DictChanged => {
                 // 自分が保存した直後なら、目印が一致するので読み直しは起きない
