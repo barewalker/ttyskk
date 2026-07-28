@@ -178,6 +178,17 @@ pub struct Config {
     /// 既定は `Esc` と `C-c` — nvim で実測したところ、この二つは挿入モードを
     /// 抜けるが `C-d` は抜けない (インデントを一段戻す)。
     pub ascii_keys: Vec<Key>,
+    /// 定型文を編集器で開くキー。**既定は空 (割り当てなし)**。
+    ///
+    /// 辞書登録の途中なら覚えるキーなしで行けるので (何も打っていないところで
+    /// 変換キー)、こちらは「変換に入る前から書きに行きたい」人のためのもの。
+    /// かなモードでだけ効く — ASCII モードで効かせると子アプリのキーを奪う。
+    ///
+    /// 既定を空にしてあるのは、**単独の英字にも制御キーにも安全な空きが無い**ため。
+    /// ローマ字表で先頭にならない英字は `l` と `q` の二つだけで、どちらも既に
+    /// 使っている。制御キーは端末・シェル・編集器・GUI の入力メソッドのどれかが
+    /// 必ず使っているので、環境ごとに空きが違う。決め打ちせず、要る人が選ぶ。
+    pub snippet_edit: Vec<Key>,
     /// スニペット (定型文) を書いたファイル。
     ///
     /// 住所や電話番号、メールの署名のような「打つのが面倒で、内容が決まっている」
@@ -226,6 +237,7 @@ impl Default for Config {
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
+            snippet_edit: Vec::new(),
             snippets: Vec::new(),
         }
     }
@@ -246,7 +258,7 @@ impl Config {
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    fn key_slots(&self) -> [&Vec<Key>; 20] {
+    fn key_slots(&self) -> [&Vec<Key>; 21] {
         [
             &self.kana,
             &self.confirm,
@@ -268,6 +280,7 @@ impl Config {
             &self.move_home,
             &self.move_end,
             &self.delete_forward,
+            &self.snippet_edit,
         ]
     }
 
@@ -327,6 +340,7 @@ impl Config {
                     "move_home" => &mut cfg.move_home,
                     "move_end" => &mut cfg.move_end,
                     "delete_forward" => &mut cfg.delete_forward,
+                    "snippet_edit" => &mut cfg.snippet_edit,
                     "select" => {
                         cfg.select = parse_select(value)?;
                         continue;
