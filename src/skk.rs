@@ -305,6 +305,8 @@ pub struct Skk {
     /// 直接入力で何か文字を出したら捨てる。接頭辞と次の語が画面上で隣り合って
     /// いることが繋げる条件なので (ddskk は `looking-at` で同じことを確かめる)。
     last_commit: Option<(String, String)>,
+    /// いまの日時 ([`Skk::set_now`])。定型文の変数を開くのに使う。
+    now: crate::snippet::Now,
     /// 自動変換 (auto-start-henkan) の引き金になった文字。
     ///
     /// 「ほんやくを」と打つと `を` の手前までで変換を始め、`を` はそのまま候補の
@@ -336,6 +338,7 @@ impl Skk {
             regs: Vec::new(),
             completion: None,
             last_commit: None,
+            now: crate::snippet::Now::default(),
             auto_suffix: String::new(),
         }
     }
@@ -358,6 +361,16 @@ impl Skk {
         self.romaji.set_kutouten(cfg.kutouten);
         self.romaji.set_azik(cfg.azik);
         self.cfg = cfg;
+    }
+
+    /// いまの日時を教える。定型文の `$CURRENT_YEAR` などを開くのに使う。
+    ///
+    /// **この層は時計を持たない** — 地方時に直すには libc が要り、端末にも GUI にも
+    /// 載せられるよう libc を持たない作りにしてある。教えなければ変数は開かず、
+    /// 書いたままの姿で出る。打鍵のたびに教えてよい (日付の変わり目をまたいでも
+    /// 正しく出る)。
+    pub fn set_now(&mut self, now: crate::snippet::Now) {
+        self.now = now;
     }
 
     /// いまの設定。キーの割り当てを見たい側 (入力の切り出し) に渡す。
@@ -660,6 +673,9 @@ impl Skk {
     /// 付くのは 1 件だけだが、skkeleton も同じ処理を持つ。
     fn shown(&self, c: &Choice) -> String {
         let t = num::expand(&c.cand.text, &self.numbers);
+        // 定型文に書いた日付や時刻を、いまの値に開く。知らない名前は残るので、
+        // `$100` のような普通の候補は素通りする。
+        let t = crate::snippet::expand_variables(&t, &self.now);
         if c.key.ends_with('>') {
             t.trim_end_matches('>').to_string()
         } else if c.key.starts_with('>') {
@@ -1558,6 +1574,9 @@ impl Skk {
             Some(c) => {
                 let (key, cand) = (c.key.clone(), c.cand.clone());
                 let shown = num::expand(&cand.text, &self.numbers);
+                // 定型文の日付なども、出す側だけ開く。画面に見えている姿と
+                // 子へ渡す姿を揃える。
+                let shown = crate::snippet::expand_variables(&shown, &self.now);
                 // 辞書へ書き戻すのは `#` のままの形。数字を戻した形で覚えると
                 // その数字専用の項目になってしまう。
                 self.dict.learn(&key, &cand);
@@ -2064,6 +2083,34 @@ mod tests {
         // 打ち始めれば消えて、打った文字は登録内容に入る
         typed(&mut skk, "ai");
         assert_eq!(preedit_text(&skk), "[登録:かんじ]あい");
+    }
+
+    /// 定型文に書いた日付は、候補に出る時点でもう開いている。
+    ///
+    /// 確定してから気付くのではなく、**選んでいる最中に確かめられる**。
+    #[test]
+    fn the_date_is_already_expanded_in_the_candidate() {
+        let mut skk = skk_with(&[("きょう", "/$CURRENT_YEAR-$CURRENT_MONTH-$CURRENT_DATE/")]);
+        skk.set_now(crate::snippet::Now {
+            year: 2026,
+            month: 7,
+            day: 28,
+            weekday: 2,
+            ..Default::default()
+        });
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kyou ");
+        assert_eq!(preedit_text(&skk), "▼2026-07-28");
+        assert_eq!(typed(&mut skk, "\r"), "2026-07-28");
+    }
+
+    /// 時計を教えられていなければ、書いたままの姿で出る (壊れはしない)。
+    #[test]
+    fn candidates_survive_without_a_clock() {
+        let mut skk = skk_with(&[("ねだん", "/$100/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nedan ");
+        assert_eq!(preedit_text(&skk), "▼$100", "知らない名前は残す");
     }
 
     /// 割り当てれば、変換に入る前からでも定型文を書きに行ける。

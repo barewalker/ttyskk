@@ -200,6 +200,19 @@
 # 同じ本文を複数の見出し語で引ける。body を並びにすると行として繋がるので、
 # SKK の辞書には書けない「改行を含む定型文」も書ける。
 #
+# body には日付や時刻を書いておける (TextMate / VS Code と同じ名前)。$CURRENT_YEAR
+# でも ${CURRENT_YEAR} でもよい。候補に出る時点でもう開いているので、確定してから
+# 気付くのではなく選んでいる最中に確かめられる。
+#
+#     "今日の日付": { "prefix": "きょう", "body": "$CURRENT_YEAR-$CURRENT_MONTH-$CURRENT_DATE" },
+#     "日報の見出し": { "prefix": "にっぽう", "body": "## $CURRENT_MONTH/$CURRENT_DATE ($CURRENT_DAY_NAME_SHORT)" },
+#
+# 使えるのは CURRENT_YEAR / CURRENT_YEAR_SHORT / CURRENT_MONTH / CURRENT_MONTH_NAME /
+# CURRENT_MONTH_NAME_SHORT / CURRENT_DATE / CURRENT_DAY_NAME / CURRENT_DAY_NAME_SHORT /
+# CURRENT_HOUR / CURRENT_MINUTE / CURRENT_SECOND / CURRENT_SECONDS_UNIX。月名と曜日名は
+# 英語 (January、Tue)。知らない名前は書いたまま残るので、$100 のような文字列は素通りする。
+# $ そのものを出したいときは \$ と書く。
+#
 # 覚えた順で並べ替えたりはしない。並びはファイルに書いたとおりに出るし、確定しても
 # 利用者辞書へは写らない (住所を書き換えたときに古い住所が残らないようにするため)。
 # 編集器で保存した時点で読み直すので、ttyskk を起動し直さなくてよい。

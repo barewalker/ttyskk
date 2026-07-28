@@ -207,6 +207,33 @@ fn edit_snippets(prefix: &str) -> Result<()> {
     }
 }
 
+/// いまの地方時。定型文の `$CURRENT_YEAR` などを開くのに渡す。
+///
+/// 地方時への直しは libc に任せる。エンジンの側は端末にも GUI にも載せられるよう
+/// libc を持たないので、時計はこちらから教える。
+fn local_now() -> ttyskk::snippet::Now {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // 環境変数 TZ を見て地方時に直す。失敗しても既定の 0 のまま進む。
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    ttyskk::snippet::Now {
+        year: tm.tm_year + 1900,
+        month: (tm.tm_mon + 1) as u32,
+        day: tm.tm_mday as u32,
+        hour: tm.tm_hour as u32,
+        minute: tm.tm_min as u32,
+        second: tm.tm_sec as u32,
+        weekday: tm.tm_wday as u32,
+        // time_t の幅は環境によって違う。いまの対象では i64 と同じなので
+        // clippy は無駄と言うが、幅の違う環境のために残す。
+        #[allow(clippy::unnecessary_cast)]
+        unix: secs as i64,
+    }
+}
+
 /// 画面を明け渡して編集器を起こし、終わったら元の見た目へ戻す。
 ///
 /// 子プロセスは動いたままなので、**画面をどう返すかが要**になる。子が主画面にいる
@@ -744,6 +771,8 @@ fn main() -> Result<()> {
                 let mut to_child = Vec::new();
                 let mut mode_changed = false;
                 let mut wants_editor = None;
+                // 定型文の日付を打鍵のたびに合わせる。日をまたいでも古い値が出ない。
+                skk.set_now(local_now());
                 for key in decoder.feed(&data) {
                     let r = skk.handle(key);
                     // 確定したなら何か覚えた見込みがある。手が止まったら書き出す。
