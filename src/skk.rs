@@ -3195,7 +3195,12 @@ mod tests {
         assert_eq!(skk.preedit().cursor_tint.unwrap().glyph, Some('#'));
         assert!(Config::parse("[behavior.mode_symbols]\nhiragana = \"あ\"\n").is_err());
         assert!(Config::parse("[behavior.mode_symbols]\nhiragana = \"ab\"\n").is_err());
-        assert!(Config::parse("[behavior.mode_symbols]\nfoo = \"#\"\n").is_err());
+        // 知らない名前は読み飛ばされる (誤りにするのは `--check-config` の仕事)。
+        // 詳しくは config の checking_rejects_what_reading_skips を見ること。
+        assert_eq!(
+            Config::parse("[behavior.mode_symbols]\nfoo = \"#\"\n").unwrap(),
+            Config::default()
+        );
     }
 
     #[test]

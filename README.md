@@ -35,6 +35,22 @@ cargo build --release
 cargo install --path .
 ```
 
+**入れ替わったかは `--version` で確かめる。** 版番号は据え置きなので、組み立てた
+時点のコミットを添えてある (`+` は手を入れたまま組み立てた印)。
+
+```
+$ ttyskk --version
+ttyskk 0.1.0 (b5386994)
+```
+
+cargo は git の写しを溜め込むので、`--git` からの更新が**古い写しのまま入る**ことが
+ある。コミットが変わっていなければ、版を名指しするか写しを捨てる。
+
+```sh
+cargo install --force --git https://github.com/barewalker/ttyskk --rev <コミット>
+rm -rf ~/.cargo/git/db/ttyskk-* ~/.cargo/git/checkouts/ttyskk-*
+```
+
 依存するのは POSIX の擬似端末と VT100 系のエスケープ列を解する端末だけ。
 tmux / screen / SSH / mosh のどれとも組み合わせられるし、なくても動く。
 Linux と macOS で動く。**WSL2 なら動くが、Windows ネイティブでは動かない**
@@ -652,6 +668,18 @@ learn_combined = false          # 接頭辞・接尾辞に続く語を繋げて�
 ```sh
 ttyskk --check-config
 ```
+
+**知らない項目があっても起動は止まらない。** 読み飛ばしたことを知らせて、残りは
+そのまま効かせる。設定は dotfiles で複数の環境に配られる一方、本体の版は環境ごとに
+ずれる (設定だけ先に届く) ので、項目一つで日本語入力そのものが使えなくなるのは
+割に合わない。
+
+```
+ttyskk: 設定 ~/.config/ttyskk/config.toml: behavior.follow_cursor_shape は知らない項目。読み飛ばした
+```
+
+打ち間違いを見つけるのは `--check-config` の仕事なので、**あちらは知らない項目を
+誤りとして扱う**。値の書き方が違うもの (`kana = 3` など) は、どちらでも誤りになる。
 
 `Enter` だけは割り当てを変えられない。変換中は確定として働き、そうでなければ
 そのまま子へ流す。端末では改行が「コマンドの実行」を意味するので、変換の途中で

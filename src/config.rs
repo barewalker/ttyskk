@@ -37,6 +37,33 @@ const NAMED_SEQUENCES: &[(&str, &[&[u8]])] = &[
     ("end", &[b"\x1b[F", b"\x1bOF", b"\x1b[4~", b"\x1b[8~"]),
 ];
 
+/// 知らない項目に出くわしたときの扱い。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnUnknown {
+    /// 読み飛ばし、断りだけ返す。**起動時はこちら。**
+    ///
+    /// 設定は複数の環境で分け合うもので、本体の版が揃っているとは限らない
+    /// (dotfiles だけ先に届く)。知らない項目一つで日本語入力そのものが使えなく
+    /// なるのは割に合わない。
+    Skip,
+    /// 誤りとして扱う。**`--check-config` はこちら。**
+    ///
+    /// 打ち間違いを見つけるのがあの命令の仕事で、そのために呼ぶものだから、
+    /// 黙って読み飛ばしては役に立たない。
+    Reject,
+}
+
+/// 知らない項目を、読み方に従って処理する。
+fn skip_or_reject(on: OnUnknown, notes: &mut Vec<String>, what: &str) -> Result<()> {
+    match on {
+        OnUnknown::Skip => {
+            notes.push(format!("{what}。読み飛ばした"));
+            Ok(())
+        }
+        OnUnknown::Reject => bail!("{what}"),
+    }
+}
+
 /// 名前の付いたエスケープ列を、ありうる形すべての [`Key`] にする。
 fn named_sequence(name: &str) -> Option<Vec<Key>> {
     NAMED_SEQUENCES
@@ -368,18 +395,31 @@ impl Config {
         out
     }
 
-    /// 設定ファイルを読む。無ければ既定を返す。
+    /// 設定ファイルを読む。無ければ既定を返す。知らない項目は読み飛ばす。
     pub fn load(path: &Path) -> Result<Config> {
+        Ok(Config::load_with(path, OnUnknown::Skip)?.0)
+    }
+
+    /// 読み方を選んで設定ファイルを読む。読み飛ばした項目の断りを添えて返す。
+    pub fn load_with(path: &Path, on: OnUnknown) -> Result<(Config, Vec<String>)> {
         match std::fs::read_to_string(path) {
-            Ok(text) => Config::parse(&text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Ok(text) => Config::parse_with(&text, on),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok((Config::default(), Vec::new()))
+            }
             Err(e) => bail!("{} を読めない: {e}", path.display()),
         }
     }
 
+    /// 知らない項目を読み飛ばして設定を読む。
     pub fn parse(text: &str) -> Result<Config> {
+        Ok(Config::parse_with(text, OnUnknown::Skip)?.0)
+    }
+
+    pub fn parse_with(text: &str, on: OnUnknown) -> Result<(Config, Vec<String>)> {
         let table: toml::Table = text.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut cfg = Config::default();
+        let mut notes: Vec<String> = Vec::new();
 
         if let Some(keys) = table.get("keys") {
             let keys = keys
@@ -413,7 +453,10 @@ impl Config {
                         cfg.select = parse_select(value)?;
                         continue;
                     }
-                    other => bail!("keys.{other} は知らない項目"),
+                    other => {
+                        skip_or_reject(on, &mut notes, &format!("keys.{other} は知らない項目"))?;
+                        continue;
+                    }
                 };
                 *slot = parse_keys(name, value)?;
             }
@@ -454,7 +497,14 @@ impl Config {
                                 "katakana" => 1,
                                 "hankaku_katakana" => 2,
                                 "zenkaku" => 3,
-                                other => bail!("mode_symbols.{other} は知らない項目"),
+                                other => {
+                                    skip_or_reject(
+                                        on,
+                                        &mut notes,
+                                        &format!("mode_symbols.{other} は知らない項目"),
+                                    )?;
+                                    continue;
+                                }
                             };
                             cfg.mode_symbols[i] = parse_symbol(name, v)?;
                         }
@@ -491,7 +541,9 @@ impl Config {
                             anyhow::anyhow!("behavior.follow_cursor_shape は真偽値")
                         })?
                     }
-                    other => bail!("behavior.{other} は知らない項目"),
+                    other => {
+                        skip_or_reject(on, &mut notes, &format!("behavior.{other} は知らない項目"))?
+                    }
                 }
             }
         }
@@ -518,7 +570,11 @@ impl Config {
                             _ => bail!("candidates.layout は \"inline\" か \"float\""),
                         }
                     }
-                    other => bail!("candidates.{other} は知らない項目"),
+                    other => skip_or_reject(
+                        on,
+                        &mut notes,
+                        &format!("candidates.{other} は知らない項目"),
+                    )?,
                 }
             }
         }
@@ -530,7 +586,9 @@ impl Config {
             for (name, value) in s {
                 match name.as_str() {
                     "files" => cfg.snippets = parse_paths(name, value)?,
-                    other => bail!("snippets.{other} は知らない項目"),
+                    other => {
+                        skip_or_reject(on, &mut notes, &format!("snippets.{other} は知らない項目"))?
+                    }
                 }
             }
         }
@@ -541,10 +599,10 @@ impl Config {
                 "keys" | "candidates" | "behavior" | "snippets"
             ) {
                 let _ = value;
-                bail!("[{name}] は知らない節");
+                skip_or_reject(on, &mut notes, &format!("[{name}] は知らない節"))?;
             }
         }
-        Ok(cfg)
+        Ok((cfg, notes))
     }
 }
 
@@ -1021,14 +1079,54 @@ mod tests {
 
     #[test]
     fn rejects_what_it_cannot_honour() {
+        // 知っている項目に書けない値が入っているものは、読み方に依らず誤り
         assert!(Config::parse("[keys]\nkana = 3\n").is_err());
-        assert!(Config::parse("[keys]\nkanaa = \"x\"\n").is_err());
-        assert!(Config::parse("[keyz]\n").is_err());
         assert!(Config::parse("[keys]\nselect = [\"ab\"]\n").is_err());
         assert!(Config::parse("[candidates]\ninline = 0\n").is_err());
         assert!(Config::parse("[keys]\ncancel = []\n").is_err());
         assert!(Config::parse("[behavior]\nascii_keys = 3\n").is_err());
-        assert!(Config::parse("[behavior]\nfoo = []\n").is_err());
+        // 書式そのものが壊れているものも
+        assert!(Config::parse("[keys\n").is_err());
+    }
+
+    /// **知らない項目で入力そのものが使えなくなっては困る。**
+    ///
+    /// 設定は複数の環境で分け合うもので、本体の版が揃っているとは限らない。
+    /// 読み飛ばして断りを返し、知っている項目はそのまま効かせる。
+    #[test]
+    fn an_unknown_item_does_not_throw_the_rest_away() {
+        let (cfg, notes) = Config::parse_with(
+            "[keys]\ncancel = \"C-y\"\nkanaa = \"x\"\n[behavior]\nfoo = []\n[keyz]\n",
+            OnUnknown::Skip,
+        )
+        .expect("知らない項目で止まってはいけない");
+        assert_eq!(cfg.cancel, vec![Key::Ctrl(0x19)], "知っている項目は効く");
+        assert_eq!(notes.len(), 3, "読み飛ばした分だけ断る: {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("keys.kanaa")));
+        assert!(notes.iter().any(|n| n.contains("behavior.foo")));
+        assert!(notes.iter().any(|n| n.contains("[keyz]")));
+    }
+
+    /// 検査のときは読み飛ばさない。打ち間違いを見つけるために呼ぶ命令だから。
+    #[test]
+    fn checking_rejects_what_reading_skips() {
+        for text in [
+            "[keys]\nkanaa = \"x\"\n",
+            "[behavior]\nfoo = []\n",
+            "[keyz]\n",
+            "[behavior.mode_symbols]\nhiraganaa = \"~\"\n",
+            "[candidates]\ninlinee = 4\n",
+            "[snippets]\nfilez = []\n",
+        ] {
+            assert!(
+                Config::parse_with(text, OnUnknown::Skip).is_ok(),
+                "読むときは通る: {text:?}"
+            );
+            assert!(
+                Config::parse_with(text, OnUnknown::Reject).is_err(),
+                "検査では誤りにする: {text:?}"
+            );
+        }
     }
 
     /// 同梱の見本が、書いてあるとおりに動くこと。

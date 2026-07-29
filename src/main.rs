@@ -27,9 +27,19 @@ use ttyskk::skk::{Mode, Skk};
 
 use ttyskk::config::EXAMPLE as CONFIG_EXAMPLE;
 
-const USAGE_HEAD: &str = "\
-ttyskk — 端末の中で完結する SKK 日本語入力
+/// 版と、組み立てた時点のコミット。
+///
+/// **版番号は据え置きなので、コミットが入れ替わりの唯一の目印。** `cargo install --git`
+/// は古い写しを掴むことがあるので、入れ直したつもりで前のままという事故が起きる。
+fn version() -> String {
+    format!(
+        "ttyskk {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("TTYSKK_COMMIT")
+    )
+}
 
+const USAGE_HEAD: &str = "\
 使い方:
     ttyskk [オプション] [--] [コマンド [引数...]]
 
@@ -73,7 +83,10 @@ fn usage() -> String {
 }
 
 fn usage_body(cfg: &Config, path: &Path, broken: Option<String>) -> String {
-    let mut out = String::from(USAGE_HEAD);
+    let mut out = format!(
+        "{} — 端末の中で完結する SKK 日本語入力\n\n{USAGE_HEAD}",
+        version()
+    );
 
     out.push_str("\nいま読んでいるもの:\n");
     let mut places: Vec<(&str, PathBuf)> =
@@ -674,7 +687,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "-V" | "--version" => {
-                println!("ttyskk {}", env!("CARGO_PKG_VERSION"));
+                println!("{}", version());
                 return Ok(());
             }
             "--config-example" => {
@@ -705,7 +718,10 @@ fn main() -> Result<()> {
             }
             "--check-config" => {
                 let path = config::config_path();
-                Config::load(&path).with_context(|| format!("{}", path.display()))?;
+                // **ここだけは知らない項目も誤りとして扱う。** 打ち間違いを見つける
+                // ために呼ぶ命令なので、黙って読み飛ばしては役に立たない。
+                Config::load_with(&path, config::OnUnknown::Reject)
+                    .with_context(|| format!("{}", path.display()))?;
                 if path.exists() {
                     println!("ttyskk: {} に問題なし", path.display());
                 } else {
@@ -749,9 +765,17 @@ fn main() -> Result<()> {
         );
     }
     // 設定は子を起こす前に読む。ここで駄目なら画面を触る前に知らせられる。
+    //
+    // **知らない項目では止まらない。** 設定は複数の環境で分け合うもので、本体の版が
+    // 揃っているとは限らない (dotfiles だけ先に届く)。項目一つで日本語入力そのものが
+    // 使えなくなるのは割に合わないので、読み飛ばして知らせるだけにする。
+    // 打ち間違いを見つけたいときは `--check-config` を呼ぶ (あちらは誤りとして扱う)。
     let config_path = config::config_path();
-    let cfg = Config::load(&config_path)
+    let (cfg, notes) = Config::load_with(&config_path, config::OnUnknown::Skip)
         .with_context(|| format!("設定 {} を読めない", config_path.display()))?;
+    for note in &notes {
+        eprintln!("ttyskk: 設定 {}: {note}", config_path.display());
+    }
 
     // 定型文。手で書くものなので、壊れていても起動は続けてここで知らせる
     // (画面を触る前でないと、この知らせが重ね描きに埋もれる)。
