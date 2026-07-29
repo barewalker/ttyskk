@@ -1,12 +1,11 @@
 [package]
 name = "ttyskk-capi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "C ABI for the ttyskk SKK conversion engine, for use from input method frameworks."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/barewalker/ttyskk"
 rust-version = "1.88"
-publish = false
 
 [lib]
 # fcitx5 の addon から静的に取り込む (libttyskk.a)。共有ライブラリも一応出す。
@@ -18,7 +17,11 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 # 端末側の実装は要らないので落とす。
-ttyskk = { path = "..", default-features = false }
+#
+# **crates.io に出すには版の指定が要る。** path だけだと手元でしか解決できないので、
+# 公開した書庫から組み立てられない。手元では path が優先されるので、開発中の動きは
+# 変わらない。
+ttyskk = { path = "..", version = "0.1.1", default-features = false }
 
 [build-dependencies]
 cbindgen = "0.29"
