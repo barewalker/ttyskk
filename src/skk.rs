@@ -1264,6 +1264,15 @@ impl Skk {
                 Key::Char(c) if self.mode == Mode::ZenkakuAscii => {
                     Response::text(&romaji::to_zenkaku(c).to_string())
                 }
+                // 消すキーは素通しの段でも Backspace として渡す。
+                //
+                // ここだけ押されたバイトのまま (`C-h` なら `0x08`) にすると、
+                // **モードによって消せたり消せなかったりする**。消すキーとして
+                // 割り当てているのだから、どの段でも同じ意味で子へ届いてほしい。
+                k if self.cfg.backspace.contains(&k) => Response {
+                    passthrough: Some(Key::Backspace),
+                    ..Default::default()
+                },
                 k => Response {
                     passthrough: Some(k),
                     ..Default::default()
@@ -3539,6 +3548,23 @@ mod tests {
         let r = skk.handle(Key::Ctrl(0x08));
         assert_eq!(r.passthrough, Some(Key::Backspace));
         assert_eq!(r.to_child(), vec![0x7f]);
+    }
+
+    /// ASCII / 全角英数モードでも C-h は Backspace として届く。
+    ///
+    /// あの段はほぼ素通しだが、**モードによって消せたり消せなかったりするのは
+    /// 使う側から見て一貫しない**。
+    #[test]
+    fn ctrl_h_deletes_in_every_mode() {
+        let mut skk = skk_with(&[]);
+        let cfg = Config::default();
+        // 入る段は設定から辿る。段を増やしたときに書き漏らさない。
+        for enter in [&cfg.ascii, &cfg.zenkaku] {
+            skk.handle(cfg.kana[0].clone());
+            skk.handle(enter[0].clone());
+            let r = skk.handle(Key::Ctrl(0x08));
+            assert_eq!(r.to_child(), vec![0x7f], "{:?} の段でも消える", enter[0]);
+        }
     }
 
     /// 割り当てから外せば、C-h は子アプリの持ち物に戻る。
