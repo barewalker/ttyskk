@@ -40,7 +40,12 @@ fn version() -> String {
     )
 }
 
-const USAGE_HEAD: &str = "\
+/// 使い方の前半。
+///
+/// **既定値は書き置きにせず実装から埋める。** 書いた数はいずれ実装から遅れる。
+fn usage_head() -> String {
+    format!(
+        "\
 使い方:
     ttyskk [オプション] [--] [コマンド [引数...]]
 
@@ -60,20 +65,27 @@ const USAGE_HEAD: &str = "\
 命令:
     migemo [--flavour vim|rg] [--limit N] <ローマ字>
                       ローマ字に当たる日本語 (かな・カタカナ・漢字・全角・半角カナ) を
-                      探す正規表現を書き出す。方言の既定は rg、上限の既定は 200
+                      探す正規表現を書き出す。方言の既定は rg、上限の既定は {limit}
+    migemo --build-index
+                      migemo が辞書を読む時間を詰めるための索引を作る
 
-環境変数:
-    TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
-    TTYSKK_USER_JISYO  利用者辞書のパス
-    TTYSKK_CONFIG      設定ファイルのパス
-    TTYSKK_NO_CURSOR   モードに応じたカーソルの形・色の変更をやめる
-    TTYSKK_ACTIVE      ttyskk の中にいる印。あるときは包まずに子をそのまま起こす
-    TTYSKK_DEBUG       不具合を追う記録の書き出し先
-    XDG_CONFIG_HOME    設定の置き場所 (既定 ~/.config)
-    XDG_DATA_HOME      利用者辞書と定型文の置き場所 (既定 ~/.local/share)
-    SHELL              コマンドを省いたときに起こすもの
-    VISUAL / EDITOR    定型文を開く編集器 (どちらも無ければ vi)
-";
+環境変数 (値の無いものは、設定していないのと同じに扱う):
+    TTYSKK_JISYO         共有辞書のパス (`:` 区切り)
+    TTYSKK_USER_JISYO    利用者辞書のパス
+    TTYSKK_CONFIG        設定ファイルのパス
+    TTYSKK_MIGEMO_INDEX  migemo の索引のパス
+    TTYSKK_NO_CURSOR     モードに応じたカーソルの形・色の変更をやめる
+    TTYSKK_ACTIVE        ttyskk の中にいる印。あるときは包まずに子をそのまま起こす
+    TTYSKK_DEBUG         不具合を追う記録の書き出し先
+    XDG_CONFIG_HOME      設定の置き場所 (既定 ~/.config)
+    XDG_DATA_HOME        利用者辞書と定型文の置き場所 (既定 ~/.local/share)
+    XDG_CACHE_HOME       migemo の索引の置き場所 (既定 ~/.cache)
+    SHELL                コマンドを省いたときに起こすもの
+    VISUAL / EDITOR      定型文を開く編集器 (どちらも無ければ vi)
+",
+        limit = migemo::DEFAULT_LIMIT
+    )
+}
 
 /// 使い方の全文。
 ///
@@ -90,8 +102,9 @@ fn usage() -> String {
 
 fn usage_body(cfg: &Config, path: &Path, broken: Option<String>) -> String {
     let mut out = format!(
-        "{} — 端末の中で完結する SKK 日本語入力\n\n{USAGE_HEAD}",
-        version()
+        "{} — 端末の中で完結する SKK 日本語入力\n\n{}",
+        version(),
+        usage_head()
     );
 
     out.push_str("\nいま読んでいるもの:\n");
@@ -222,7 +235,7 @@ fn winsize() -> (u16, u16) {
 }
 
 fn default_system_jisyo() -> Vec<PathBuf> {
-    if let Ok(v) = std::env::var("TTYSKK_JISYO") {
+    if let Some(v) = config::env_os("TTYSKK_JISYO").and_then(|v| v.into_string().ok()) {
         return v
             .split(':')
             .filter(|s| !s.is_empty())
@@ -240,14 +253,14 @@ fn default_system_jisyo() -> Vec<PathBuf> {
 }
 
 fn data_home() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
+    config::env_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| config::env_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn user_jisyo() -> PathBuf {
-    std::env::var_os("TTYSKK_USER_JISYO")
+    config::env_os("TTYSKK_USER_JISYO")
         .map(PathBuf::from)
         .unwrap_or_else(|| data_home().join("ttyskk/user.dict"))
 }
@@ -507,8 +520,14 @@ fn tell_before_returning(stdout: &mut impl Write, msg: &str, wait: bool) {
 fn open_editor(path: &Path, line: usize) -> Result<Option<String>> {
     let mut missing = Vec::new();
     let candidates = [
-        ("VISUAL", std::env::var("VISUAL").ok()),
-        ("EDITOR", std::env::var("EDITOR").ok()),
+        (
+            "VISUAL",
+            config::env_os("VISUAL").and_then(|v| v.into_string().ok()),
+        ),
+        (
+            "EDITOR",
+            config::env_os("EDITOR").and_then(|v| v.into_string().ok()),
+        ),
         ("既定", Some("vi".to_string())),
     ];
     for (source, spec) in candidates {
@@ -661,7 +680,7 @@ struct Trace(Option<std::fs::File>);
 
 impl Trace {
     fn new() -> Self {
-        Trace(std::env::var_os("TTYSKK_DEBUG").and_then(|p| {
+        Trace(config::env_os("TTYSKK_DEBUG").and_then(|p| {
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -823,7 +842,9 @@ fn main() -> Result<()> {
         command.extend(iter);
     }
     if command.is_empty() {
-        command.push(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
+        // 空の SHELL は「決めていない」と読む。そのまま起こすと何も起動できない。
+        let shell = config::env_os("SHELL").and_then(|v| v.into_string().ok());
+        command.push(shell.unwrap_or_else(|| "/bin/sh".into()));
     }
 
     // すでに ttyskk の中にいるなら、包み直さず子をそのまま起こす。
@@ -832,6 +853,7 @@ fn main() -> Result<()> {
     // もう一部抱えるだけになる (常駐が倍)。exec で自分自身を置き換えるので、
     // 余分なプロセスも残らない。承知のうえで入れ子にしたいときは
     // `env -u TTYSKK_ACTIVE ttyskk ...` と唱える。
+    // 有無だけを見る印なので、空でも「中にいる」。
     if std::env::var_os(ACTIVE_ENV).is_some() {
         use std::os::unix::process::CommandExt;
         let err = std::process::Command::new(&command[0])
@@ -844,8 +866,8 @@ fn main() -> Result<()> {
         bail!("標準入力が端末ではない");
     }
 
-    let import = std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".local/share/fcitx5/skk/user.dict"));
+    let import =
+        config::env_os("HOME").map(|h| PathBuf::from(h).join(".local/share/fcitx5/skk/user.dict"));
     let mut dict = Dict::load(&default_system_jisyo(), user_jisyo(), import.as_deref())?;
     if dict.system_len() == 0 {
         eprintln!(

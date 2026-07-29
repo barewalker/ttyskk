@@ -686,8 +686,8 @@ mod tests {
     /// 文字列の中の `//` は注釈ではない。URL を書いても壊れない。
     #[test]
     fn a_slash_inside_a_string_is_not_a_comment() {
-        let s = parse(r#"{"社": {"prefix": "url", "body": "https://rhesca.co.jp/"}}"#).unwrap();
-        assert_eq!(s[0].body, "https://rhesca.co.jp/");
+        let s = parse(r#"{"社": {"prefix": "url", "body": "https://example.com/a//b"}}"#).unwrap();
+        assert_eq!(s[0].body, "https://example.com/a//b");
     }
 
     /// 揃っていない項目は黙って飛ばす。書きかけでも他が使える。

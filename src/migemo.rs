@@ -280,13 +280,14 @@ impl Headwords for Index {
 
 /// 索引の置き場所。
 pub fn index_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("TTYSKK_MIGEMO_INDEX") {
+    if let Some(p) = crate::config::env_os("TTYSKK_MIGEMO_INDEX") {
         return PathBuf::from(p);
     }
-    let cache = std::env::var_os("XDG_CACHE_HOME")
+    let cache = crate::config::env_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
+            let home =
+                crate::config::env_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
             home.join(".cache")
         });
     cache.join("ttyskk/migemo.index")
