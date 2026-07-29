@@ -716,6 +716,7 @@ impl Skk {
                         });
                     }
                 }
+                segs.extend(self.completion_hint());
             }
             Phase::Selecting => {
                 let cur = self
@@ -955,6 +956,38 @@ impl Skk {
         } else {
             self.last_commit = Some((key, text));
         }
+    }
+
+    /// 補完中の見出し語に添えるもの。補完していなければ空。
+    ///
+    /// **見出し語だけでは選べない。** 前方一致で伸ばした「かんじゃ」が患者なのか
+    /// 冠者なのかは、変換するまで分からない。TAB を送るたびに一度 space を押して
+    /// 確かめ、違えば戻る、という往復になっていた。
+    ///
+    /// 出すのは三つ。space を押したら何になるか (第一候補)、その注釈、そして
+    /// **いま何番目か** — 一周したのか、まだ先があるのかが分かる。
+    fn completion_hint(&self) -> Vec<Segment> {
+        let Some(c) = self.completion.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let Some(cand) = self.dict.lookup(&self.reading).into_iter().next() {
+            out.push(Segment {
+                style: Style::ListItem,
+                text: format!(" {}", cand.text),
+            });
+            if let Some(annot) = &cand.annotation {
+                out.push(Segment {
+                    style: Style::ListItem,
+                    text: format!(" ; {annot}"),
+                });
+            }
+        }
+        out.push(Segment {
+            style: Style::ListItem,
+            text: format!(" [{}/{}]", c.index + 1, c.words.len()),
+        });
+        out
     }
 
     fn list_visible(&self) -> bool {
@@ -2802,23 +2835,46 @@ mod tests {
         // 「n」はまだローマ字のまま。補完はこれを「ん」に確定してから探す。
         assert_eq!(preedit_text(&skk), "▽かn");
 
-        // 短い順、同じ長さなら辞書順
+        // 短い順、同じ長さなら辞書順。**何になるか**と何番目かが添う。
         skk.handle(Key::Tab);
-        assert_eq!(preedit_text(&skk), "▽かんじ");
+        assert_eq!(preedit_text(&skk), "▽かんじ 漢字 [1/3]");
         skk.handle(Key::Tab);
-        assert_eq!(preedit_text(&skk), "▽かんじゃ");
+        assert_eq!(preedit_text(&skk), "▽かんじゃ 患者 [2/3]");
         skk.handle(Key::Tab);
-        assert_eq!(preedit_text(&skk), "▽かんきょう");
+        assert_eq!(preedit_text(&skk), "▽かんきょう 環境 [3/3]");
         // 一周する
         skk.handle(Key::Tab);
-        assert_eq!(preedit_text(&skk), "▽かんじ");
+        assert_eq!(preedit_text(&skk), "▽かんじ 漢字 [1/3]");
         // Shift+Tab で戻る
         skk.handle(Key::ShiftTab);
-        assert_eq!(preedit_text(&skk), "▽かんきょう");
+        assert_eq!(preedit_text(&skk), "▽かんきょう 環境 [3/3]");
 
         // 補完したものはそのまま変換できる
         typed(&mut skk, " ");
         assert_eq!(preedit_text(&skk), "▼環境");
+    }
+
+    /// 補完に添えるものは、見出し語だけでは選べないから要る。
+    #[test]
+    fn completion_shows_what_it_becomes() {
+        let mut skk = skk_with(&[
+            ("かんじゃ", "/患者;病人/"),
+            ("かんじゃく", "/閑寂/"),
+            ("かんじ", "/漢字/"),
+        ]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+
+        // 注釈があれば ▼ のときと同じ形で続ける
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじゃ 患者 ; 病人 [1/2]");
+        // 無ければ候補だけ
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじゃく 閑寂 [2/2]");
+
+        // 補完を抜けたら添えない (完全一致の「かんじ」は補完の対象外)
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
     }
 
     #[test]
@@ -2827,7 +2883,7 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         typed(&mut skk, "Kan");
         skk.handle(Key::Tab);
-        assert_eq!(preedit_text(&skk), "▽かんじ");
+        assert_eq!(preedit_text(&skk), "▽かんじ 漢字 [1/1]");
         // 一度目の C-g は補完を取り消すだけ。▽ は残る。
         typed(&mut skk, "\x07");
         assert_eq!(preedit_text(&skk), "▽かん");
@@ -2842,7 +2898,7 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         typed(&mut skk, "Kan");
         skk.handle(Key::Tab);
-        assert_eq!(preedit_text(&skk), "▽かんじ");
+        assert_eq!(preedit_text(&skk), "▽かんじ 漢字 [1/2]");
         // 打ち足すと並びは作り直される
         typed(&mut skk, "ya");
         assert_eq!(preedit_text(&skk), "▽かんじや");

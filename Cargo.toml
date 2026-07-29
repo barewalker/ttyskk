@@ -5,7 +5,7 @@ members = ["capi"]
 
 [package]
 name = "ttyskk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "In-terminal SKK Japanese input method. Wraps a child process in a pty and overlays unconfirmed text, so the child never sees it."
 license = "MIT OR Apache-2.0"
