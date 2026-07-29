@@ -17,8 +17,16 @@ ttyskk vim memo.txt
 
 ## 入れる
 
-GitHub から直に入れられる。**端末で使うぶんにはこれだけでよい** — GUI の入力
-メソッド (`fcitx5/`) と C ABI (`capi/`) は付いてこない。
+[crates.io](https://crates.io/crates/ttyskk) にある。**端末で使うぶんにはこれだけで
+よい** — GUI の入力メソッド (`fcitx5/`) と C ABI (`capi/`) は付いてこない。
+
+```sh
+cargo install ttyskk
+```
+
+**Rust は 1.88 以降**が要る。更新は同じコマンドを `--force` 付きで唱える。
+
+公開した版より先を追いたいときは GitHub から直に入れる。
 
 ```sh
 cargo install --locked --git https://github.com/barewalker/ttyskk
@@ -26,21 +34,15 @@ cargo install --locked --git https://github.com/barewalker/ttyskk
 
 `--locked` を付けると、同梱の `Cargo.lock` がそのまま使われる。付けないと cargo が
 依存をその時点の最新で解決し直すので、依存の側が新しい Rust を要求していると止まる
-ことがある。**Rust は 1.88 以降**が要る。
+ことがある。手元にクローンしてあるなら `cargo install --path .`。
 
-更新は同じコマンドに `--force` を足す。手元にクローンしてあるなら次のとおり。
-
-```sh
-cargo build --release
-cargo install --path .
-```
-
-**入れ替わったかは `--version` で確かめる。** 版番号は据え置きなので、組み立てた
-時点のコミットを添えてある (`+` は手を入れたまま組み立てた印)。
+**入れ替わったかは `--version` で確かめる。** 版番号だけでは分からないことがあるので、
+組み立てた時点のコミットを添えてある (`+` は手を入れたまま組み立てた印)。crates.io
+から入れた場合は、公開した時点のコミットが出る。
 
 ```
 $ ttyskk --version
-ttyskk 0.1.0 (b5386994)
+ttyskk 0.1.0 (9ba17967)
 ```
 
 cargo は git の写しを溜め込むので、`--git` からの更新が**古い写しのまま入る**ことが
@@ -91,6 +93,14 @@ setsid fcitx5 -r -d >/dev/null 2>&1 </dev/null
 
 `fcitx5-configtool` の入力メソッド一覧に **ttyskk** が出るので追加する。仕組みは
 [`docs/fcitx5-addon.md`](docs/fcitx5-addon.md)。
+
+**設定画面 (歯車) は開かない。** 設定を fcitx5 側にも並べると、同じ項目の置き場所が
+二つになる。端末側と同じ `~/.config/ttyskk/config.toml` を読むので、そちらを書き換えて
+読み直させる。
+
+```sh
+fcitx5-remote -r
+```
 
 ### 他の実装から学習を引き継ぐ
 
@@ -998,5 +1008,11 @@ Because the input method sits at the terminal-application layer, keys always flo
 in the order "multiplexer → ttyskk → child". This removes, structurally, the key
 contention you get when an X-level input method (fcitx5 and friends) fights your
 terminal multiplexer over `Ctrl+Z`.
+
+```sh
+cargo install ttyskk
+sudo apt install skkdic     # or: pacman -S skk-jisyo
+ttyskk                      # wraps $SHELL
+```
 
 Documentation is in Japanese, since the users are.
