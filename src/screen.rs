@@ -114,6 +114,12 @@ pub struct Screen {
     /// 子アプリがカーソルの形 (DECSCUSR) や色 (OSC 12/112) を変えたか。
     /// モードの合図を上書きされたことになるので、呼び出し側が塗り直す。
     cursor_style_touched: bool,
+    /// 子アプリが最後に頼んだカーソルの形 (DECSCUSR の引数)。まだ読んでいない分だけ。
+    ///
+    /// vim / nvim は挿入モードで棒、ノーマルモードでブロックにする。**押されたキーを
+    /// 見張るのと違い、抜け方に依らずモードの変わり目が分かる**ので、かなモードを
+    /// 一緒に降ろすのに使える。
+    cursor_shape: Option<u8>,
 }
 
 impl Screen {
@@ -136,12 +142,18 @@ impl Screen {
             cursor_visible: true,
             alt_screen: false,
             cursor_style_touched: false,
+            cursor_shape: None,
         }
     }
 
     /// 子アプリがカーソルの見た目を変えていたら true を返し、印を落とす。
     pub fn take_cursor_style_touched(&mut self) -> bool {
         std::mem::take(&mut self.cursor_style_touched)
+    }
+
+    /// 子アプリが頼んだカーソルの形を一度だけ返す。
+    pub fn take_cursor_shape(&mut self) -> Option<u8> {
+        self.cursor_shape.take()
     }
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
@@ -462,6 +474,15 @@ impl Perform for Screen {
         // カーソルの形を子アプリが奪ったことになるので印を付ける。
         if action == 'q' && intermediates.first() == Some(&b' ') {
             self.cursor_style_touched = true;
+            // 引数を省いた `CSI SP q` は 0 (端末の既定) と同じ扱い
+            self.cursor_shape = Some(
+                params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first())
+                    .copied()
+                    .unwrap_or(0) as u8,
+            );
             return;
         }
         let private = intermediates.first() == Some(&b'?');

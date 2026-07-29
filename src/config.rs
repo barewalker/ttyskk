@@ -188,6 +188,18 @@ pub struct Config {
     /// 既定は `Esc` と `C-c` — nvim で実測したところ、この二つは挿入モードを
     /// 抜けるが `C-d` は抜けない (インデントを一段戻す)。
     pub ascii_keys: Vec<Key>,
+    /// 子アプリのカーソルの形に合わせて ASCII モードへ降ろすか。**既定は無効**。
+    ///
+    /// vim / nvim は挿入モードで棒 (`DECSCUSR` 5/6)、ノーマルモードでブロックに
+    /// 変える。その形が棒でなくなったら「入力を受け付ける段ではなくなった」と見て
+    /// かなモードを降ろす。[`Config::ascii_keys`] が押されたキーを見張るのに対し、
+    /// こちらは**抜け方に依らない** — `jk` のような割り当てやコマンド、プラグイン
+    /// から抜けても付いていく。zsh の vi モードのように形でモードを示すシェルでも
+    /// 同じように働く。
+    ///
+    /// 既定を無効にしてあるのは、カーソルの形を別の意味で使うアプリがあるため。
+    /// 打ちかけがあるときは降ろさないので、変換中に消えることはない。
+    pub follow_cursor_shape: bool,
     /// 定型文を編集器で開くキー。**既定は空 (割り当てなし)**。
     ///
     /// 辞書登録の途中なら覚えるキーなしで行けるので (何も打っていないところで
@@ -250,6 +262,7 @@ impl Default for Config {
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
+            follow_cursor_shape: false,
             snippet_edit: Vec::new(),
             snippets: Vec::new(),
         }
@@ -472,6 +485,11 @@ impl Config {
                         cfg.learn_combined = value
                             .as_bool()
                             .ok_or_else(|| anyhow::anyhow!("behavior.learn_combined は真偽値"))?
+                    }
+                    "follow_cursor_shape" => {
+                        cfg.follow_cursor_shape = value.as_bool().ok_or_else(|| {
+                            anyhow::anyhow!("behavior.follow_cursor_shape は真偽値")
+                        })?
                     }
                     other => bail!("behavior.{other} は知らない項目"),
                 }
