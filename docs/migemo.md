@@ -182,7 +182,7 @@ kensaku の候補に当たるか**を見る。当たるべき文字列の一覧�
 
 ### 2. 実データでの回帰
 
-`~/zettelkasten/` が実際の使い道。ここを対象に、いくつかの入力で
+手元のノート置き場 (`~/notes/` のような) が実際の使い道。ここを対象に、いくつかの入力で
 「kensaku で当たる行」と「ttyskk で当たる行」を突き合わせる。**行数の差ではなく
 差分そのもの**を見る。
 
@@ -270,7 +270,7 @@ kensaku の候補に当たるか**を見る。当たるべき文字列の一覧�
   展開前の形には当たらない。`kaig` を `かい` まで戻さないのと同じ扱い。打ちながら
   絞り込む道具なので、緩めるより絞る側に倒した。
 
-### 実データでの回帰 — `~/zettelkasten` (270 ファイル)
+### 実データでの回帰 — 手元のノート (Markdown 270 ファイル)
 
 kensaku の出力 (参照 JSON) と ttyskk の出力を、それぞれ `rg` に食わせて当たった行を突き合わせた。
 **17 件中 13 件が完全に一致**。差が出たのは 4 件。
@@ -297,5 +297,5 @@ kensaku の出力 (参照 JSON) と ttyskk の出力を、それぞれ `rg` に�
 - kensaku.vim 本体 — `~/.local/share/nvim/lazy/kensaku.vim/`。
   `denops/kensaku/migemo.ts` が jsmigemo を呼んでいるだけの薄い層で、
   正規表現の組み立ては `npm:jsmigemo@^0.4.8` の `TernaryRegexGenerator` にある。
-- fzfkasten 側の変換層 — `~/Projects/fzfkasten.nvim/lua/fzfkasten/kensaku.lua` と
+- fzfkasten 側の変換層 — fzfkasten.nvim の `lua/fzfkasten/kensaku.lua` と
   `tests/kensaku_spec.lua`。呼び出し側が何を期待しているかはここが正確。

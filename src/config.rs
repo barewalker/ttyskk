@@ -632,7 +632,7 @@ fn parse_paths(name: &str, value: &toml::Value) -> Result<Vec<PathBuf>> {
 /// 先頭の `~/` をホームに開く。開けなければそのまま返す。
 fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
+        Some(rest) => match env_os("HOME") {
             Some(home) => PathBuf::from(home).join(rest),
             None => PathBuf::from(path),
         },
@@ -809,14 +809,25 @@ pub fn key_list(keys: &[Key]) -> Option<String> {
     (!out.is_empty()).then(|| out.join(" "))
 }
 
+/// 環境変数を読む。**空の値は設定されていないものとして扱う。**
+///
+/// XDG の決まりでは空の変数は未設定と同じ意味になる。fcitx5 の addon (C++ 側の
+/// `envOr`) も同じ扱いにしてあるので、片方だけ素直に受け取ると、**同じ環境なのに
+/// 端末と GUI で置き場所が食い違う**。値を使う変数はここを通す。
+///
+/// 有無だけを見る印 (`TTYSKK_ACTIVE`、`TTYSKK_NO_CURSOR`) は値を持たないので通さない。
+pub fn env_os(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|v| !v.is_empty())
+}
+
 /// 設定ファイルの場所。
 pub fn config_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("TTYSKK_CONFIG") {
+    if let Some(p) = env_os("TTYSKK_CONFIG") {
         return PathBuf::from(p);
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = env_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| env_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("ttyskk/config.toml")
 }
