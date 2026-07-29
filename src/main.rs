@@ -23,6 +23,7 @@ use render::Overlay;
 use screen::Screen;
 use ttyskk::config::{self, Config, Marker};
 use ttyskk::dict::Dict;
+use ttyskk::migemo;
 use ttyskk::skk::{Mode, Skk};
 
 use ttyskk::config::EXAMPLE as CONFIG_EXAMPLE;
@@ -55,6 +56,11 @@ const USAGE_HEAD: &str = "\
     --edit-snippets [見出し語]
                       定型文を $EDITOR で編集する。新しい項目の雛形を末尾に足し、
                       その行を開く。見出し語を渡すとそれを埋めておく
+
+命令:
+    migemo [--flavour vim|rg] [--limit N] <ローマ字>
+                      ローマ字に当たる日本語 (かな・カタカナ・漢字・全角・半角カナ) を
+                      探す正規表現を書き出す。方言の既定は rg、上限の既定は 200
 
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
@@ -676,6 +682,84 @@ impl Trace {
     }
 }
 
+/// `ttyskk migemo` — ローマ字に当たる日本語を探す正規表現を書き出す。
+///
+/// **端末を要求しない。** 絞り込みの途中でパイプの先から呼ばれるので、擬似端末にも
+/// 画面にも触れずに終わる。
+///
+/// **空の出力を返さない。** 呼ぶ側は空文字を「使えなかった」の印にして、いま掛かって
+/// いる絞り込みを保つ。作れなかった時は理由を標準エラーへ出して終了状態を非0にする。
+fn migemo_main(args: &[String]) -> Result<()> {
+    let mut rx = migemo::RG;
+    let mut limit = migemo::DEFAULT_LIMIT;
+    let mut query: Vec<String> = Vec::new();
+    let mut build_index = false;
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--build-index" => build_index = true,
+            "--flavour" | "--flavor" => {
+                let Some(name) = iter.next() else {
+                    bail!("--flavour には vim か rg が要る");
+                };
+                let Some(f) = migemo::flavour(name) else {
+                    bail!("知らない方言 {name} (vim か rg)");
+                };
+                rx = f;
+            }
+            "--limit" => {
+                let Some(n) = iter.next() else {
+                    bail!("--limit には数が要る");
+                };
+                limit = n
+                    .parse()
+                    .with_context(|| format!("--limit の値が数でない: {n}"))?;
+            }
+            // これ以降は先頭が `-` でも探す語として扱う
+            "--" => query.extend(iter.by_ref().cloned()),
+            _ => query.push(arg.clone()),
+        }
+    }
+
+    let paths = default_system_jisyo();
+
+    // 索引を作る側。共有辞書をここで一度だけ読む。
+    if build_index {
+        if !paths.iter().any(|p| p.exists()) {
+            let places: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+            bail!(
+                "共有辞書が無い ({})。TTYSKK_JISYO で場所を指せる",
+                places.join(", ")
+            );
+        }
+        let dict = Dict::load(&paths, user_jisyo(), None)?;
+        let body = migemo::Index::build(&dict, &paths);
+        let path = migemo::index_path();
+        migemo::Index::save(&path, &body)?;
+        println!(
+            "ttyskk: {} に {} 件の読みで索引を作った",
+            path.display(),
+            body.lines().count() - 1
+        );
+        return Ok(());
+    }
+
+    let query = query.join(" ");
+    if query.trim().is_empty() {
+        bail!("探す語が要る (使い方: ttyskk migemo [--flavour vim|rg] [--limit N] <ローマ字>)");
+    }
+
+    let dict = migemo::source(&paths, user_jisyo())?;
+
+    // 打つ人の綴りで読みを作る。拡張綴りを使っていると、既定の表では当たらない。
+    // 設定が壊れていても正規表現は出す (既定の綴りで作る)。
+    let azik = Config::load(&config::config_path()).is_ok_and(|c| c.azik);
+
+    println!("{}", migemo::build(&query, &rx, dict.as_ref(), limit, azik));
+    Ok(())
+}
+
 fn main() -> Result<()> {
     // 最初の引数だけを見て、それ以降は丸ごと子のコマンド行として扱う
     let mut iter = std::env::args().skip(1);
@@ -709,6 +793,10 @@ fn main() -> Result<()> {
                     user_jisyo().display()
                 );
                 return Ok(());
+            }
+            "migemo" => {
+                let rest: Vec<String> = iter.collect();
+                return migemo_main(&rest);
             }
             "--edit-snippets" => {
                 if let Some(note) = edit_snippets(iter.next().as_deref().unwrap_or(""))? {

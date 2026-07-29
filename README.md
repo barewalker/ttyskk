@@ -735,6 +735,64 @@ follow_cursor_shape = true
 既定は無効。カーソルの形を別の意味で使うアプリもあるためで、`zsh` の vi モードのように
 形でモードを示すシェルの下でも同じように働く。
 
+### ローマ字で日本語を探す (migemo)
+
+`ttyskk migemo` は、ローマ字に当たる日本語を探すための正規表現を書き出す。
+
+```console
+$ ttyskk migemo kaigi
+(?:kaigi|かいぎ|カイギ|会議|回議|怪魚|懐疑|改行|海[技魚]|解義|詼謔|諧謔|買(?:玉|い玉)|開業|ｋａｉｇｉ|ｶｲｷﾞ)
+```
+
+**ローマ字→かな変換ではない。** 読みから見出し語を引くので**漢字にも当たる**。日本語入力に
+切り替えずに絞り込めるので、fzf のプロンプトや `/` 検索から使う。
+
+```
+ttyskk migemo [--flavour vim|rg] [--limit N] <ローマ字>
+```
+
+| | |
+|---|---|
+| `--flavour rg` | ripgrep・Rust の regex 用 (既定) |
+| `--flavour vim` | Vim / Neovim の正規表現用 (`\m\%(…\)`) |
+| `--limit N` | 一語に集める見出し語の上限 (既定 1000) |
+| `--build-index` | 索引を作る (下記) |
+
+**方言は必ず選ぶ。** `\%(` を ripgrep に渡すと何も見つからないまま静かに終わる。
+
+空白は語の区切りで、`ttyskk migemo kaigi roku` は「会議録」のように両方を含むものに当たる。
+打ちかけの綴りも扱う (`kaig` → `かい[がぎぐげごっ]`)。探す語を渡さなかった時と辞書が無い時は、
+**空文字ではなく終了状態 非0** で知らせる。
+
+#### 索引を作る
+
+そのままでは共有辞書を読むのに 200 ms ほどかかる。読みと見出し語だけを取り出した索引を
+作っておくと **26 ms** で済む。
+
+```sh
+ttyskk migemo --build-index
+```
+
+`~/.cache/ttyskk/migemo.index` に置く (`XDG_CACHE_HOME` と `TTYSKK_MIGEMO_INDEX` で変えられる)。
+**辞書を入れ替えたら作り直す** — 元の辞書と合わない索引は使われず、そのつど辞書を読む形に
+戻る (遅いだけで答えは変わらない)。
+
+#### Neovim から呼ぶ
+
+```lua
+local function migemo(input, flavour)
+  local out = vim.system({ 'ttyskk', 'migemo', '--flavour', flavour, '--', input }):wait()
+  -- 空文字は「使えなかった」の印。いま掛かっている絞り込みを保つ
+  return out.code == 0 and vim.trim(out.stdout) or ''
+end
+
+vim.keymap.set('c', '<C-x>m', function()
+  return migemo(vim.fn.getcmdline(), 'vim')
+end, { expr = true })
+```
+
+`/` 検索には `vim` 方言、`rg` を回す絞り込みには `rg` 方言を渡す。
+
 ## 二重に起動したとき
 
 すでに ttyskk の中にいる場合、二つ目は自分を子で置き換えて (`exec`) そのまま退く。
