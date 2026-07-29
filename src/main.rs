@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use unicode_width::UnicodeWidthChar;
 
 use input::Decoder;
 use render::Overlay;
@@ -26,13 +27,14 @@ use ttyskk::skk::{Mode, Skk};
 
 use ttyskk::config::EXAMPLE as CONFIG_EXAMPLE;
 
-const USAGE: &str = "\
+const USAGE_HEAD: &str = "\
 ttyskk — 端末の中で完結する SKK 日本語入力
 
 使い方:
     ttyskk [オプション] [--] [コマンド [引数...]]
 
-コマンドを省くと $SHELL を起動する。
+コマンドを省くと $SHELL を起動する。すでに ttyskk の中にいるときは包み直さず、
+子をそのまま起こす (承知のうえで重ねるなら env -u TTYSKK_ACTIVE ttyskk ...)。
 
 オプション:
     -h, --help        この使い方を表示する
@@ -47,21 +49,87 @@ ttyskk — 端末の中で完結する SKK 日本語入力
 環境変数:
     TTYSKK_JISYO       共有辞書のパス (`:` 区切り)
     TTYSKK_USER_JISYO  利用者辞書のパス
-    TTYSKK_CONFIG      設定ファイルのパス (既定 ~/.config/ttyskk/config.toml)
+    TTYSKK_CONFIG      設定ファイルのパス
     TTYSKK_NO_CURSOR   モードに応じたカーソルの形・色の変更をやめる
     TTYSKK_ACTIVE      ttyskk の中にいる印。あるときは包まずに子をそのまま起こす
     TTYSKK_DEBUG       不具合を追う記録の書き出し先
-
-キー操作 (かなモード):
-    C-j        かなモードへ入る / 入力中のローマ字を確定する
-    l  L  q    ASCII / 全角英数 / カタカナ へ切り替える
-    大文字     変換の開始 (▽)。途中の大文字は送り仮名の始まり
-    space      変換する / 次の候補へ
-    x          前の候補へ
-    C-j        候補を確定する
-    C-g        取り消す
-    /          ASCII 見出し語で変換する
+    XDG_CONFIG_HOME    設定の置き場所 (既定 ~/.config)
+    XDG_DATA_HOME      利用者辞書と定型文の置き場所 (既定 ~/.local/share)
+    SHELL              コマンドを省いたときに起こすもの
+    VISUAL / EDITOR    定型文を開く編集器 (どちらも無ければ vi)
 ";
+
+/// 使い方の全文。
+///
+/// **キー操作と置き場所は書き置きにせず、いまの設定から作る。** 割り当てを変えて
+/// いる人に既定を見せても役に立たないし、書き置きは必ず実装から遅れる。
+fn usage() -> String {
+    let path = config::config_path();
+    match Config::load(&path) {
+        Ok(cfg) => usage_body(&cfg, &path, None),
+        // 壊れていても使い方は出す。既定で見せて、そのことを断る。
+        Err(e) => usage_body(&Config::default(), &path, Some(e.to_string())),
+    }
+}
+
+fn usage_body(cfg: &Config, path: &Path, broken: Option<String>) -> String {
+    let mut out = String::from(USAGE_HEAD);
+
+    out.push_str("\nいま読んでいるもの:\n");
+    let mut places: Vec<(&str, PathBuf)> =
+        vec![("設定", path.to_path_buf()), ("利用者辞書", user_jisyo())];
+    places.extend(default_system_jisyo().into_iter().map(|p| ("共有辞書", p)));
+    places.extend(snippet_paths(cfg).into_iter().map(|p| ("定型文", p)));
+    let width = places.iter().map(|(n, _)| columns(n)).max().unwrap_or(0);
+    for (name, p) in &places {
+        let mark = if p.exists() { "" } else { "  (無い)" };
+        let pad = " ".repeat(width - columns(name));
+        out.push_str(&format!("    {name}{pad}  {}{mark}\n", p.display()));
+    }
+    if let Some(e) = broken {
+        out.push_str(&format!(
+            "\n    ※ 設定を読めないので、以下は既定の割り当て: {e}\n"
+        ));
+    }
+
+    out.push_str("\nキー操作 (いまの割り当て):\n");
+    let bindings = cfg.key_bindings();
+    let shown: Vec<(String, &str)> = bindings
+        .iter()
+        .filter_map(|(_, note, keys)| config::key_list(keys).map(|k| (k, *note)))
+        .collect();
+    let width = shown.iter().map(|(k, _)| columns(k)).max().unwrap_or(0);
+    for (keys, note) in &shown {
+        let pad = " ".repeat(width - columns(keys));
+        out.push_str(&format!("    {keys}{pad}  {note}\n"));
+    }
+    let unset: Vec<&str> = bindings
+        .iter()
+        .filter(|(_, _, keys)| keys.is_empty())
+        .map(|(name, _, _)| *name)
+        .collect();
+    if !unset.is_empty() {
+        out.push_str(&format!("\n    割り当てなし: {}\n", unset.join(" ")));
+    }
+
+    out.push_str(&format!(
+        "\n    大文字で変換を始める (▽)。途中の大文字から送り仮名。\n    \
+         候補一覧から選ぶキーは {}。\n    \
+         Enter は候補の確定だけを行い、改行は送らない。\n",
+        cfg.select.iter().collect::<String>()
+    ));
+
+    out.push_str(&format!(
+        "\n割り当ては {} で変えられる (--config-example が雛形)。\n",
+        path.display()
+    ));
+    out
+}
+
+/// 端末で何桁を占めるか。日本語は一文字で二桁なので、桁揃えは文字数では合わない。
+fn columns(s: &str) -> usize {
+    s.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
 
 enum Event {
     Child(Vec<u8>),
@@ -594,7 +662,7 @@ fn main() -> Result<()> {
     if let Some(first) = iter.next() {
         match first.as_str() {
             "-h" | "--help" => {
-                print!("{USAGE}");
+                print!("{}", usage());
                 return Ok(());
             }
             "-V" | "--version" => {
@@ -1177,6 +1245,48 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 使い方はいまの割り当てを見せる。書き置きではないので、設定を変えれば変わる。
+    #[test]
+    fn the_help_shows_the_configured_keys() {
+        let cfg = Config::parse("[keys]\ncancel = \"C-y\"\n").unwrap();
+        let text = usage_body(&cfg, Path::new("/tmp/config.toml"), None);
+        assert!(text.contains("C-y"), "割り当てたキーが出ていない");
+        assert!(
+            !text.contains("C-g"),
+            "既定のキーが残っている (書き置きになっている)"
+        );
+        assert!(text.contains("/tmp/config.toml"), "設定の場所が出ていない");
+    }
+
+    /// **説明を書き漏らすと、そのキーだけ使い方から消える。**
+    ///
+    /// [`Config::key_bindings`] に足したものが全部出ていることを見張る。
+    #[test]
+    fn the_help_lists_every_binding() {
+        let cfg = Config::default();
+        let text = usage_body(&cfg, Path::new("/tmp/config.toml"), None);
+        for (name, note, keys) in cfg.key_bindings() {
+            if keys.is_empty() {
+                // 割り当ての無いものは、名前だけまとめて断る
+                assert!(text.contains(name), "keys.{name} が使い方に出ていない");
+            } else {
+                assert!(text.contains(note), "keys.{name} の説明が出ていない");
+            }
+        }
+    }
+
+    /// 設定が壊れていても使い方は出す。黙って既定を見せない。
+    #[test]
+    fn the_help_survives_a_broken_config() {
+        let text = usage_body(
+            &Config::default(),
+            Path::new("/tmp/config.toml"),
+            Some("2 行目が壊れている".into()),
+        );
+        assert!(text.contains("2 行目が壊れている"));
+        assert!(text.contains("既定の割り当て"), "既定だと断っていない");
+    }
 
     /// 門を閉じている間、読む係は端末に手を出さない。
     ///
