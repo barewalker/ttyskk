@@ -94,9 +94,21 @@ setsid fcitx5 -r -d >/dev/null 2>&1 </dev/null
 `fcitx5-configtool` の入力メソッド一覧に **ttyskk** が出るので追加する。仕組みは
 [`docs/fcitx5-addon.md`](docs/fcitx5-addon.md)。
 
-**設定画面 (歯車) は開かない。** 設定を fcitx5 側にも並べると、同じ項目の置き場所が
-二つになる。端末側と同じ `~/.config/ttyskk/config.toml` を読むので、そちらを書き換えて
-読み直させる。
+**設定画面 (歯車) には設定項目を置かない。** 設定を fcitx5 側にも並べると、同じ項目の
+置き場所が二つになる。歯車を開くと、書き換える先を案内する画面が出る。
+
+```
+設定は端末の ttyskk と同じ /home/…/.config/ttyskk/config.toml に書く
+(書き換えて OK を押すと読み直す)                              [ 設定 ]
+
+書き方は README にある。全項目の雛形は ttyskk --config-example
+で書き出せる                                                  [ 設定 ]
+```
+
+上の釦を押すと `xdg-open` でその設定ファイルが開く。まだ無ければ、案内だけ書いた
+ものを先に置くので、押しても何も起きないということがない。
+
+端末で書き換えたものを読み直させたいときは、画面を開かずに次でもよい。
 
 ```sh
 fcitx5-remote -r

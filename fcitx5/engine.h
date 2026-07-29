@@ -8,6 +8,8 @@
 #ifndef FCITX5_TTYSKK_ENGINE_H
 #define FCITX5_TTYSKK_ENGINE_H
 
+#include <fcitx-config/configuration.h>
+#include <fcitx-config/rawconfig.h>
 #include <fcitx-utils/event.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
@@ -15,6 +17,8 @@
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/instance.h>
+
+#include <memory>
 
 extern "C" {
 #include "ttyskk.h"
@@ -36,6 +40,12 @@ public:
     std::string subMode(const InputMethodEntry &entry,
                         InputContext &ic) override;
 
+    /* fcitx5 の設定画面 (歯車) に出すもの。**設定項目は置かず、案内だけ**を返す。
+     * 中身の型は ttyskk.cpp に閉じている。 */
+    const Configuration *getConfig() const override;
+    /* 画面の OK。fcitx5 側に持つ値は無いので、設定ファイルを読み直す口に使う。 */
+    void setConfig(const RawConfig &config) override;
+
 private:
     /* 直前の打鍵の結果を画面へ反映する。 */
     void updateUI(InputContext *ic);
@@ -49,6 +59,9 @@ private:
     Instance *instance_;
     /* Rust 側の変換エンジン。作れなければ nullptr で、その場合は何も横取りしない。 */
     ::TtyskkEngine *engine_ = nullptr;
+    /* 設定画面に出す案内。**エンジンを作れなくても出す** — 設定ファイルの置き場所を
+     * 知りたい人にとって、動いていないときこそ要る。 */
+    std::unique_ptr<Configuration> config_;
     /* 書き出しの予約。打鍵のたびに書くとディスクを叩きすぎるので少し待つ。 */
     std::unique_ptr<EventSourceTime> saveTimer_;
 };
