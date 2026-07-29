@@ -1283,15 +1283,6 @@ impl Skk {
                 Key::Char(c) if self.mode == Mode::ZenkakuAscii => {
                     Response::text(&romaji::to_zenkaku(c).to_string())
                 }
-                // 消すキーは素通しの段でも Backspace として渡す。
-                //
-                // ここだけ押されたバイトのまま (`C-h` なら `0x08`) にすると、
-                // **モードによって消せたり消せなかったりする**。消すキーとして
-                // 割り当てているのだから、どの段でも同じ意味で子へ届いてほしい。
-                k if self.cfg.backspace.contains(&k) => Response {
-                    passthrough: Some(Key::Backspace),
-                    ..Default::default()
-                },
                 k => Response {
                     passthrough: Some(k),
                     ..Default::default()
@@ -1314,11 +1305,15 @@ impl Skk {
                 if self.romaji.backspace() {
                     Response::default()
                 } else {
-                    // 消すものが無ければ子へ回す。**押されたキーそのものではなく
-                    // Backspace として渡す** — C-h を消すキーとして割り当てている
-                    // のだから、子アプリにもその意味で届いてほしい。
+                    // 消すものが無ければ**押されたキーのまま**子へ回す。
+                    //
+                    // Backspace に揃えてはいけない。`C-h` を `0x7f` にすり替えると、
+                    // `C-h` に別の働きを割り当てているアプリでそれが効かなくなる
+                    // (nvim の窓の移動がそう)。文字を打つ段では、どのみちアプリ側が
+                    // `C-h` を手前の一文字消しに割り当てているので、そのまま渡せば
+                    // 消える — **消す意味は押した先が決めればよい。**
                     Response {
-                        passthrough: Some(Key::Backspace),
+                        passthrough: Some(k),
                         ..Default::default()
                     }
                 }
@@ -3562,33 +3557,28 @@ mod tests {
         assert_eq!(preedit_text(&skk), "▼漢字");
     }
 
-    /// 消すものが無ければ子へ回す。**押された C-h ではなく Backspace として渡す。**
+    /// **消すものが無ければ、押されたキーのまま子へ渡す。**
     ///
-    /// 消すキーとして割り当てているのだから、子アプリにもその意味で届いてほしい。
+    /// `0x7f` にすり替えてはいけない。`C-h` に別の働きを割り当てているアプリで
+    /// それが効かなくなる (nvim の窓の移動が実際にそうだった)。文字を打つ段では
+    /// アプリ側が `C-h` を手前の一文字消しに割り当てているので、そのまま渡せば消える。
     #[test]
-    fn ctrl_h_reaches_the_child_as_a_backspace() {
-        let mut skk = skk_with(&[]);
-        skk.handle(Key::Ctrl(0x0a));
-        let r = skk.handle(Key::Ctrl(0x08));
-        assert_eq!(r.passthrough, Some(Key::Backspace));
-        assert_eq!(r.to_child(), vec![0x7f]);
-    }
-
-    /// ASCII / 全角英数モードでも C-h は Backspace として届く。
-    ///
-    /// あの段はほぼ素通しだが、**モードによって消せたり消せなかったりするのは
-    /// 使う側から見て一貫しない**。
-    #[test]
-    fn ctrl_h_deletes_in_every_mode() {
+    fn ctrl_h_reaches_the_child_as_itself() {
         let mut skk = skk_with(&[]);
         let cfg = Config::default();
-        // 入る段は設定から辿る。段を増やしたときに書き漏らさない。
-        for enter in [&cfg.ascii, &cfg.zenkaku] {
+        // かなモードと、素通しの段 (ASCII / 全角英数) のどれでも同じ
+        for enter in [None, Some(&cfg.ascii), Some(&cfg.zenkaku)] {
             skk.handle(cfg.kana[0].clone());
-            skk.handle(enter[0].clone());
+            if let Some(e) = enter {
+                skk.handle(e[0].clone());
+            }
             let r = skk.handle(Key::Ctrl(0x08));
-            assert_eq!(r.to_child(), vec![0x7f], "{:?} の段でも消える", enter[0]);
+            assert_eq!(r.passthrough, Some(Key::Ctrl(0x08)));
+            assert_eq!(r.to_child(), vec![0x08], "{enter:?} の段");
         }
+        // Backspace 鍵はこれまでどおり 0x7f のまま
+        skk.handle(cfg.kana[0].clone());
+        assert_eq!(skk.handle(Key::Backspace).to_child(), vec![0x7f]);
     }
 
     /// 割り当てから外せば、C-h は子アプリの持ち物に戻る。
