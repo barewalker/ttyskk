@@ -131,6 +131,14 @@ fn columns(s: &str) -> usize {
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
+/// DECSCUSR の引数が「棒」を指しているか (5 = 点滅、6 = 点灯)。
+///
+/// vim / nvim はこの形で挿入モードを表す。ブロック (0〜2) と下線 (3〜4) は
+/// ノーマル・置換にあたるので、そちらへ変わったら文字を打つ段ではなくなっている。
+fn cursor_is_a_bar(shape: u8) -> bool {
+    matches!(shape, 5 | 6)
+}
+
 enum Event {
     Child(Vec<u8>),
     ChildEof,
@@ -1006,6 +1014,17 @@ fn main() -> Result<()> {
                 out.extend_from_slice(&data);
                 // 出力が列の途中で切れているあいだは割り込まない
                 mid_sequence = tracker.feed(&data);
+                // 子がカーソルの形で「入力を受け付ける段ではなくなった」と示したら、
+                // かなモードを降ろす。**押されたキーを見張るのと違い、抜け方に
+                // 依らない** — nvim を `jk` の割り当てやコマンドで抜けても付いていく。
+                if skk.config().follow_cursor_shape
+                    && let Some(shape) = screen.take_cursor_shape()
+                    && !cursor_is_a_bar(shape)
+                    && skk.leave_to_ascii()
+                {
+                    trace.log(format_args!("--- カーソルの形 {shape} で ASCII へ降ろす"));
+                    cursor_dirty = true;
+                }
                 if trace.on() {
                     trace.log(format_args!(
                         "子 {:3} バイト → 控え ({},{}) 途中={} {:?}",

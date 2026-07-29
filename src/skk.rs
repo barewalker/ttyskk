@@ -541,6 +541,19 @@ impl Skk {
         &self.cfg
     }
 
+    /// 打鍵によらず ASCII モードへ降ろす。動かしたときだけ true。
+    ///
+    /// 子アプリが「入力を受け付ける段ではなくなった」と示したときに使う。vim や
+    /// nvim が挿入モードを抜けたときが典型で、**抜け方 (Esc・割り当て・コマンド) に
+    /// 依らず**降ろせるのが [`Config::ascii_keys`] との違い。
+    pub fn leave_to_ascii(&mut self) -> bool {
+        if self.mode == Mode::Ascii || !self.is_idle() {
+            return false;
+        }
+        self.mode = Mode::Ascii;
+        true
+    }
+
     /// 入力中の内容を確定して返す。
     ///
     /// **解釈しないキーが来たとき**に、その手前までを確定させるために使う。端末では
@@ -588,8 +601,14 @@ impl Skk {
     }
 
     /// 入力中のものが何も無いか。
+    ///
+    /// 打鍵以外の合図でモードを動かしてよいかの判断にも使う ([`Skk::leave_to_ascii`])。
+    /// 変換や辞書登録、定型文を埋めている途中で降ろすと、打ち込んだものが行き場を失う。
     pub fn is_idle(&self) -> bool {
-        self.regs.is_empty() && self.phase == Phase::Direct && self.romaji.is_empty()
+        self.regs.is_empty()
+            && self.phase == Phase::Direct
+            && self.romaji.is_empty()
+            && self.filling.is_none()
     }
 
     /// 入力途中の表示。空なら重ね描きするものは無い。
