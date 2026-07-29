@@ -46,3 +46,8 @@ nix = { version = "0.31.3", features = ["term", "signal"], optional = true }
 portable-pty = { version = "0.9.0", optional = true }
 signal-hook = { version = "0.4.4", optional = true }
 vte = { version = "0.15.0", optional = true }
+
+# 試験だけで使う。migemo が作った正規表現を実際に当ててみるため (ripgrep と同じ
+# regex crate なので、あちらでの当たり方をそのまま確かめられる)。
+[dev-dependencies]
+regex = "1.11"

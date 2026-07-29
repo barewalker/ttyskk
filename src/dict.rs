@@ -274,6 +274,20 @@ impl Dict {
     }
 
     /// 共有辞書の見出し語数。
+    /// 共有辞書の見出し語と候補を見て回る (並びは決まっていない)。
+    ///
+    /// **送りありの見出し語は含まない。** 読みが途中で切れていて前方一致に使えないので、
+    /// 索引に入れても引けない。ただし**英字だけの見出し** (`a /エー/`、`note /ノート/`)
+    /// は送りありに見えるだけの別物なので残す — 打った字面で引く道がここにある。
+    ///
+    /// migemo の索引を作るために使う。
+    pub fn system_entries(&self) -> impl Iterator<Item = (&str, &[Candidate])> {
+        self.system
+            .iter()
+            .filter(|(k, _)| !is_okuri_ari(k) || k.is_ascii())
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
     pub fn system_len(&self) -> usize {
         self.system.len()
     }

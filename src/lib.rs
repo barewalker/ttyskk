@@ -29,6 +29,7 @@
 
 pub mod config;
 pub mod dict;
+pub mod migemo;
 pub mod num;
 pub mod romaji;
 pub mod skk;
