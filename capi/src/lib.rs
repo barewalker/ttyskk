@@ -80,6 +80,24 @@ fn style_code(s: Style) -> Option<i32> {
     }
 }
 
+/// 修飾キーそのものの押し下げか。
+///
+/// fcitx5 は Shift や Ctrl を押した時点でも打鍵として渡してくる。端末ではバイトが
+/// 流れないので起こらない話で、GUI 側だけの事情。**これを「解釈しないキー」として
+/// 扱ってはいけない** — 手前を確定してしまい、▽おく の続きに送り仮名を打とうとして
+/// Shift を押し下げた瞬間に「おく」が出てしまう。押しただけでは何も起こさない。
+fn is_modifier(keysym: u32) -> bool {
+    matches!(
+        keysym,
+        // ISO_Lock … ISO_Level5_Lock (第3・第5水準の Shift/Latch/Lock)
+        0xfe01..=0xfe13
+        // Mode_switch (ISO_Group_Shift) と Num_Lock
+        | 0xff7e | 0xff7f
+        // Shift / Control / Caps_Lock / Meta / Alt / Super / Hyper
+        | 0xffe1..=0xffee
+    )
+}
+
 /// X11 の keysym と修飾キーを [`Key`] に畳む。
 ///
 /// 畳めないもの (矢印・機能キー) は `None` を返し、呼ぶ側の入力メソッドへ委ねる。
@@ -297,6 +315,12 @@ pub unsafe extern "C" fn ttyskk_key(p: *mut TtyskkEngine, keysym: u32, modifiers
         return false;
     };
     guard(false, || {
+        // 修飾キーそのものは、押し下げた時点では何も起こさない。手前の確定もしない。
+        // (直前の確定を持ち越さないよう、返す文字列だけは空に戻しておく)
+        if is_modifier(keysym) {
+            e.refresh("");
+            return false;
+        }
         let Some(key) = to_key(keysym, modifiers) else {
             // 解釈しないキー (矢印・機能キー)。手前までを確定してから呼ぶ側へ委ねる。
             let commit = e.skk.flush();

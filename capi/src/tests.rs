@@ -8,6 +8,14 @@ const BACKSPACE: u32 = 0xff08;
 const ESCAPE: u32 = 0xff1b;
 const ISO_LEFT_TAB: u32 = 0xfe20;
 const LEFT: u32 = 0xff51;
+/// 修飾キーそのもの。fcitx5 は押し下げた時点でこれを渡してくる。
+const SHIFT_L: u32 = 0xffe1;
+const SHIFT_R: u32 = 0xffe2;
+const CONTROL_L: u32 = 0xffe3;
+const CAPS_LOCK: u32 = 0xffe5;
+const ALT_L: u32 = 0xffe9;
+const SUPER_L: u32 = 0xffeb;
+const SHIFT: u32 = 1 << 0;
 const CTRL: u32 = 1 << 2;
 
 /// 試験用の辞書を置いて、エンジンを一つ作る。
@@ -187,6 +195,62 @@ fn preedit_has_no_mode_marker() {
             "GUI へ渡す装飾だけが残る"
         );
     }
+    unsafe { ttyskk_free(p) };
+}
+
+/// 送り仮名を打とうとして Shift を押しただけで確定してしまわないこと。
+///
+/// fcitx5 は Shift を押した時点でも打鍵として渡してくる。端末ではバイトが流れないので
+/// 起こらない話で、GUI 側だけの事情。ここで手前を確定してしまうと、▽おく の続きに
+/// Shift+K を打とうとした瞬間に「おく」が出てしまい、送り仮名を始められない。
+#[test]
+fn pressing_shift_before_the_okurigana_does_not_commit() {
+    let p = engine(&[("おくr", "/送/")]);
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+    typed(p, "Oku");
+    assert_eq!(preedit(p), "▽おく");
+
+    // 送り仮名のために Shift を押し下げた時点
+    let handled = unsafe { ttyskk_key(p, SHIFT_L, 0) };
+    assert!(!handled, "修飾キーそのものは呼ぶ側へ委ねる");
+    assert_eq!(commit(p), "", "押しただけでは確定しない");
+    assert_eq!(preedit(p), "▽おく", "見出し語は残る");
+
+    // Shift+R が届いて、はじめて送り仮名に入る
+    unsafe { ttyskk_key(p, 'R' as u32, SHIFT) };
+    assert_eq!(preedit(p), "▽おく*r");
+
+    // 送り仮名を打ち切れば、そのまま変換に入る
+    typed(p, "u");
+    assert_eq!(preedit(p), "▼送る");
+
+    unsafe { ttyskk_free(p) };
+}
+
+/// 修飾キーそのものの押下は、どの段でも入力中の内容を壊さない。
+#[test]
+fn modifier_presses_leave_the_composition_alone() {
+    let p = engine(&[("かんじ", "/漢字/")]);
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+
+    // ▼ (候補を選んでいる途中) でも同じ
+    typed(p, "Kanji ");
+    assert_eq!(preedit(p), "▼漢字");
+    for sym in [SHIFT_L, SHIFT_R, CONTROL_L, ALT_L, SUPER_L, CAPS_LOCK] {
+        assert!(!unsafe { ttyskk_key(p, sym, 0) });
+        assert_eq!(commit(p), "", "確定しない");
+        assert_eq!(preedit(p), "▼漢字", "候補も選び直されない");
+    }
+
+    // 打ちかけのローマ字も残る
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+    assert_eq!(commit(p), "漢字");
+    typed(p, "k");
+    assert_eq!(preedit(p), "k");
+    unsafe { ttyskk_key(p, SHIFT_L, 0) };
+    assert_eq!(commit(p), "");
+    assert_eq!(preedit(p), "k", "打ちかけの子音は流れない");
+
     unsafe { ttyskk_free(p) };
 }
 
