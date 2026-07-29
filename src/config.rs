@@ -263,38 +263,78 @@ impl Config {
     }
 
     /// SKK 自身の操作に割り当てられているキーを節ごとに並べて返す。
+    fn key_slots(&self) -> [&Vec<Key>; 22] {
+        self.key_bindings().map(|(_, _, keys)| keys)
+    }
+
+    /// 設定の項目名・説明・いま割り当てられているキー。
     ///
-    /// **キーの項目を足したらここにも足す。** 拡張鍵盤プロトコルの復号
-    /// (`input::Decoder`) がこの並びを唯一の頼りにしているので、書き漏らすと
-    /// そのキーだけ Claude Code のようなアプリの下で効かなくなる。
+    /// **キーの項目を足したらここにだけ足す。** 拡張鍵盤プロトコルの復号
+    /// ([`Config::bound_keys`]) も `--help` の一覧もここから作るので、書き漏らすと
+    /// そのキーだけ Claude Code のようなアプリの下で効かず、説明にも出ない。
+    ///
+    /// 設定ファイルの読み込み口と食い違っていないことは
+    /// [`tests::every_binding_can_be_set_from_the_config_file`] が見張る。
     ///
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    fn key_slots(&self) -> [&Vec<Key>; 22] {
+    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 22] {
         [
-            &self.kana,
-            &self.confirm,
-            &self.cancel,
-            &self.ascii,
-            &self.zenkaku,
-            &self.katakana,
-            &self.hankaku_katakana,
-            &self.start_conversion,
-            &self.abbrev,
-            &self.convert,
-            &self.previous,
-            &self.complete,
-            &self.complete_previous,
-            &self.purge,
-            &self.affix,
-            &self.move_left,
-            &self.move_right,
-            &self.move_home,
-            &self.move_end,
-            &self.delete_forward,
-            &self.backspace,
-            &self.snippet_edit,
+            ("kana", "かなモードへ入る", &self.kana),
+            (
+                "confirm",
+                "ローマ字・見出し語・候補を確定する",
+                &self.confirm,
+            ),
+            ("cancel", "取り消す (▼ なら ▽ へ戻る)", &self.cancel),
+            ("ascii", "ASCII モードへ", &self.ascii),
+            ("zenkaku", "全角英数モードへ", &self.zenkaku),
+            ("katakana", "ひらがな ⇄ カタカナ", &self.katakana),
+            (
+                "hankaku_katakana",
+                "ひらがな ⇄ 半角カタカナ",
+                &self.hankaku_katakana,
+            ),
+            (
+                "start_conversion",
+                "空の見出し語で変換を始める (複合語向け)",
+                &self.start_conversion,
+            ),
+            ("abbrev", "ASCII の見出し語で変換する", &self.abbrev),
+            ("convert", "変換する / 次の候補へ", &self.convert),
+            ("previous", "前の候補へ", &self.previous),
+            (
+                "complete",
+                "見出し語を前方一致で補完する / 次の補完候補へ",
+                &self.complete,
+            ),
+            (
+                "complete_previous",
+                "前の補完候補へ",
+                &self.complete_previous,
+            ),
+            ("purge", "▼ の候補を利用者辞書から取り除く", &self.purge),
+            ("affix", "接頭辞・接尾辞変換を始める", &self.affix),
+            ("move_left", "▽ の中でカーソルを一文字左へ", &self.move_left),
+            (
+                "move_right",
+                "▽ の中でカーソルを一文字右へ",
+                &self.move_right,
+            ),
+            ("move_home", "▽ の見出し語の先頭へ", &self.move_home),
+            ("move_end", "▽ の見出し語の末尾へ", &self.move_end),
+            (
+                "delete_forward",
+                "▽ のカーソル位置の一文字を消す",
+                &self.delete_forward,
+            ),
+            (
+                "backspace",
+                "手前の一文字を消す (▼ なら前の候補へ)",
+                &self.backspace,
+            ),
+            ("snippet_edit", "定型文を編集器で開く", &self.snippet_edit),
         ]
     }
 
@@ -649,6 +689,46 @@ fn parse_key(spec: &str) -> Result<Vec<Key>> {
     }
 }
 
+/// 設定ファイルに書くときの標準的な名前。書き方の別名 (`ctrl-j` など) は挙げない。
+const CANONICAL_NAMES: &[&str] = &["space", "enter", "tab", "esc", "bs", "s-tab"];
+
+/// [`Key`] を設定ファイルに書ける形の文字列にする ([`parse_key`] の逆)。
+///
+/// **対応表は持たない。** 名前を [`parse_key`] に通して当たりを探すので、書き方を
+/// 増やしてもここと食い違わない。往復できることは
+/// [`tests::key_names_survive_a_round_trip`] が見張る。
+pub fn key_name(k: &Key) -> String {
+    let named = CANONICAL_NAMES
+        .iter()
+        .copied()
+        .chain(NAMED_SEQUENCES.iter().map(|(n, _)| *n));
+    for name in named {
+        if parse_key(name).is_ok_and(|ks| ks.contains(k)) {
+            return name.to_string();
+        }
+    }
+    match k {
+        Key::Ctrl(0x00) => "C-space".to_string(),
+        // C-a = 0x01 … C-z = 0x1a
+        Key::Ctrl(b @ 0x01..=0x1a) => format!("C-{}", (b + 0x60) as char),
+        Key::Char(c) => c.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// 割り当てを「`C-b` `left`」のように並べる。空なら `None`。
+pub fn key_list(keys: &[Key]) -> Option<String> {
+    // 矢印は端末によって送られる形が違うだけで、利用者から見れば一つのキー
+    let mut out: Vec<String> = Vec::new();
+    for k in keys {
+        let name = key_name(k);
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    (!out.is_empty()).then(|| out.join(" "))
+}
+
 /// 設定ファイルの場所。
 pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("TTYSKK_CONFIG") {
@@ -738,51 +818,70 @@ mod tests {
         assert!(!c.contains(&Key::Ctrl(0x03)), "C-c");
     }
 
-    /// キーの項目を足して `key_slots` に足し忘れると、そのキーだけ拡張鍵盤
-    /// プロトコルを使うアプリの下で効かなくなる。全項目を Ctrl に割り当てて見張る。
+    /// キーの項目を足したときの見張り。項目名の並びは持たず、
+    /// [`Config::key_bindings`] から辿る。
+    ///
+    /// 見張るのは三つ。**設定ファイルから設定できること**、**その項目だけが変わる
+    /// こと** (読み込み口が別の欄を指していないか)、**拡張鍵盤プロトコルの復号対象に
+    /// 入ること** (漏れるとそのキーだけ Claude Code のようなアプリの下で効かない)。
     #[test]
-    fn bound_keys_covers_every_binding() {
-        let names = [
-            "kana",
-            "confirm",
-            "cancel",
-            "ascii",
-            "zenkaku",
-            "katakana",
-            "hankaku_katakana",
-            "start_conversion",
-            "abbrev",
-            "convert",
-            "previous",
-            "complete",
-            "complete_previous",
-            "purge",
-            "affix",
-            "move_left",
-            "move_right",
-            "move_home",
-            "move_end",
-            "delete_forward",
-        ];
-        let letters = "abcdefghijklmnoqrstu";
-        assert_eq!(names.len(), letters.len());
-        let mut text = String::from("[keys]\n");
-        for (name, c) in names.iter().zip(letters.chars()) {
-            text.push_str(&format!("{name} = \"C-{c}\"\n"));
-        }
-        text.push_str("\n[behavior]\nascii_keys = [\"C-p\"]\n");
+    fn every_binding_can_be_set_from_the_config_file() {
+        // 既定のどこにも使われていないキーを使う
+        let spare = Key::Ctrl(0x19); // C-y
+        assert!(!Config::default().bound_keys().contains(&spare));
 
-        let got = Config::parse(&text).unwrap().bound_keys();
-        for c in letters.chars() {
+        for (name, _, _) in Config::default().key_bindings() {
+            let cfg = Config::parse(&format!("[keys]\n{name} = \"C-y\"\n"))
+                .unwrap_or_else(|e| panic!("keys.{name} を設定できない: {e}"));
+            let landed: Vec<&str> = cfg
+                .key_bindings()
+                .into_iter()
+                .filter(|(_, _, keys)| keys.contains(&spare))
+                .map(|(n, _, _)| n)
+                .collect();
+            assert_eq!(landed, vec![name], "keys.{name} の行き先が違う");
             assert!(
-                got.contains(&Key::Ctrl(c as u8 & 0x1f)),
-                "C-{c} が漏れている"
+                cfg.bound_keys().contains(&spare),
+                "keys.{name} が復号の対象から漏れている"
             );
         }
-        assert!(
-            !got.contains(&Key::Ctrl(0x10)),
-            "ascii_keys の C-p は対象外"
-        );
+
+        // ascii_keys は子アプリのキーへの便乗なので、形を変えずに渡す
+        let cfg = Config::parse("[behavior]\nascii_keys = [\"C-y\"]\n").unwrap();
+        assert!(!cfg.bound_keys().contains(&spare), "ascii_keys は対象外");
+    }
+
+    /// 説明はどの項目にも付いている。`--help` の一覧がここから作られる。
+    #[test]
+    fn every_binding_has_a_description() {
+        for (name, note, _) in Config::default().key_bindings() {
+            assert!(!note.is_empty(), "keys.{name} に説明がない");
+        }
+    }
+
+    /// 割り当てを文字列に戻して読み直しても同じキーになる。
+    #[test]
+    fn key_names_survive_a_round_trip() {
+        for (name, _, keys) in Config::default().key_bindings() {
+            for k in keys {
+                let text = key_name(k);
+                let back = parse_key(&text)
+                    .unwrap_or_else(|e| panic!("keys.{name} の {text} を読み直せない: {e}"));
+                assert!(back.contains(k), "keys.{name}: {k:?} → {text} → {back:?}");
+            }
+        }
+        assert_eq!(key_name(&Key::Backspace), "bs");
+        assert_eq!(key_name(&Key::Ctrl(0x08)), "C-h");
+        assert_eq!(key_name(&Key::Char(' ')), "space");
+        assert_eq!(key_name(&Key::Char('q')), "q");
+    }
+
+    /// 並べるときは端末ごとの形の違いを畳む。矢印は一つのキーとして見せる。
+    #[test]
+    fn key_list_folds_the_terminal_variants() {
+        let c = Config::default();
+        assert_eq!(key_list(&c.move_left).as_deref(), Some("C-b left"));
+        assert_eq!(key_list(&c.snippet_edit), None, "割り当てが無ければ空");
     }
 
     #[test]
