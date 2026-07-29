@@ -5,6 +5,7 @@
 #include <fcitx/inputpanel.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -53,9 +54,79 @@ std::string readConfig() {
     return ss.str();
 }
 
+/* 書き方を調べる先。設定画面の釦から開く。 */
+constexpr char REPOSITORY[] = "https://github.com/barewalker/ttyskk";
+
+/* `QProcess::splitCommand` に一語として渡るよう包む。空白を含むパスのため。 */
+std::string quoted(const std::string &s) {
+    std::string out = "\"";
+    for (const char c : s) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+        }
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+
+/* 設定画面の釦が起こすもの。
+ *
+ * **fcitx5-configtool は `fcitx://` で始まらない値をコマンド行として実行する**
+ * (fcitx5-configtool の `launchExternalConfig`)。専用の GUI を書かなくても、
+ * 利用者がふだん使っている編集器を開ける。 */
+std::string openCommand(const std::string &target) {
+    return "xdg-open " + quoted(target);
+}
+
+/* 設定ファイルが無ければ、案内だけ書いたものを置く。
+ *
+ * 中身が全部注釈なので動きは変わらない。**開く相手が無いと釦を押しても何も
+ * 起きない**ので、画面を出す前に必ず在ることにしておく。 */
+void ensureConfigFile() {
+    namespace fs = std::filesystem;
+    const fs::path path(configPath());
+    std::error_code ec;
+    if (fs::exists(path, ec)) {
+        return;
+    }
+    fs::create_directories(path.parent_path(), ec);
+    std::ofstream out(path);
+    if (!out) {
+        return;
+    }
+    out << "# ttyskk の設定。**端末の ttyskk と共通**で、fcitx5 側には別に持たない。\n"
+           "#\n"
+           "# 設定できる項目を全部並べた雛形は `ttyskk --config-example` で書き出せる。\n"
+           "# 書き方: "
+        << REPOSITORY << "\n";
+}
+
 } // namespace
 
-TtyskkEngine::TtyskkEngine(Instance *instance) : instance_(instance) {
+/* 設定画面 (歯車) に出すもの。
+ *
+ * **設定項目そのものは置かない。** 端末側と同じ `config.toml` を読むので、fcitx5 に
+ * も並べると同じ項目の置き場所が二つになる。ここにあるのは「どこを書き換えるか」の
+ * 案内と、その場所を開く釦だけ。
+ *
+ * **行が二つあるのには理由がある。** fcitx5-configtool は `External` が一つだけの
+ * 設定を「画面ではなく、押した瞬間に起こすもの」と見なして画面を出さない
+ * (`extractOnlyExternalCommand`)。案内を読ませたいので二つ置く。 */
+FCITX_CONFIGURATION(
+    TtyskkConfig,
+    ExternalOption configFile{
+        this, "ConfigFile",
+        "設定は端末の ttyskk と同じ " + configPath() +
+            " に書く (書き換えて OK を押すと読み直す)",
+        openCommand(configPath())};
+    ExternalOption document{
+        this, "Document",
+        "書き方は README にある。全項目の雛形は ttyskk --config-example で書き出せる",
+        openCommand(REPOSITORY)};);
+
+TtyskkEngine::TtyskkEngine(Instance *instance)
+    : instance_(instance), config_(std::make_unique<TtyskkConfig>()) {
     const std::string cfg = readConfig();
     engine_ = ttyskk_new(systemJisyo().c_str(), userJisyo().c_str(),
                          cfg.empty() ? nullptr : cfg.c_str());
@@ -104,6 +175,18 @@ void TtyskkEngine::reloadConfig() {
     }
     const std::string cfg = readConfig();
     ttyskk_set_config(engine_, cfg.empty() ? nullptr : cfg.c_str());
+}
+
+const Configuration *TtyskkEngine::getConfig() const {
+    /* 開く相手を用意してから見せる。押しても何も起きない釦を出さないため。 */
+    ensureConfigFile();
+    return config_.get();
+}
+
+void TtyskkEngine::setConfig(const RawConfig &) {
+    /* **fcitx5 側に持つ値は無い。** 画面から編集器を開いて書き換えたあと、そのまま
+     * OK で反映されるように、ここを設定ファイルを読み直す口として使う。 */
+    reloadConfig();
 }
 
 void TtyskkEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
