@@ -4,7 +4,7 @@
 //! 途中経過は [`Skk::preedit`] が返す区間列、候補は [`Skk::candidates`] に回す。
 //! 解釈しなかったキーは [`Response::passthrough`] としてそのまま返す。
 
-use crate::config::{Config, Layout, Marker};
+use crate::config::{Config, Layout, Marker, OkuriMatch};
 use crate::dict::{Candidate, Dict};
 
 /// 括弧付き貼り付け (bracketed paste) の囲み。
@@ -1271,6 +1271,12 @@ impl Skk {
             annotation: None,
         };
         self.dict.learn(&reg.key, &cand);
+        // 登録した語も送り仮名ごとの宛先へ入れる。次に同じ送り仮名で打ったとき、
+        // いま登録したものが先に出る。
+        if reg.okuri_head.is_some() {
+            self.dict
+                .learn_okuri(&reg.key, &reg.okuri_kana, &cand.text);
+        }
         let text = format!("{}{}{}", reg.buffer, reg.okuri_kana, reg.auto_suffix);
         self.capture(Response::text(&text))
     }
@@ -1694,6 +1700,7 @@ impl Skk {
                 }
             }
         }
+        self.sort_by_okuri();
         if self.candidates.is_empty() {
             // 候補が無ければ辞書登録へ移る
             self.begin_registration();
@@ -1701,6 +1708,44 @@ impl Skk {
         }
         self.cand_index = 0;
         self.phase = Phase::Selecting;
+    }
+
+    /// 送り仮名ごとの宛先で候補を並べ替える。
+    ///
+    /// **送りありの見出し語は、送り仮名が違っても同じ。** 「大きい」は `OoKii`、
+    /// 「多く」は `OoKu` で、どちらも `おおk` を引く。見出し語だけで学習すると
+    /// 片方がもう片方を引きずるので、確定のたびに送り仮名ごとの宛先も覚えてある。
+    /// ここでそれを効かせる。
+    ///
+    /// **一致するものが無ければ何もしない。** 宛先が貯まっていない見出し語では
+    /// 並びが変わらないので、この機能を入れて悪くなることがない。
+    fn sort_by_okuri(&mut self) {
+        if self.cfg.okuri_match == OkuriMatch::Off || self.okuri_kana.is_empty() {
+            return;
+        }
+        let wanted = self.dict.okuri_candidates(&self.dict_key, &self.okuri_kana);
+        if wanted.is_empty() {
+            return;
+        }
+        match self.cfg.okuri_match {
+            OkuriMatch::First => {
+                // 安定な並べ替えなので、外れたものは元の順のまま後ろへ残る
+                self.candidates.sort_by_key(|c| {
+                    wanted
+                        .iter()
+                        .position(|t| *t == c.cand.text)
+                        .unwrap_or(usize::MAX)
+                });
+            }
+            OkuriMatch::Only => {
+                // **空にはしない。** 宛先の候補が削除で消えているような場合に、
+                // 全部落として辞書登録へ移ると、打った語を出せなくなる。
+                if self.candidates.iter().any(|c| wanted.contains(&c.cand.text)) {
+                    self.candidates.retain(|c| wanted.contains(&c.cand.text));
+                }
+            }
+            OkuriMatch::Off => {}
+        }
     }
 
     // ---- ▼ 候補選択 ----
@@ -1859,6 +1904,13 @@ impl Skk {
                 // その数字専用の項目になってしまう。
                 self.dict.learn(&key, &cand);
                 let okuri = self.okuri_head.is_some();
+                // 送り仮名ごとの宛先へも覚える。**見出し語だけでは足りない** —
+                // 「おおきい」も「おおく」も おおk なので、片方の学習がもう片方を
+                // 引きずる。
+                let okuri_kana = self.okuri_kana.clone();
+                if okuri {
+                    self.dict.learn_okuri(&key, &okuri_kana, &cand.text);
+                }
 
                 // 埋める場所があるなら、確定せずに埋める段へ移る。**定型文の候補
                 // だけを見る** — TextMate の決まりでは `$100` も埋め場所なので、
@@ -3413,6 +3465,67 @@ mod tests {
         typed(&mut skk, "Ku");
         assert_eq!(preedit_text(&skk), "▼動く");
         assert_eq!(typed(&mut skk, "\n"), "動く");
+    }
+
+    /// 「多く」と「大きい」を一度ずつ直してから、互いを引きずらないことを見る。
+    ///
+    /// 送り仮名は一文字目で変換に入るので、`OoKu` は送り仮名「く」、`OoKi` は「き」。
+    /// どちらも見出し語は `おおk` で、見出し語だけで覚えると混ざる。
+    fn learn_both_readings(skk: &mut Skk) {
+        // 「多く」を選んで確定する。見出し語 おおk の先頭は「多」になる。
+        typed(skk, "OoKu");
+        assert_eq!(preedit_text(skk), "▼大く", "辞書の順では「大」が先");
+        typed(skk, " ");
+        assert_eq!(preedit_text(skk), "▼多く");
+        assert_eq!(typed(skk, "\n"), "多く");
+
+        // 続けて「大きい」。**ここはまだ引きずられる** — 「き」の宛先がまだ無い。
+        typed(skk, "OoKi");
+        assert_eq!(preedit_text(skk), "▼多き", "見出し語の学習が効いている");
+        typed(skk, " ");
+        assert_eq!(preedit_text(skk), "▼大き");
+        assert_eq!(typed(skk, "i"), "大きい");
+    }
+
+    #[test]
+    fn learning_is_kept_apart_by_okurigana() {
+        let mut skk = skk_with(&[("おおk", "/大/多/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        learn_both_readings(&mut skk);
+
+        // **ここからが本題。** 見出し語の先頭は「大」になったが、送り仮名「く」の
+        // 宛先は「多」なので、「おおく」は引きずられない。
+        typed(&mut skk, "OoKu");
+        assert_eq!(preedit_text(&skk), "▼多く");
+        typed(&mut skk, "\x07\x07");
+        // 「き」の側も自分の宛先が出る
+        typed(&mut skk, "OoKi");
+        assert_eq!(preedit_text(&skk), "▼大き");
+    }
+
+    /// `off` にすると ddskk の既定と同じ。見出し語の学習がそのまま出る。
+    #[test]
+    fn okurigana_matching_can_be_turned_off() {
+        let mut skk = skk_with(&[("おおk", "/大/多/")]);
+        skk.set_config(Config::parse("[behavior]\nokuri_match = \"off\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        learn_both_readings(&mut skk);
+
+        // 送り仮名を見ないので、直前に確定した「大」が「おおく」にも出る
+        typed(&mut skk, "OoKu");
+        assert_eq!(preedit_text(&skk), "▼大く");
+    }
+
+    /// 宛先が貯まっていない見出し語では並びが変わらない。入れて悪くならないこと。
+    #[test]
+    fn okurigana_order_leaves_unknown_readings_alone() {
+        let mut skk = skk_with(&[("おおk", "/大/多/"), ("うごk", "/動/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "OoKi");
+        assert_eq!(preedit_text(&skk), "▼大き", "辞書の順のまま");
+        typed(&mut skk, "\x07\x07");
+        typed(&mut skk, "UgoKu");
+        assert_eq!(preedit_text(&skk), "▼動く");
     }
 
     #[test]

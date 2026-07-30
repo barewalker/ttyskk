@@ -4,7 +4,7 @@
 //! (例: 「動く」なら `うごk`)。この二つは同じ表に入れても衝突しないため、
 //! ひとつの HashMap で扱う。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,16 @@ use anyhow::{Context, Result};
 /// 同梱する補助辞書。どの標準辞書にも入っていないが、無いと困るものを持つ。
 /// いまは丸数字 (①〜㊿) だけ。バイナリに埋め込むので、置き場所の設定が要らない。
 const BUILTIN: &str = include_str!("../dict/SKK-JISYO.ttyskk");
+
+/// 送り仮名ごとの宛先。`おおk /大/多/[き/大/]/[く/多/]/` の `[...]` にあたる。
+///
+/// **送りありの見出し語は、送り仮名が違っても同じ**になる。「大きい」は `OoKii`、
+/// 「多く」は `OoKu` で、どちらも `おおk` を引く。候補は語幹だけなので、見出し語
+/// 単位で覚えると片方の学習がもう片方を引きずる (「大きい」を確定したあと「おおく」
+/// と打つと `▼大く` が先に出る)。送り仮名ごとに宛先を分けると、これが解ける。
+///
+/// 送り仮名 → 候補の本文の並び。注釈は持たない (SKK の書き方がそうなっている)。
+pub type OkuriBlocks = BTreeMap<String, Vec<String>>;
 
 /// 候補ひとつ。`;` 以降の注釈は分けて持つ。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +65,12 @@ impl Candidate {
 pub struct Dict {
     system: HashMap<String, Vec<Candidate>>,
     user: HashMap<String, Vec<Candidate>>,
+    /// 送り仮名ごとの宛先。候補の表とは別に持つ。
+    ///
+    /// 候補の表に混ぜると、引く・数える・並べ替えるすべての場所が送りありの事情を
+    /// 抱えることになる。使うのは送りありの変換と保存だけなので、分けておく。
+    system_okuri: HashMap<String, OkuriBlocks>,
+    user_okuri: HashMap<String, OkuriBlocks>,
     /// 定型文 (`*.code-snippets`)。**手元の編集器で書くもの**で、学習では動かさない。
     ///
     /// 並びはファイルに書いた順がそのまま出る。住所を書き換えたときに古い候補が
@@ -89,12 +105,18 @@ pub struct Dict {
 enum Change {
     /// 確定した候補を先頭へ移す
     Learn(String, Candidate),
+    /// 送り仮名ごとの宛先へ覚える (見出し語, 送り仮名, 候補の本文)
+    LearnOkuri(String, String, String),
     /// 候補を取り除く
     Purge(String, String),
 }
 
-/// 一行を「見出し語」と「候補列」に分ける。
-fn parse_line(line: &str) -> Option<(String, Vec<Candidate>)> {
+/// 一行を「見出し語」「候補列」「送り仮名ごとの宛先」に分ける。
+///
+/// 送り仮名ブロック (`[り/送/]`) は **`/` で素朴に分けると `[り` と `]` に散る**ので、
+/// `[` で始まる区間から `]` までを一つのまとまりとして拾う。ddskk 由来の書き方で、
+/// CorvusSKK も書く。
+fn parse_line(line: &str) -> Option<(String, Vec<Candidate>, OkuriBlocks)> {
     if line.is_empty() || line.starts_with(';') {
         return None;
     }
@@ -102,18 +124,33 @@ fn parse_line(line: &str) -> Option<(String, Vec<Candidate>)> {
     let body = rest.trim();
     let body = body.strip_prefix('/').unwrap_or(body);
     let body = body.strip_suffix('/').unwrap_or(body);
-    // 送り仮名ブロック (`おくr /送/[り/送/]/` の `[...]`) から先は読み飛ばす。
-    // 送り仮名ごとに候補を絞る ddskk 由来の書き方で、CorvusSKK も書く。ttyskk は
-    // 扱わないが、**素朴に `/` で分けると `[り` や `]` が候補として紛れ込む**。
-    let cands: Vec<Candidate> = body
-        .split('/')
-        .take_while(|s| !s.starts_with('['))
-        .filter_map(Candidate::parse)
-        .collect();
+
+    let mut cands: Vec<Candidate> = Vec::new();
+    let mut blocks = OkuriBlocks::new();
+    let mut open: Option<(String, Vec<String>)> = None;
+    for seg in body.split('/') {
+        if let Some(okuri) = seg.strip_prefix('[') {
+            // 閉じないまま次が始まったら、手前は壊れているので捨てる
+            open = Some((okuri.to_string(), Vec::new()));
+        } else if seg.starts_with(']') {
+            if let Some((okuri, texts)) = open.take()
+                && !okuri.is_empty()
+                && !texts.is_empty()
+            {
+                blocks.insert(okuri, texts);
+            }
+        } else if let Some((_, texts)) = open.as_mut() {
+            if let Some(c) = Candidate::parse(seg) {
+                texts.push(c.text);
+            }
+        } else if let Some(c) = Candidate::parse(seg) {
+            cands.push(c);
+        }
+    }
     if cands.is_empty() {
         return None;
     }
-    Some((key.to_string(), cands))
+    Some((key.to_string(), cands, blocks))
 }
 
 /// EUC-JP でも UTF-8 でも読めるように、まず UTF-8 を試して駄目なら EUC-JP とみなす。
@@ -144,13 +181,68 @@ fn decode_jisyo(bytes: &[u8]) -> String {
     }
 }
 
-fn load_into(map: &mut HashMap<String, Vec<Candidate>>, text: &str) {
+fn load_into(
+    map: &mut HashMap<String, Vec<Candidate>>,
+    okuri: &mut HashMap<String, OkuriBlocks>,
+    text: &str,
+) {
     for line in text.lines() {
-        if let Some((key, cands)) = parse_line(line) {
-            let entry = map.entry(key).or_default();
+        if let Some((key, cands, blocks)) = parse_line(line) {
+            let entry = map.entry(key.clone()).or_default();
             for c in cands {
                 if !entry.iter().any(|e| e.text == c.text) {
                     entry.push(c);
+                }
+            }
+            if blocks.is_empty() {
+                continue;
+            }
+            let dst = okuri.entry(key).or_default();
+            for (o, texts) in blocks {
+                let v = dst.entry(o).or_default();
+                for t in texts {
+                    if !v.contains(&t) {
+                        v.push(t);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 記録を一つ適用する。保存と読み直しで同じ手順を使う。
+fn apply_change(
+    change: &Change,
+    map: &mut HashMap<String, Vec<Candidate>>,
+    okuri: &mut HashMap<String, OkuriBlocks>,
+) {
+    match change {
+        Change::Learn(key, cand) => move_to_front(map.entry(key.clone()).or_default(), cand),
+        Change::LearnOkuri(key, o, text) => {
+            let v = okuri
+                .entry(key.clone())
+                .or_default()
+                .entry(o.clone())
+                .or_default();
+            v.retain(|t| t != text);
+            v.insert(0, text.clone());
+        }
+        Change::Purge(key, text) => {
+            if let Some(v) = map.get_mut(key) {
+                v.retain(|c| c.text != *text);
+                if v.is_empty() {
+                    map.remove(key);
+                }
+            }
+            // **送り仮名ごとの宛先からも消す。** 片方だけ残すと、消したはずの候補が
+            // 送り仮名の一致で先頭に返り咲く。
+            if let Some(b) = okuri.get_mut(key) {
+                b.retain(|_, v| {
+                    v.retain(|t| t != text);
+                    !v.is_empty()
+                });
+                if b.is_empty() {
+                    okuri.remove(key);
                 }
             }
         }
@@ -165,22 +257,24 @@ impl Dict {
         import: Option<&Path>,
     ) -> Result<Self> {
         let mut system = HashMap::new();
+        let mut system_okuri = HashMap::new();
         for p in system_paths {
             if p.exists() {
-                load_into(&mut system, &read_jisyo(p)?);
+                load_into(&mut system, &mut system_okuri, &read_jisyo(p)?);
             }
         }
         // 同梱の補助辞書は最後に重ねる。共有辞書に同じ見出し語があればそちらが先。
-        load_into(&mut system, BUILTIN);
+        load_into(&mut system, &mut system_okuri, BUILTIN);
 
         let import_path = import.map(|p| p.to_path_buf());
         let mut user = HashMap::new();
+        let mut user_okuri = HashMap::new();
         if user_path.exists() {
-            load_into(&mut user, &read_jisyo(&user_path)?);
+            load_into(&mut user, &mut user_okuri, &read_jisyo(&user_path)?);
         } else if let Some(src) = &import_path {
             // 初回のみ fcitx5-skk の学習内容を引き継ぐ
             if src.exists() {
-                load_into(&mut user, &read_jisyo(src)?);
+                load_into(&mut user, &mut user_okuri, &read_jisyo(src)?);
             }
         }
 
@@ -195,6 +289,8 @@ impl Dict {
         Ok(Dict {
             system,
             user,
+            system_okuri,
+            user_okuri,
             snippets: HashMap::new(),
             snippet_paths: Vec::new(),
             snippet_stamps: Vec::new(),
@@ -303,10 +399,11 @@ impl Dict {
     /// プロセスが覚えたことも失わない。
     pub fn import_user(&mut self, path: &Path) -> Result<usize> {
         let mut incoming = HashMap::new();
-        load_into(&mut incoming, &read_jisyo(path)?);
+        let mut incoming_okuri = HashMap::new();
+        load_into(&mut incoming, &mut incoming_okuri, &read_jisyo(path)?);
 
         // ディスクの現状 + この起動で覚えたことを土台にする
-        let mut merged = self.merged_with_disk()?;
+        let (mut merged, mut okuri) = self.merged_with_disk()?;
         let mut added = 0;
         for (key, cands) in incoming {
             let entry = merged.entry(key).or_default();
@@ -317,7 +414,20 @@ impl Dict {
                 }
             }
         }
-        self.write_user(merged)?;
+        // **送り仮名ごとの宛先も引き継ぐ。** ddskk や CorvusSKK で溜めた仕分けは、
+        // 見出し語ごとの候補と同じだけ学習の成果にあたる。候補と同じく後ろへ足す。
+        for (key, blocks) in incoming_okuri {
+            let dst = okuri.entry(key).or_default();
+            for (o, texts) in blocks {
+                let v = dst.entry(o).or_default();
+                for t in texts {
+                    if !v.contains(&t) {
+                        v.push(t);
+                    }
+                }
+            }
+        }
+        self.write_user(merged, okuri)?;
         Ok(added)
     }
 
@@ -337,25 +447,15 @@ impl Dict {
         self.user_stamp = now;
 
         let mut user = HashMap::new();
+        let mut user_okuri = HashMap::new();
         if self.user_path.exists() {
-            load_into(&mut user, &read_jisyo(&self.user_path)?);
+            load_into(&mut user, &mut user_okuri, &read_jisyo(&self.user_path)?);
         }
         for change in &self.changes {
-            match change {
-                Change::Learn(key, cand) => {
-                    move_to_front(user.entry(key.clone()).or_default(), cand)
-                }
-                Change::Purge(key, text) => {
-                    if let Some(v) = user.get_mut(key) {
-                        v.retain(|c| c.text != *text);
-                        if v.is_empty() {
-                            user.remove(key);
-                        }
-                    }
-                }
-            }
+            apply_change(change, &mut user, &mut user_okuri);
         }
         self.user = user;
+        self.user_okuri = user_okuri;
         Ok(true)
     }
 
@@ -374,6 +474,25 @@ impl Dict {
                     if !out.iter().any(|e| e.text == c.text) {
                         out.push(c.clone());
                     }
+                }
+            }
+        }
+        out
+    }
+
+    /// その送り仮名に登録されている候補の本文。利用者辞書が先、共有辞書が後ろ。
+    ///
+    /// 並べ替えるかどうかは呼ぶ側が決める (設定を持っているのはそちら)。ここは
+    /// 「何が登録されているか」だけを答える。
+    pub fn okuri_candidates(&self, key: &str, okuri: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for src in [&self.user_okuri, &self.system_okuri] {
+            let Some(v) = src.get(key).and_then(|b| b.get(okuri)) else {
+                continue;
+            };
+            for t in v {
+                if !out.contains(t) {
+                    out.push(t.clone());
                 }
             }
         }
@@ -448,20 +567,33 @@ impl Dict {
             .push(Change::Learn(key.to_string(), cand.clone()));
     }
 
+    /// 送り仮名ごとの宛先へ覚える。
+    ///
+    /// [`Dict::learn`] と対で呼ぶ。あちらが「この見出し語で使った」を、こちらが
+    /// 「この送り仮名で使った」を記録する。両方あって初めて、`おおk` の中で
+    /// 「大きい」と「多く」が分かれる。
+    pub fn learn_okuri(&mut self, key: &str, okuri: &str, text: &str) {
+        if okuri.is_empty() || text.is_empty() {
+            return;
+        }
+        // 定型文は編集器で書いて編集器で直すもの。学習では動かさない ([`Dict::learn`])
+        if self.is_snippet(key, text) {
+            return;
+        }
+        let change = Change::LearnOkuri(key.to_string(), okuri.to_string(), text.to_string());
+        apply_change(&change, &mut self.user, &mut self.user_okuri);
+        self.changes.push(change);
+    }
+
     /// 候補を利用者辞書から取り除く。
     ///
     /// 手元に無くても記録は残す。別のペインが覚えた分がディスクにある場合、
     /// 保存時にそちらから消す必要があるため。共有辞書には手を触れないので、
     /// そちら由来の候補は次も出る (学習による先頭への繰り上がりだけが消える)。
     pub fn purge(&mut self, key: &str, text: &str) {
-        if let Some(v) = self.user.get_mut(key) {
-            v.retain(|c| c.text != text);
-            if v.is_empty() {
-                self.user.remove(key);
-            }
-        }
-        self.changes
-            .push(Change::Purge(key.to_string(), text.to_string()));
+        let change = Change::Purge(key.to_string(), text.to_string());
+        apply_change(&change, &mut self.user, &mut self.user_okuri);
+        self.changes.push(change);
     }
 
     /// 利用者辞書を書き出す。覚えたことがなければ何もしない。
@@ -469,8 +601,8 @@ impl Dict {
         if self.changes.is_empty() {
             return Ok(());
         }
-        let merged = self.merged_with_disk()?;
-        self.write_user(merged)
+        let (merged, okuri) = self.merged_with_disk()?;
+        self.write_user(merged, okuri)
     }
 
     /// ディスクの現状に、この起動で覚えたことを重ねたもの。
@@ -478,35 +610,34 @@ impl Dict {
     /// 丸ごと書き出すと、複数の ttyskk (端末・GUI・別のペイン) が互いの学習を消し
     /// 合ってしまう。**ディスクを土台にして自分の記録だけを重ねる**ことで、他が
     /// 覚えたことを残したまま書ける。
-    fn merged_with_disk(&self) -> Result<HashMap<String, Vec<Candidate>>> {
+    #[allow(clippy::type_complexity)]
+    fn merged_with_disk(
+        &self,
+    ) -> Result<(
+        HashMap<String, Vec<Candidate>>,
+        HashMap<String, OkuriBlocks>,
+    )> {
         let mut merged = HashMap::new();
+        let mut okuri = HashMap::new();
         if self.user_path.exists() {
-            load_into(&mut merged, &read_jisyo(&self.user_path)?);
+            load_into(&mut merged, &mut okuri, &read_jisyo(&self.user_path)?);
         } else if let Some(src) = &self.import_path
             && src.exists()
         {
-            load_into(&mut merged, &read_jisyo(src)?);
+            load_into(&mut merged, &mut okuri, &read_jisyo(src)?);
         }
         for change in &self.changes {
-            match change {
-                Change::Learn(key, cand) => {
-                    move_to_front(merged.entry(key.clone()).or_default(), cand)
-                }
-                Change::Purge(key, text) => {
-                    if let Some(v) = merged.get_mut(key) {
-                        v.retain(|c| c.text != *text);
-                        if v.is_empty() {
-                            merged.remove(key);
-                        }
-                    }
-                }
-            }
+            apply_change(change, &mut merged, &mut okuri);
         }
-        Ok(merged)
+        Ok((merged, okuri))
     }
 
     /// 利用者辞書を書き出し、手元の状態を書いた内容に合わせる。
-    fn write_user(&mut self, merged: HashMap<String, Vec<Candidate>>) -> Result<()> {
+    fn write_user(
+        &mut self,
+        merged: HashMap<String, Vec<Candidate>>,
+        okuri: HashMap<String, OkuriBlocks>,
+    ) -> Result<()> {
         if let Some(dir) = self.user_path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -520,18 +651,20 @@ impl Dict {
             let mut keys: Vec<&String> = merged.keys().collect();
             keys.sort();
 
+            let empty = OkuriBlocks::new();
             writeln!(f, ";; okuri-ari entries.")?;
             for k in keys.iter().filter(|k| is_okuri_ari(k)) {
-                write_entry(&mut f, k, &merged[*k])?;
+                write_entry(&mut f, k, &merged[*k], okuri.get(*k).unwrap_or(&empty))?;
             }
             writeln!(f, ";; okuri-nasi entries.")?;
             for k in keys.iter().filter(|k| !is_okuri_ari(k)) {
-                write_entry(&mut f, k, &merged[*k])?;
+                write_entry(&mut f, k, &merged[*k], &empty)?;
             }
         }
         fs::rename(&tmp, &self.user_path)?;
         self.changes.clear();
         self.user = merged;
+        self.user_okuri = okuri;
         self.user_stamp = stamp(&self.user_path);
         Ok(())
     }
@@ -557,13 +690,30 @@ fn is_okuri_ari(key: &str) -> bool {
         .is_some_and(|c| c.is_ascii_alphabetic())
 }
 
-fn write_entry(f: &mut fs::File, key: &str, cands: &[Candidate]) -> std::io::Result<()> {
+fn write_entry(
+    f: &mut fs::File,
+    key: &str,
+    cands: &[Candidate],
+    okuri: &OkuriBlocks,
+) -> std::io::Result<()> {
     if cands.is_empty() {
         return Ok(());
     }
     write!(f, "{} /", key)?;
     for c in cands {
         write!(f, "{}/", c.serialize())?;
+    }
+    // 送り仮名ごとの宛先は候補列の後ろ。ddskk・CorvusSKK と同じ並べ方なので、
+    // 同じファイルを分け合っても互いに読める。
+    for (o, texts) in okuri {
+        if texts.is_empty() {
+            continue;
+        }
+        write!(f, "[{o}/")?;
+        for t in texts {
+            write!(f, "{t}/")?;
+        }
+        write!(f, "]/")?;
     }
     writeln!(f)
 }
@@ -572,10 +722,16 @@ fn write_entry(f: &mut fs::File, key: &str, cands: &[Candidate]) -> std::io::Res
 mod tests {
     use super::*;
 
+    /// 辞書の本文を読み、候補の表と送り仮名ごとの宛先を返す。
+    fn loaded(text: &str) -> (HashMap<String, Vec<Candidate>>, HashMap<String, OkuriBlocks>) {
+        let (mut map, mut okuri) = (HashMap::new(), HashMap::new());
+        load_into(&mut map, &mut okuri, text);
+        (map, okuri)
+    }
+
     #[test]
     fn builtin_covers_the_circled_numbers() {
-        let mut m = HashMap::new();
-        load_into(&mut m, BUILTIN);
+        let (m, _) = loaded(BUILTIN);
         assert_eq!(m.len(), 100, "まる1〜50 と c1〜50 の二通り");
         for (key, want) in [
             ("まる1", "①"),
@@ -599,31 +755,30 @@ mod tests {
         assert!(parse_line("まる1 / /").is_none());
         assert!(parse_line("あ ///").is_none());
         // 空候補が混じっていても、まともな候補は残る
-        let (_, c) = parse_line("あ /亜// /唖/").unwrap();
+        let (_, c, _) = parse_line("あ /亜// /唖/").unwrap();
         assert_eq!(
             c.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(),
             ["亜", "唖"]
         );
         // 全角空白は正当な候補
-        let (_, c) = parse_line("すぺーす /　/").unwrap();
+        let (_, c, _) = parse_line("すぺーす /　/").unwrap();
         assert_eq!(c[0].text, "　");
     }
 
     #[test]
     fn completes_by_prefix() {
-        let mut sys = HashMap::new();
-        load_into(
-            &mut sys,
+        let (sys, system_okuri) = loaded(
             "かんじ /漢字/\nかんじゃ /患者/\nかんきょう /環境/\nかい /回/\nかんがr /考/\nかん /缶/\n",
         );
-        let mut user = HashMap::new();
-        load_into(&mut user, "かんきょう /環境/\nかんぱい /乾杯/\n");
+        let (user, user_okuri) = loaded("かんきょう /環境/\nかんぱい /乾杯/\n");
         let mut system_sorted: Vec<String> =
             sys.keys().filter(|k| !is_okuri_ari(k)).cloned().collect();
         system_sorted.sort_unstable();
         let d = Dict {
             system: sys,
             user,
+            system_okuri,
+            user_okuri,
             snippets: HashMap::new(),
             snippet_paths: Vec::new(),
             snippet_stamps: Vec::new(),
@@ -674,6 +829,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 送り仮名ごとの宛先を、覚えて・書き出して・読み直せる。
+    ///
+    /// **他の実装が書いたものを消さないことが要**。README にある「利用者辞書を git で
+    /// 分け合う」使い方で ddskk と混ぜても壊さない。
+    #[test]
+    fn okuri_blocks_survive_a_round_trip() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-okuri-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("user.dict");
+        // 手を触れていない、別の実装が書いた宛先 (うごk の [き/起/])
+        std::fs::write(
+            &path,
+            ";; okuri-ari entries.\nうごk /動/起/[き/起/]/\n;; okuri-nasi entries.\n",
+        )
+        .unwrap();
+
+        let mut d = Dict::load(&[], path.clone(), None).unwrap();
+        assert_eq!(d.okuri_candidates("うごk", "き"), ["起"], "読める");
+        d.learn(
+            "おおk",
+            &Candidate {
+                text: "多".into(),
+                annotation: None,
+            },
+        );
+        d.learn_okuri("おおk", "く", "多");
+        d.save().unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("おおk /多/[く/多/]/"), "書き出す形: {text}");
+        assert!(
+            text.contains("うごk /動/起/[き/起/]/"),
+            "触っていない宛先を消さない: {text}"
+        );
+
+        let d2 = Dict::load(&[], path.clone(), None).unwrap();
+        assert_eq!(d2.okuri_candidates("おおk", "く"), ["多"]);
+        assert_eq!(d2.okuri_candidates("うごk", "き"), ["起"]);
+        assert!(d2.okuri_candidates("おおk", "き").is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 候補を削除したら、送り仮名ごとの宛先からも消える。
+    ///
+    /// 片方だけ残すと、消したはずの候補が送り仮名の一致で先頭に返り咲く。
+    #[test]
+    fn purge_also_clears_the_okuri_blocks() {
+        let dir = std::env::temp_dir().join(format!("ttyskk-okuri-purge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("user.dict");
+        std::fs::write(
+            &path,
+            ";; okuri-ari entries.\nおおk /多/大/[く/多/]/[き/大/]/\n;; okuri-nasi entries.\n",
+        )
+        .unwrap();
+
+        let mut d = Dict::load(&[], path.clone(), None).unwrap();
+        d.purge("おおk", "多");
+        assert!(d.okuri_candidates("おおk", "く").is_empty(), "宛先も消える");
+        assert_eq!(d.okuri_candidates("おおk", "き"), ["大"], "他は残る");
+
+        d.save().unwrap();
+        let d2 = Dict::load(&[], path.clone(), None).unwrap();
+        assert!(d2.okuri_candidates("おおk", "く").is_empty());
+        assert_eq!(d2.okuri_candidates("おおk", "き"), ["大"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// CorvusSKK の利用者辞書 (UTF-16LE + BOM、送り仮名ブロック付き) を読める。
     #[test]
     fn reads_corvusskk_user_dictionary() {
@@ -689,12 +914,14 @@ mod tests {
         let decoded = decode_jisyo(&bytes);
         assert_eq!(decoded, text, "UTF-16LE を読める");
 
-        let mut map = HashMap::new();
-        load_into(&mut map, &decoded);
-        // 送り仮名ブロックは落として、候補だけを取る
-        let okuri: Vec<&str> = map["おくr"].iter().map(|c| c.text.as_str()).collect();
-        assert_eq!(okuri, ["送"], "[り/送/] は候補に混ぜない");
+        let (map, okuri) = loaded(&decoded);
+        // 候補列に `[り` や `]` が紛れ込まない
+        let cands: Vec<&str> = map["おくr"].iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(cands, ["送"], "[り/送/] は候補に混ぜない");
         assert_eq!(map["かんじ"].len(), 2);
+        // 送り仮名ごとの宛先は宛先として取る (捨てない)
+        assert_eq!(okuri["おくr"]["り"], ["送"]);
+        assert!(!okuri.contains_key("かんじ"), "送りなしには付かない");
     }
 
     /// 符号化は BOM を信じ、無ければ UTF-8 → EUC-JP の順に試す。
@@ -897,12 +1124,33 @@ mod tests {
 
     #[test]
     fn parses_entries() {
-        let (k, c) = parse_line("かんじ /漢字/幹事;幹事さん/").unwrap();
+        let (k, c, o) = parse_line("かんじ /漢字/幹事;幹事さん/").unwrap();
         assert_eq!(k, "かんじ");
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].text, "漢字");
         assert_eq!(c[1].text, "幹事");
         assert_eq!(c[1].annotation.as_deref(), Some("幹事さん"));
+        assert!(o.is_empty());
+    }
+
+    /// 送り仮名ブロックの読み取り。`/` で素朴に分けると `[き` と `]` に散る。
+    #[test]
+    fn parses_okuri_blocks() {
+        let (k, c, o) = parse_line("おおk /大/多/[き/大/]/[く/多/夛/]/").unwrap();
+        assert_eq!(k, "おおk");
+        assert_eq!(
+            c.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(),
+            ["大", "多"],
+            "括弧の中身は候補に混ぜない"
+        );
+        assert_eq!(o["き"], ["大"]);
+        assert_eq!(o["く"], ["多", "夛"]);
+
+        // 注釈の角括弧 (`[文語]`) はブロックではない。`/` の直後だけが始まりの印。
+        let (_, c, o) = parse_line("ゆるb /弛;[文語]/緩;[文語]/").unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].annotation.as_deref(), Some("[文語]"));
+        assert!(o.is_empty(), "注釈をブロックと取り違えない");
     }
 
     #[test]
