@@ -42,7 +42,7 @@ cargo install --locked --git https://github.com/barewalker/ttyskk
 
 ```
 $ ttyskk --version
-ttyskk 0.1.0 (9ba17967)
+ttyskk 0.1.1 (cf560cbf)
 ```
 
 cargo は git の写しを溜め込むので、`--git` からの更新が**古い写しのまま入る**ことが
