@@ -111,6 +111,21 @@ pub enum Marker {
     Letter,
 }
 
+/// 送りありの変換で、送り仮名ごとの宛先をどう使うか。
+///
+/// 送りありの見出し語は、送り仮名が違っても同じになる (「大きい」も「多く」も
+/// `おおk`)。確定するたびに送り仮名ごとの宛先も覚えているので、それを引くときに
+/// どう効かせるかを選ぶ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OkuriMatch {
+    /// 使わない。見出し語だけで並べる (ddskk の既定と同じ)。
+    Off,
+    /// その送り仮名で使った候補を先頭へ寄せ、残りは後ろにそのまま置く。
+    First,
+    /// その送り仮名で使った候補だけを出す。
+    Only,
+}
+
 /// 候補一覧の出し方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -213,6 +228,13 @@ pub struct Config {
     /// 「さい>」→再 のあと「りよう」→利用 と確定したら `さいりよう /再利用/` を
     /// 覚える。ddskk の `skk-learn-combined-word` と同じ (既定は有効)。
     pub learn_combined: bool,
+    /// 送りありの変換で、送り仮名ごとの宛先をどう使うか。**既定は先頭へ寄せる**。
+    ///
+    /// 「大きい」を確定したあと「おおく」と打つと `▼大く` が出る、という混線を
+    /// 解くためのもの。ddskk の既定は使わない (`Off` 相当) だが、それでは混線が
+    /// 残るので外した。`First` は**候補を隠さない**ので、宛先の無い見出し語では
+    /// 並びが変わらず、いまより悪くなることがない。
+    pub okuri_match: OkuriMatch,
     /// 押したときに ASCII モードへ戻すキー。空なら何もしない。
     ///
     /// vim / nvim で挿入モードを抜けたときに、かなモードが残らないようにする。
@@ -292,6 +314,7 @@ impl Default for Config {
             // ddskk の skk-auto-start-henkan-keyword-list と同じ顔ぶれ
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
+            okuri_match: OkuriMatch::First,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
             follow_cursor_shape: false,
             snippet_edit: Vec::new(),
@@ -539,6 +562,16 @@ impl Config {
                         cfg.learn_combined = value
                             .as_bool()
                             .ok_or_else(|| anyhow::anyhow!("behavior.learn_combined は真偽値"))?
+                    }
+                    "okuri_match" => {
+                        cfg.okuri_match = match value.as_str() {
+                            Some("off") => OkuriMatch::Off,
+                            Some("first") => OkuriMatch::First,
+                            Some("only") => OkuriMatch::Only,
+                            _ => bail!(
+                                "behavior.okuri_match は \"off\" / \"first\" (既定) / \"only\""
+                            ),
+                        }
                     }
                     "follow_cursor_shape" => {
                         cfg.follow_cursor_shape = value.as_bool().ok_or_else(|| {
