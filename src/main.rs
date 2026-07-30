@@ -701,6 +701,28 @@ impl Trace {
     }
 }
 
+/// バイト列を 16 進で並べる。読める文字は後ろに添える。
+///
+/// **打鍵の追跡は 16 進でないと読めない。** `String::from_utf8_lossy` だと `ESC` が
+/// 消えたり置換文字になったりして、`ESC O R` と `ESC [ R` の区別が付かない。
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3 + 8);
+    for b in bytes {
+        out.push_str(&format!("{b:02x} "));
+    }
+    out.push('(');
+    for &b in bytes {
+        out.push(match b {
+            0x1b => '␛',
+            0x00..=0x1f | 0x7f => '·',
+            b if b.is_ascii() => b as char,
+            _ => '?',
+        });
+    }
+    out.push(')');
+    out
+}
+
 /// `ttyskk migemo` — ローマ字に当たる日本語を探す正規表現を書き出す。
 ///
 /// **端末を要求しない。** 絞り込みの途中でパイプの先から呼ばれるので、擬似端末にも
@@ -1210,6 +1232,13 @@ fn main() -> Result<()> {
                 stdout.flush()?;
             }
             Event::Input(mut data) => {
+                if trace.on() {
+                    trace.log(format_args!(
+                        "端末→ttyskk {} バイト {}",
+                        data.len(),
+                        hex(&data)
+                    ));
+                }
                 // 画面の大きさが変わった直後は、尋ねておいた位置報告が紛れている。
                 // 古くて使えないときも**取り除くことだけはする** — 残すと子アプリが
                 // 打鍵として受け取ってしまう。
@@ -1220,6 +1249,14 @@ fn main() -> Result<()> {
                     }
                     awaiting_report = false;
                     report_usable = false;
+                    if trace.on() {
+                        trace.log(format_args!(
+                            "  位置報告を抜いた ({},{}) 残り {}",
+                            pos.0,
+                            pos.1,
+                            hex(&rest)
+                        ));
+                    }
                     data = rest;
                 }
                 let mut to_child = Vec::new();
@@ -1227,7 +1264,14 @@ fn main() -> Result<()> {
                 let mut wants_editor = None;
                 // 定型文の日付を打鍵のたびに合わせる。日をまたいでも古い値が出ない。
                 skk.set_now(local_now());
-                for key in decoder.feed(&data) {
+                let keys = decoder.feed(&data);
+                if trace.on() {
+                    // 切り出せなかった分は次の読み込みまで持ち越される。**打鍵が
+                    // 消えたとき、切り出しで落ちたのか渡す側で落ちたのかを分ける
+                    // のがここ。**
+                    trace.log(format_args!("  切り出し {} 個 {:?}", keys.len(), keys));
+                }
+                for key in keys {
                     let r = skk.handle(key);
                     // 確定したなら何か覚えた見込みがある。手が止まったら書き出す。
                     unsaved |= !r.commit.is_empty();
@@ -1252,6 +1296,13 @@ fn main() -> Result<()> {
                     writer.write_all(&to_child)?;
                     writer.flush()?;
                 }
+                if trace.on() {
+                    trace.log(format_args!(
+                        "  ttyskk→子 {} バイト {}",
+                        to_child.len(),
+                        hex(&to_child)
+                    ));
+                }
                 if mode_changed && show_cursor_color {
                     // 子の出力が途中で切れているあいだは塗らない。カーソルの形と色の
                     // 列がその真ん中に刺さり、端末はそこで文字を壊す。書けるように
@@ -1266,11 +1317,10 @@ fn main() -> Result<()> {
                 let preedit = skk.preedit();
                 if trace.on() {
                     trace.log(format_args!(
-                        "鍵 → 控え ({},{}) 錨={} 子へ {:?} 重ね描き {:?}",
+                        "鍵 → 控え ({},{}) 錨={} 重ね描き {:?}",
                         screen.row,
                         screen.col,
                         anchored,
-                        String::from_utf8_lossy(&to_child),
                         preedit
                             .at_cursor
                             .iter()
