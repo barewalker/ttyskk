@@ -28,6 +28,7 @@
 //! あり、この crate には入っていない。
 
 pub mod config;
+pub mod context;
 pub mod dict;
 pub mod migemo;
 pub mod num;

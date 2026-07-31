@@ -235,6 +235,12 @@ pub struct Config {
     /// 残るので外した。`First` は**候補を隠さない**ので、宛先の無い見出し語では
     /// 並びが変わらず、いまより悪くなることがない。
     pub okuri_match: OkuriMatch,
+    /// 画面に見えている文章で候補の順序を寄せるか。**既定は無効**。
+    ///
+    /// 同音異義語を選び分けるためのもの。手掛かりが無ければ並びを変えないので害は
+    /// 小さいが、**同じ読みが画面によって違う順で出る**ようになる。指が順序を覚えて
+    /// いる人には戸惑いになるので、選んで入れてもらう形にした。
+    pub context_order: bool,
     /// 押したときに ASCII モードへ戻すキー。空なら何もしない。
     ///
     /// vim / nvim で挿入モードを抜けたときに、かなモードが残らないようにする。
@@ -315,6 +321,7 @@ impl Default for Config {
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
             okuri_match: OkuriMatch::First,
+            context_order: false,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
             follow_cursor_shape: false,
             snippet_edit: Vec::new(),
@@ -572,6 +579,11 @@ impl Config {
                                 "behavior.okuri_match は \"off\" / \"first\" (既定) / \"only\""
                             ),
                         }
+                    }
+                    "context_order" => {
+                        cfg.context_order = value
+                            .as_bool()
+                            .ok_or_else(|| anyhow::anyhow!("behavior.context_order は真偽値"))?
                     }
                     "follow_cursor_shape" => {
                         cfg.follow_cursor_shape = value.as_bool().ok_or_else(|| {
