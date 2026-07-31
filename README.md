@@ -279,6 +279,37 @@ cjk_ime_cursor_shape = "underline"
 子アプリがカーソルの形や色を変えた場合 (`vim` など) は、そのつど塗り直して
 モードの合図を保つ。`TTYSKK_NO_CURSOR` を設定するとカーソルには一切触らない。
 
+### 動いているかをプロンプトに出す
+
+上のとおり **ASCII モードでは何も描かない**ので、そのままでは**包まれているのかどうか
+が見た目で分からない**。ttyskk は子へ `TTYSKK_ACTIVE` を渡すので、プロンプトでそれを
+見れば示せる。
+
+[starship](https://starship.rs/) ならこう書く。
+
+```toml
+# 矢印の直前に出す
+format = """
+$directory$git_branch$git_status${env_var.TTYSKK_ACTIVE}$character
+"""
+
+[env_var.TTYSKK_ACTIVE]
+symbol = "⌨"
+format = "[$symbol]($style) "
+style = "bold cyan"
+```
+
+**値そのもの (`$env_value`) は出さない。** 中身は `1` 固定で意味を持たない。設定して
+いないときは既定値を置いていないので、この区画ごと消える。Nerd Font を使っているなら
+`symbol` を鍵盤の字形 (`U+F11C` など) にすると収まりがよい。
+
+素のシェルでも同じことができる (zsh)。
+
+```sh
+setopt prompt_subst
+PS1='${TTYSKK_ACTIVE:+⌨ }'"$PS1"
+```
+
 ### 変換
 
 | キー | 動作 |
@@ -870,6 +901,9 @@ herdr の既定シェルを `ttyskk` にした状態でそのペインに `ttysk
 ```sh
 env -u TTYSKK_ACTIVE ttyskk -- claude
 ```
+
+この目印はプロンプトからも見える。包まれているかどうかを出す書き方は上の
+「動いているかをプロンプトに出す」にある。
 
 ## 拡張鍵盤プロトコルを使うアプリの下で
 
