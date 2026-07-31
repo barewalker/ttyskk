@@ -5,6 +5,7 @@
 //! 解釈しなかったキーは [`Response::passthrough`] としてそのまま返す。
 
 use crate::config::{Config, Layout, Marker, OkuriMatch};
+use crate::context::Context;
 use crate::dict::{Candidate, Dict};
 
 /// 括弧付き貼り付け (bracketed paste) の囲み。
@@ -462,6 +463,11 @@ pub struct Skk {
     /// 直接入力で何か文字を出したら捨てる。接頭辞と次の語が画面上で隣り合って
     /// いることが繋げる条件なので (ddskk は `looking-at` で同じことを確かめる)。
     last_commit: Option<(String, String)>,
+    /// 画面に見えている文章。同音異義語の順序を決めるのに使う。
+    ///
+    /// **エンジンは画面を知らない。** 端末の側が控えから組んで渡す。GUI の入力
+    /// メソッドからは周辺テキストを同じ口に流せばよい。渡されなければ何もしない。
+    context: Option<Context>,
     /// いまの日時 ([`Skk::set_now`])。定型文の変数を開くのに使う。
     now: snippet::Now,
     /// 定型文の埋める場所を埋めている途中 ([`Filling`])。
@@ -499,6 +505,7 @@ impl Skk {
             regs: Vec::new(),
             completion: None,
             last_commit: None,
+            context: None,
             now: snippet::Now::default(),
             filling: None,
             fill_suffix: String::new(),
@@ -1700,6 +1707,10 @@ impl Skk {
                 }
             }
         }
+        // 文脈が先、送り仮名が後。**送り仮名は語を決める手掛かり、文脈は好みの
+        // 手掛かり**なので、食い違ったら送り仮名を優先する (後の並べ替えが安定なので、
+        // 送り仮名で同じ組に入ったものの中では文脈の順が残る)。
+        self.sort_by_context();
         self.sort_by_okuri();
         if self.candidates.is_empty() {
             // 候補が無ければ辞書登録へ移る
@@ -1708,6 +1719,54 @@ impl Skk {
         }
         self.cand_index = 0;
         self.phase = Phase::Selecting;
+    }
+
+    /// 文脈を渡す意味があるか。無効なら組み立て自体を省ける。
+    pub fn wants_context(&self) -> bool {
+        self.cfg.context_order
+    }
+
+    /// 画面に見えている文章を渡す。`cursor` は文字数での位置。
+    ///
+    /// 変換を始めるたびに見るので、画面が変わったときだけ渡し直せばよい。
+    pub fn set_context(&mut self, text: &str, cursor: usize) {
+        self.context = (!text.is_empty()).then(|| Context::new(text, cursor));
+    }
+
+    /// 画面の文脈で候補を並べ替える。
+    ///
+    /// **日本語は同音異義語が多すぎる。** 「こうせい」には構成・公正・校正・攻勢・
+    /// 後世・更生・厚生・恒星… と 20 件を超える候補があり、見出し語だけでは決めよう
+    /// がない。画面に見えている文章を手掛かりに寄せる。
+    ///
+    /// **手掛かりが無ければ並びを変えない。** 点数が全部 0 のときは触らないので、
+    /// 関係のない画面で悪くなることがない。
+    fn sort_by_context(&mut self) {
+        if !self.cfg.context_order {
+            return;
+        }
+        let Some(ctx) = self.context.as_ref() else {
+            return;
+        };
+        if ctx.is_empty() || self.candidates.len() < 2 {
+            return;
+        }
+        let scored: Vec<f64> = self
+            .candidates
+            .iter()
+            .map(|c| ctx.score(&c.cand.text, c.cand.annotation.as_deref()))
+            .collect();
+        if scored.iter().all(|s| *s <= 0.0) {
+            return;
+        }
+        // 点数の降順。**安定な並べ替え**なので、同点のものは元の順 (最近使った順) を保つ。
+        let mut order: Vec<usize> = (0..self.candidates.len()).collect();
+        order.sort_by(|a, b| scored[*b].partial_cmp(&scored[*a]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut taken: Vec<Option<Choice>> = self.candidates.drain(..).map(Some).collect();
+        self.candidates = order
+            .into_iter()
+            .filter_map(|i| taken[i].take())
+            .collect();
     }
 
     /// 送り仮名ごとの宛先で候補を並べ替える。
@@ -3514,6 +3573,54 @@ mod tests {
         // 送り仮名を見ないので、直前に確定した「大」が「おおく」にも出る
         typed(&mut skk, "OoKu");
         assert_eq!(preedit_text(&skk), "▼大く");
+    }
+
+    /// 画面の文脈で同音異義語の順序が変わる。
+    #[test]
+    fn context_reorders_the_homophones() {
+        let entries = [(
+            "こうせい",
+            "/構成/公正;fair/校正;proofread.「新聞の-」/厚生;welfare.「-労働省」/",
+        )];
+        let convert = |screen: &str, on: bool| {
+            let mut skk = skk_with(&entries);
+            if on {
+                skk.set_config(Config::parse("[behavior]\ncontext_order = true\n").unwrap());
+            }
+            skk.set_context(screen, screen.chars().count());
+            skk.handle(Key::Ctrl(0x0a));
+            typed(&mut skk, "Kousei ");
+            // 注釈は別の話なので落として、選ばれた候補だけを見る
+            let shown = preedit_text(&skk);
+            shown.split(" ; ").next().unwrap_or("").to_string()
+        };
+
+        // 何も無ければ辞書の順
+        assert_eq!(convert("", true), "▼構成");
+        // 画面にその語があれば上がる (第一段)
+        assert_eq!(convert("校正の指示をまとめる。", true), "▼校正");
+        // 注釈の訳語でも上がる (第二段)
+        assert_eq!(convert("please proofread the draft", true), "▼校正");
+        // 注釈の用例語でも上がる
+        assert_eq!(convert("労働省の発表を読む", true), "▼厚生");
+        // 関わりの無い画面では動かない
+        assert_eq!(convert("$ cargo test --quiet", true), "▼構成");
+        // 無効なら何があっても動かない
+        assert_eq!(convert("校正の指示をまとめる。", false), "▼構成");
+    }
+
+    /// 送り仮名と食い違ったら送り仮名を優先する。語を決める手掛かりだから。
+    #[test]
+    fn okurigana_wins_over_the_context() {
+        let mut skk = skk_with(&[("おおk", "/大/多/")]);
+        skk.set_config(Config::parse("[behavior]\ncontext_order = true\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        learn_both_readings(&mut skk);
+
+        // 画面は「大」だらけだが、送り仮名「く」の宛先は「多」
+        skk.set_context("大きい大きい大きい", 9);
+        typed(&mut skk, "OoKu");
+        assert_eq!(preedit_text(&skk), "▼多く");
     }
 
     /// 宛先が貯まっていない見出し語では並びが変わらない。入れて悪くならないこと。

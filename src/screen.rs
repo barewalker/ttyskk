@@ -185,6 +185,41 @@ impl Screen {
             .unwrap_or_default()
     }
 
+    /// 画面に見えている文字と、その中でのカーソルの位置 (文字数) を返す。
+    ///
+    /// 同音異義語の順序を決める文脈として使う。**行の右端の空白は落とす** — 端末の
+    /// 控えは画面いっぱいが空白で埋まっているので、そのまま繋ぐと距離が実際の文章
+    /// より遠くなる。行の切れ目には改行を置き、行をまたいだ語が繋がって見えないよう
+    /// にする。
+    ///
+    /// 全角文字の後続セル (`width == 0`) は飛ばす。同じ文字を二度数えないため。
+    pub fn visible_text(&self) -> (String, usize) {
+        let mut out = String::new();
+        let mut cursor = 0;
+        for row in 0..self.rows {
+            if row > 0 {
+                out.push('\n');
+            }
+            let mut line = String::new();
+            let mut at_cursor = None;
+            for col in 0..self.cols {
+                if row == self.row && col == self.col {
+                    at_cursor = Some(line.chars().count());
+                }
+                let cell = self.cell(row, col);
+                if cell.width > 0 {
+                    line.push(cell.ch);
+                }
+            }
+            let trimmed = line.trim_end();
+            if let Some(at) = at_cursor {
+                cursor = out.chars().count() + at.min(trimmed.chars().count());
+            }
+            out.push_str(trimmed);
+        }
+        (out, cursor)
+    }
+
     /// 控えから [col, col+len) の内容を書き戻す escape 列を作る。
     /// 全角文字を途中で断ち切らないよう範囲は自動で広げる。
     pub fn restore_region(&self, row: usize, col: usize, len: usize) -> String {

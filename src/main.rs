@@ -1111,6 +1111,8 @@ fn main() -> Result<()> {
 
     // 子に奪われたカーソルの見た目を塗り直す必要があるか
     let mut cursor_dirty = false;
+    // 画面が変わったので、文脈を組み直す必要がある。
+    let mut context_stale = true;
 
     // 起動した時点でカーソルを ttyskk のものにする。何も打っていなくても、
     // 動いていること・いまどのモードかが見て分かるようにするため。
@@ -1150,6 +1152,7 @@ fn main() -> Result<()> {
         };
         match ev {
             Event::Child(data) => {
+                context_stale = true;
                 let had_overlay = !overlay.is_empty();
                 // 消去は直前の切れ目 (安全な位置) で行う。**前回の出力が文字や
                 // 列の途中で終わっているなら消しにいかない** — 書き戻す列がその
@@ -1264,6 +1267,13 @@ fn main() -> Result<()> {
                 let mut wants_editor = None;
                 // 定型文の日付を打鍵のたびに合わせる。日をまたいでも古い値が出ない。
                 skk.set_now(local_now());
+                // 画面が変わっていたら文脈を渡し直す。**子が何か書くまでは同じ**
+                // なので、打鍵のたびに組み直す必要はない。
+                if context_stale && skk.wants_context() {
+                    context_stale = false;
+                    let (text, at) = screen.visible_text();
+                    skk.set_context(&text, at);
+                }
                 let keys = decoder.feed(&data);
                 if trace.on() {
                     // 切り出せなかった分は次の読み込みまで持ち越される。**打鍵が
