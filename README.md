@@ -15,7 +15,7 @@ ttyskk -- claude        # 特定のコマンドを包む
 ttyskk vim memo.txt
 ```
 
-## 入れる
+## インストール
 
 [crates.io](https://crates.io/crates/ttyskk) にある。**端末で使うぶんにはこれだけで
 よい** — GUI の入力メソッド (`fcitx5/`) と C ABI (`capi/`) は付いてこない。
