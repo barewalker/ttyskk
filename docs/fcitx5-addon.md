@@ -240,6 +240,64 @@ cargo build -p ttyskk-capi --release     # target/release/libttyskk.so と capi/
 cargo test -p ttyskk-capi                # C ABI をそのままの形で叩くテスト
 ```
 
+## 次にやること — 文脈による並べ替えを GUI でも効かせる
+
+端末側には「画面に見えている文章で同音異義語を選び分ける」機能が入っている
+(`[behavior] context_order`、README の「画面の文脈で候補を選び分ける」)。**GUI では
+まだ効かない** — addon が文脈を渡していないため。まだ着手していない。
+
+### 何が足りないか
+
+エンジンは文脈を**文字列とカーソル位置で受け取る**作りになっている。画面を知らないので、
+端末からでも GUI からでも同じ口に流せる。
+
+```rust
+pub fn set_context(&mut self, text: &str, cursor: usize)   // cursor は文字数
+pub fn wants_context(&self) -> bool                        // 設定が無効なら false
+```
+
+端末側は `Screen::visible_text()` で控えから組んで渡している (`src/main.rs` の
+`Event::Input`)。**capi にはこれを通す関数が無く、addon も呼んでいない。**
+
+### fcitx5 側の材料は揃っている
+
+`InputContext::surroundingText()` が使える。求める形とそのまま一致する。
+
+```cpp
+const SurroundingText &s = ic->surroundingText();
+if (s.isValid()) {
+    s.text();      // 周辺の文字列
+    s.cursor();    // カーソル位置。**文字数単位** (エンジンと同じ)
+}
+```
+
+`CapabilityFlag::SurroundingText` (`capabilityflags.h:30`) が立っている入力コンテキスト
+でしか使えない。**対応する子アプリは限られる** — GTK/Qt のテキスト入力欄は概ね対応
+するが、端末エミュレータや一部のアプリは持たない。無ければ何もしないだけでよい
+(エンジンは文脈が無ければ並びを変えない)。
+
+### 手順
+
+1. **capi に口を足す。** `ttyskk_set_context(engine, text, cursor)` と
+   `ttyskk_wants_context(engine)`。文字列は UTF-8、`cursor` は**文字数**で受ける
+   (バイト数ではない — C++ 側で数え違えないよう、ヘッダにも明記する)
+2. **addon から渡す。** `keyEvent` の中で、変換が始まる前に一度。毎打鍵ごとに組むと
+   無駄なので、`wants_context` が false なら何もしない。周辺テキストが無効なら渡さない
+3. **capability を要求する。** 入力コンテキストが `SurroundingText` を持つとは限らない
+   ので、`isValid()` を必ず見る
+4. **試験。** capi のテストで、文脈を渡すと「こうせい」の順序が変わることを見る
+   (`capi/src/tests.rs` に倣う)
+
+### 決めておくこと
+
+- **周辺テキストはどれだけ来るか。** アプリによっては数十文字しか渡してこない。
+  端末の画面 (数千文字) と比べて手掛かりが乏しくなるので、**効き方が端末と違う**
+  ことになる。それでよいか、それとも GUI では別の重み (`context_half_distance`) を
+  使えるようにするか
+- **カーソルの単位。** fcitx5 は文字数、エンジンも文字数。**ただし C++ の
+  `std::string` はバイト列**なので、`s.cursor()` をそのまま渡してよいことを試験で
+  確かめる
+
 ## 未確定のこと
 
 - 辞書登録 (▽ の候補が無いとき) の見せ方。端末では preedit に `[登録:よみ]` を出して
