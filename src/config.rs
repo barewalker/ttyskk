@@ -241,6 +241,12 @@ pub struct Config {
     /// 小さいが、**同じ読みが画面によって違う順で出る**ようになる。指が順序を覚えて
     /// いる人には戸惑いになるので、選んで入れてもらう形にした。
     pub context_order: bool,
+    /// 文脈の重みが半分になる距離 (**文字数**)。既定 200。
+    ///
+    /// カーソルから離れた語ほど軽く見る。**行数ではなく文字数**で数える — 一行の
+    /// 文字数はフォントの大きさや多重化器の分割で変わるため。小さくすると近くだけを
+    /// 見て、大きくすると画面全体を平らに見る。
+    pub context_half_distance: usize,
     /// 押したときに ASCII モードへ戻すキー。空なら何もしない。
     ///
     /// vim / nvim で挿入モードを抜けたときに、かなモードが残らないようにする。
@@ -322,6 +328,7 @@ impl Default for Config {
             learn_combined: true,
             okuri_match: OkuriMatch::First,
             context_order: false,
+            context_half_distance: crate::context::DEFAULT_HALF_WEIGHT,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
             follow_cursor_shape: false,
             snippet_edit: Vec::new(),
@@ -584,6 +591,12 @@ impl Config {
                         cfg.context_order = value
                             .as_bool()
                             .ok_or_else(|| anyhow::anyhow!("behavior.context_order は真偽値"))?
+                    }
+                    "context_half_distance" => {
+                        let n = value.as_integer().filter(|n| *n > 0).ok_or_else(|| {
+                            anyhow::anyhow!("behavior.context_half_distance は 1 以上の整数 (文字数)")
+                        })?;
+                        cfg.context_half_distance = n as usize
                     }
                     "follow_cursor_shape" => {
                         cfg.follow_cursor_shape = value.as_bool().ok_or_else(|| {
