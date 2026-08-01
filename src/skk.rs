@@ -468,6 +468,11 @@ pub struct Skk {
     /// **エンジンは画面を知らない。** 端末の側が控えから組んで渡す。GUI の入力
     /// メソッドからは周辺テキストを同じ口に流せばよい。渡されなければ何もしない。
     context: Option<Context>,
+    /// 直前の変換で文脈がどう効いたか。記録に出すためだけに持つ。
+    ///
+    /// **点数が見えないと、狙いと違う候補が出た理由を追えない。** 画面のどの語が
+    /// 効いたのかは、点数を並べて初めて分かる。
+    context_note: Option<String>,
     /// いまの日時 ([`Skk::set_now`])。定型文の変数を開くのに使う。
     now: snippet::Now,
     /// 定型文の埋める場所を埋めている途中 ([`Filling`])。
@@ -506,6 +511,7 @@ impl Skk {
             completion: None,
             last_commit: None,
             context: None,
+            context_note: None,
             now: snippet::Now::default(),
             filling: None,
             fill_suffix: String::new(),
@@ -1721,6 +1727,11 @@ impl Skk {
         self.phase = Phase::Selecting;
     }
 
+    /// 直前の変換で文脈がどう効いたかを取り出す (記録用)。一度取ると消える。
+    pub fn take_context_note(&mut self) -> Option<String> {
+        self.context_note.take()
+    }
+
     /// 文脈を渡す意味があるか。無効なら組み立て自体を省ける。
     pub fn wants_context(&self) -> bool {
         self.cfg.context_order
@@ -1751,14 +1762,36 @@ impl Skk {
         if ctx.is_empty() || self.candidates.len() < 2 {
             return;
         }
-        let scored: Vec<f64> = self
+        let explained: Vec<(f64, Vec<(String, f64)>)> = self
             .candidates
             .iter()
-            .map(|c| ctx.score(&c.cand.text, c.cand.annotation.as_deref()))
+            .map(|c| ctx.explain(&c.cand.text, c.cand.annotation.as_deref()))
             .collect();
+        let scored: Vec<f64> = explained.iter().map(|(s, _)| *s).collect();
         if scored.iter().all(|s| *s <= 0.0) {
             return;
         }
+        // 点の付いたものを、**効いた語を添えて**重い順に記録へ残す
+        let mut note: Vec<(f64, String)> = explained
+            .iter()
+            .zip(&self.candidates)
+            .filter(|((s, _), _)| *s > 0.0)
+            .map(|((s, hits), c)| {
+                let why: Vec<String> = hits.iter().take(3).map(|(w, _)| w.clone()).collect();
+                (*s, format!("{} {s:.2}[{}]", c.cand.text, why.join(",")))
+            })
+            .collect();
+        note.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        self.context_note = Some(format!(
+            "{} → {}\n    画面 {}",
+            self.dict_key,
+            note.iter()
+                .take(5)
+                .map(|(_, t)| t.clone())
+                .collect::<Vec<_>>()
+                .join(" / "),
+            ctx.digest(60)
+        ));
         // 点数の降順。**安定な並べ替え**なので、同点のものは元の順 (最近使った順) を保つ。
         let mut order: Vec<usize> = (0..self.candidates.len()).collect();
         order.sort_by(|a, b| scored[*b].partial_cmp(&scored[*a]).unwrap_or(std::cmp::Ordering::Equal));
