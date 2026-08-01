@@ -235,11 +235,14 @@ pub struct Config {
     /// 残るので外した。`First` は**候補を隠さない**ので、宛先の無い見出し語では
     /// 並びが変わらず、いまより悪くなることがない。
     pub okuri_match: OkuriMatch,
-    /// 画面に見えている文章で候補の順序を寄せるか。**既定は無効**。
+    /// 画面に見えている文章で候補の順序を寄せるか。**既定は有効**。
     ///
-    /// 同音異義語を選び分けるためのもの。手掛かりが無ければ並びを変えないので害は
-    /// 小さいが、**同じ読みが画面によって違う順で出る**ようになる。指が順序を覚えて
-    /// いる人には戸惑いになるので、選んで入れてもらう形にした。
+    /// 同音異義語を選び分けるためのもの。日本語は同音異義語が多すぎて、見出し語だけ
+    /// では決めようがない (「こうせい」は `SKK-JISYO.L` に 20 件を超える)。
+    ///
+    /// **手掛かりが無ければ並びを変えない**ので、関わりのない画面で悪くなることは
+    /// ない。引き換えに**同じ読みが画面によって違う順で出る**ようになるので、順序を
+    /// 指で覚えている人は `false` にする。
     pub context_order: bool,
     /// 文脈の重みが半分になる距離 (**文字数**)。既定 200。
     ///
@@ -327,7 +330,7 @@ impl Default for Config {
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
             okuri_match: OkuriMatch::First,
-            context_order: false,
+            context_order: true,
             context_half_distance: crate::context::DEFAULT_HALF_WEIGHT,
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
             follow_cursor_shape: false,
