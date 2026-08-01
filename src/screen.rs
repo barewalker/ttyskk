@@ -753,6 +753,59 @@ mod tests {
         p.advance(s, bytes.as_bytes());
     }
 
+    /// 画面から文章を取り出せる。同音異義語の文脈に使うので、**全角が落ちたり
+    /// 二重に出たりしてはいけない**。
+    #[test]
+    fn visible_text_reads_back_what_was_drawn() {
+        let mut s = Screen::new(10, 40);
+        // 編集器のように行番号を添えて描く
+        feed(&mut s, "\x1b[H");
+        for (n, body) in [
+            (46, "## 三 劇団の舞台"),
+            (47, ""),
+            (48, "来週の週末、大ホールで舞台がかかる。"),
+            (49, "劇団のみなさんは先月からけいこに入った。"),
+            (50, "▶ ここで Kouen と打って space"),
+        ] {
+            feed(&mut s, &format!("{n:>4}  {body}\r\n"));
+        }
+        // カーソルは最後の行の末尾に置く
+        feed(&mut s, "\x1b[5;36H");
+
+        let (text, at) = s.visible_text();
+        assert!(text.contains("劇団のみなさんは"), "全角が落ちている: {text:?}");
+        assert!(text.contains("▶ ここで Kouen"), "行が落ちている: {text:?}");
+        assert!(!text.contains("劇劇"), "全角を二度数えている: {text:?}");
+        assert!(at > 0 && at <= text.chars().count(), "カーソルの位置が範囲外: {at}");
+        // 右端の空白は落ちる (距離が実際の文章より遠くならないように)
+        assert!(!text.contains("  \n"), "行末の空白が残っている: {text:?}");
+    }
+
+    /// 取り出した文章が、そのまま文脈として使えること。
+    #[test]
+    fn visible_text_feeds_the_context() {
+        use ttyskk::context::Context;
+        let mut s = Screen::new(10, 60);
+        feed(&mut s, "\x1b[H");
+        for (n, body) in [
+            (48, "来週の週末、市民会館の大ホールで舞台がかかる。"),
+            (49, "劇団のみなさんは先月から通しげいこに入っていて、"),
+            (50, "チケットは前売りがすでに八割ほど出ているそうだ。"),
+            (51, ""),
+            (52, "▶ ここで Kouen と打って space"),
+        ] {
+            feed(&mut s, &format!("{n:>4}  {body}\r\n"));
+        }
+        feed(&mut s, "\x1b[5;40H");
+
+        let (text, at) = s.visible_text();
+        let ctx = Context::new(&text, at);
+        assert!(
+            ctx.score("公演", Some("†performance.「劇団の-」")) > 0.0,
+            "画面に「劇団」があるのに点が付かない\n  取り出した文章: {text:?}"
+        );
+    }
+
     #[test]
     fn private_csi_is_not_mistaken_for_sgr_or_cursor_restore() {
         let mut s = Screen::new(5, 20);

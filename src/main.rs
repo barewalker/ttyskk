@@ -711,12 +711,13 @@ fn hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x} "));
     }
     out.push('(');
-    for &b in bytes {
-        out.push(match b {
-            0x1b => '␛',
-            0x00..=0x1f | 0x7f => '·',
-            b if b.is_ascii() => b as char,
-            _ => '?',
+    // **日本語をそのまま読めるようにする。** 確定した文字列こそいちばん見たいもの
+    // なのに、バイトごとに ASCII 判定すると全部 `?` になってしまう。
+    for c in String::from_utf8_lossy(bytes).chars() {
+        out.push(match c {
+            '\u{1b}' => '␛',
+            c if (c as u32) < 0x20 || c == '\u{7f}' => '·',
+            c => c,
         });
     }
     out.push(')');
@@ -1312,6 +1313,11 @@ fn main() -> Result<()> {
                         to_child.len(),
                         hex(&to_child)
                     ));
+                    // 文脈が効いたなら、点の付いた候補を重い順に残す。狙いと違う
+                    // 候補が出た理由は、点数を並べて初めて分かる。
+                    if let Some(note) = skk.take_context_note() {
+                        trace.log(format_args!("  文脈 {note}"));
+                    }
                 }
                 if mode_changed && show_cursor_color {
                     // 子の出力が途中で切れているあいだは塗らない。カーソルの形と色の
