@@ -35,6 +35,23 @@
 /// 重みが半分になる距離 (文字数)。
 const HALF_WEIGHT: f64 = 200.0;
 
+/// 手掛かりにしない英単語。
+///
+/// **注釈の訳語をそのまま拾うと、機能語まで語彙になる。** `光炎;light and fire` から
+/// `and` を取ると、英文がある画面ではどこでも当たってしまい、無関係な候補が上がる
+/// (実測で「こうえん」が光炎になった)。
+///
+/// 長さで切ると `law`・`art`・`sea` のような**短い訳語**まで落ちるので、語を名指しする。
+const STOPWORDS: &[&str] = &[
+    "and", "the", "for", "with", "that", "this", "from", "into", "than", "then", "them", "they",
+    "there", "here", "have", "has", "had", "was", "were", "been", "being", "are", "not", "but",
+    "its", "his", "her", "our", "your", "their", "who", "whom", "which", "what", "when", "where",
+    "while", "such", "some", "any", "all", "one", "two", "out", "off", "over", "under", "after",
+    "before", "same", "other", "more", "most", "only", "also", "very", "much", "many", "each",
+    "both", "can", "could", "will", "would", "shall", "should", "may", "might", "must", "let",
+    "use", "used", "using", "make", "made", "get", "got", "see", "say", "said", "thing", "things",
+];
+
 /// 注釈から来た手掛かりの重み。候補そのものより弱く見る。
 ///
 /// 「画面にその語がある」は直接の証拠だが、「注釈に書かれた共起語がある」は間接で、
@@ -63,15 +80,52 @@ impl Context {
         self.chars.is_empty()
     }
 
+    /// 記録に残す要約。**何が見えていたのかが分からないと、点数の理由を追えない。**
+    ///
+    /// 画面が巻き上がって手掛かりが視野の外に出ていた、という場面が実際にあった。
+    /// 全体を残すと長すぎるので、大きさとカーソルの前後だけを出す。
+    pub fn digest(&self, around: usize) -> String {
+        let lo = self.cursor.saturating_sub(around);
+        let hi = (self.cursor + around).min(self.chars.len());
+        let cut = |r: std::ops::Range<usize>| {
+            self.chars[r]
+                .iter()
+                .map(|c| if *c == '\n' { '⏎' } else { *c })
+                .collect::<String>()
+        };
+        format!(
+            "{}文字 位置{} …{}▮{}…",
+            self.chars.len(),
+            self.cursor,
+            cut(lo..self.cursor),
+            cut(self.cursor..hi)
+        )
+    }
+
     /// 候補ひとつの点数。手掛かりが無ければ 0。
     pub fn score(&self, text: &str, annotation: Option<&str>) -> f64 {
-        let mut total = self.weight_of(text);
+        self.explain(text, annotation).0
+    }
+
+    /// 点数と、**効いた語**。狙いと違う候補が出た理由は、これが無いと追えない。
+    ///
+    /// 返す語は重い順。点の付かなかった語は含まない。
+    pub fn explain(&self, text: &str, annotation: Option<&str>) -> (f64, Vec<(String, f64)>) {
+        let mut hits: Vec<(String, f64)> = Vec::new();
+        let w = self.weight_of(text);
+        if w > 0.0 {
+            hits.push((text.to_string(), w));
+        }
         if let Some(a) = annotation {
             for hint in hints(a) {
-                total += HINT_WEIGHT * self.weight_of(&hint);
+                let w = HINT_WEIGHT * self.weight_of(&hint);
+                if w > 0.0 {
+                    hits.push((hint, w));
+                }
             }
         }
-        total
+        hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        (hits.iter().map(|(_, w)| w).sum(), hits)
     }
 
     /// その語が画面に出てくる分の重みの合計。
@@ -188,8 +242,9 @@ fn hints(annotation: &str) -> Vec<String> {
     let mut quoted = false;
 
     let flush_word = |w: &mut String, out: &mut Vec<String>| {
-        if w.chars().count() >= 3 {
-            out.push(w.to_lowercase());
+        let lower = w.to_lowercase();
+        if lower.chars().count() >= 3 && !STOPWORDS.contains(&lower.as_str()) {
+            out.push(lower);
         }
         w.clear();
     };
@@ -335,5 +390,21 @@ mod tests {
         assert_eq!(hints("学校名"), Vec::<String>::new());
         // 短すぎる英字は語として扱わない
         assert_eq!(hints("=紅炎"), Vec::<String>::new());
+        // **機能語は手掛かりにしない。** `light and fire` の `and` を拾うと、英文の
+        // ある画面ではどこでも当たってしまう (実測で「こうえん」が光炎になった)。
+        assert_eq!(hints("light and fire"), ["light", "fire"]);
+        assert_eq!(hints("good performance"), ["good", "performance"]);
+        // 短くても機能語でなければ残す。訳語には短いものがある。
+        assert_eq!(hints("law"), ["law"]);
+    }
+
+    /// 機能語が当たらないことを、点数の側からも見る。
+    #[test]
+    fn function_words_do_not_score() {
+        let screen = "There are a few typos and the date looks wrong.";
+        let ctx = Context::new(screen, screen.chars().count());
+        assert_eq!(ctx.score("光炎", Some("light and fire")), 0.0);
+        // 中身のある語なら当たる
+        assert!(ctx.score("誤植", Some("typos")) > 0.0);
     }
 }
