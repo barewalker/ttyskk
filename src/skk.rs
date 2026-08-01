@@ -1741,7 +1741,9 @@ impl Skk {
     ///
     /// 変換を始めるたびに見るので、画面が変わったときだけ渡し直せばよい。
     pub fn set_context(&mut self, text: &str, cursor: usize) {
-        self.context = (!text.is_empty()).then(|| Context::new(text, cursor));
+        self.context = (!text.is_empty()).then(|| {
+            Context::with_half_distance(text, cursor, self.cfg.context_half_distance)
+        });
     }
 
     /// 画面の文脈で候補を並べ替える。

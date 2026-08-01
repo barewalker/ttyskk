@@ -32,8 +32,11 @@
 //!
 //! 同じ語が何度も出てくれば足し合わせる。「近くにある」と「よく出てくる」が混ざる。
 
-/// 重みが半分になる距離 (文字数)。
-const HALF_WEIGHT: f64 = 200.0;
+/// 重みが半分になる距離 (文字数) の既定値。
+///
+/// **行数ではなく文字数で数える。** 一行の文字数はフォントの大きさや多重化器の分割で
+/// 変わるので、行を単位にすると環境ごとに効き方が変わってしまう。
+pub const DEFAULT_HALF_WEIGHT: usize = 200;
 
 /// 手掛かりにしない英単語。
 ///
@@ -63,17 +66,31 @@ pub struct Context {
     chars: Vec<char>,
     /// カーソルの位置 (`chars` の添字)。
     cursor: usize,
+    /// 重みが半分になる距離 (文字数)。
+    half: f64,
 }
 
 impl Context {
-    /// 画面の文字とカーソル位置から作る。
+    /// 画面の文字とカーソル位置から作る。既定の重みで見る。
     ///
     /// 文字列は行を繋いだもの。**端末の側で組んで渡す** — エンジンは画面を知らない
     /// ので、GUI の入力メソッドからは周辺テキストを同じ口に流せばよい。
     pub fn new(text: &str, cursor: usize) -> Self {
+        Self::with_half_distance(text, cursor, DEFAULT_HALF_WEIGHT)
+    }
+
+    /// 重みが半分になる距離を指定して作る。
+    ///
+    /// 小さくすると近くだけを見る (話題が細かく切り替わる文書向き)。大きくすると
+    /// 画面全体を平らに見る (一つの話題が続く長文向き)。0 は指定できない。
+    pub fn with_half_distance(text: &str, cursor: usize, half: usize) -> Self {
         let chars: Vec<char> = text.chars().collect();
         let cursor = cursor.min(chars.len());
-        Context { chars, cursor }
+        Context {
+            chars,
+            cursor,
+            half: half.max(1) as f64,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -157,7 +174,7 @@ impl Context {
                 self.chars[at..at + n.len()] == n[..]
             };
             if hit && self.boundary_ok(at, n.len(), ascii) {
-                total += 1.0 / (1.0 + self.distance(at, n.len()) / HALF_WEIGHT);
+                total += 1.0 / (1.0 + self.distance(at, n.len()) / self.half);
             }
         }
         total
@@ -368,6 +385,29 @@ mod tests {
         // ただし近い方が重い
         let near = Context::new("校正の話。いま", 7);
         assert!(near.score("校正", None) > ctx.score("校正", None));
+    }
+
+    /// 半減の距離を変えると、遠い手掛かりの効き方が変わる。
+    ///
+    /// **距離は文字数で数える。** 一行の文字数はフォントや画面の分割で変わるので、
+    /// 行を単位にすると環境ごとに効き方がぶれる。
+    #[test]
+    fn the_half_distance_changes_how_far_it_reaches() {
+        // 200 文字先に手掛かりを一つだけ置く
+        let far = format!("校正{}いま", "あ".repeat(200));
+        let at = far.chars().count();
+        let near_sighted = Context::with_half_distance(&far, at, 50);
+        let default = Context::with_half_distance(&far, at, 200);
+        let far_sighted = Context::with_half_distance(&far, at, 800);
+
+        // 大きいほど遠くまで効く
+        assert!(near_sighted.score("校正", None) < default.score("校正", None));
+        assert!(default.score("校正", None) < far_sighted.score("校正", None));
+        // 半減の距離ちょうどなら、およそ半分
+        let w = default.score("校正", None);
+        assert!((0.45..0.55).contains(&w), "200 文字先で半分になるはず: {w}");
+        // 0 を渡しても壊れない (1 として扱う)
+        assert!(Context::with_half_distance(&far, at, 0).score("校正", None) > 0.0);
     }
 
     /// 何度も出てくれば重くなる。
