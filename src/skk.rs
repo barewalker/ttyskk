@@ -3619,9 +3619,8 @@ mod tests {
         )];
         let convert = |screen: &str, on: bool| {
             let mut skk = skk_with(&entries);
-            if on {
-                skk.set_config(Config::parse("[behavior]\ncontext_order = true\n").unwrap());
-            }
+            let toml = format!("[behavior]\ncontext_order = {on}\n");
+            skk.set_config(Config::parse(&toml).unwrap());
             skk.set_context(screen, screen.chars().count());
             skk.handle(Key::Ctrl(0x0a));
             typed(&mut skk, "Kousei ");
