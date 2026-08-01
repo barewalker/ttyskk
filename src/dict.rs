@@ -469,11 +469,24 @@ impl Dict {
             out.extend(v.iter().cloned());
         }
         for src in [&self.snippets, &self.system] {
-            if let Some(v) = src.get(key) {
-                for c in v {
-                    if !out.iter().any(|e| e.text == c.text) {
-                        out.push(c.clone());
+            let Some(v) = src.get(key) else {
+                continue;
+            };
+            for c in v {
+                match out.iter_mut().find(|e| e.text == c.text) {
+                    // **注釈だけは後ろの出典からも補う。** 注釈は「その語の説明」で
+                    // あって「使った履歴」ではないので、利用者辞書に無ければ共有辞書
+                    // から採る。並び順には触れないので学習は壊れない。
+                    //
+                    // 他の実装から引き継いだ利用者辞書は、注釈が出典の印だけに
+                    // なっていることがある (skkeleton の `公演;G` は Google 由来の
+                    // 候補という意味で、語の説明ではない)。これがあると共有辞書の
+                    // 説明が覆い隠され、注釈の表示も文脈の手掛かりも失われる。
+                    Some(e) if !is_informative(e.annotation.as_deref()) => {
+                        e.annotation = c.annotation.clone();
                     }
+                    Some(_) => {}
+                    None => out.push(c.clone()),
                 }
             }
         }
@@ -684,6 +697,20 @@ fn move_to_front(entry: &mut Vec<Candidate>, cand: &Candidate) {
     entry.insert(0, cand.clone());
 }
 
+/// 注釈が語の説明として使えるか。
+///
+/// **一文字の英数字は出典の印**で、説明ではない。skkeleton から引き継いだ利用者辞書
+/// には `公演;G` (Google 由来) が 1,000 件以上あった。`地名` のように短くても日本語
+/// なら説明として扱う。
+fn is_informative(annotation: Option<&str>) -> bool {
+    let Some(a) = annotation else {
+        return false;
+    };
+    let a = a.trim();
+    let source_marker = a.chars().count() == 1 && a.chars().all(|c| c.is_ascii_alphanumeric());
+    !a.is_empty() && !source_marker
+}
+
 fn is_okuri_ari(key: &str) -> bool {
     key.chars()
         .next_back()
@@ -827,6 +854,61 @@ mod tests {
             ["漢字"]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 利用者辞書に説明の無い候補は、共有辞書から注釈を補う。
+    ///
+    /// **他の実装から引き継いだ辞書は、注釈が出典の印だけになっていることがある。**
+    /// 手元の辞書には skkeleton 由来の `;G` (Google の変換 API から来た候補の印) が
+    /// 1,256 件あり、これが共有辞書の説明を覆い隠していた。注釈は説明であって履歴
+    /// ではないので、補うのが筋。**並び順には触れない。**
+    #[test]
+    fn annotations_are_filled_in_from_the_shared_dictionary() {
+        let (user, user_okuri) = loaded("こうえん /講演;†lecture.「作家の-」/公演;G/公苑/\n");
+        let (system, system_okuri) =
+            loaded("こうえん /公園;park/講演;†lecture.「作家の-」/公演;†performance.「劇団の-」/\n");
+        let d = Dict {
+            system,
+            user,
+            system_okuri,
+            user_okuri,
+            snippets: HashMap::new(),
+            snippet_paths: Vec::new(),
+            snippet_stamps: Vec::new(),
+            user_path: PathBuf::from("/dev/null"),
+            import_path: None,
+            changes: Vec::new(),
+            user_stamp: None,
+            system_sorted: Vec::new(),
+        };
+        let got = d.lookup("こうえん");
+        let by = |t: &str| {
+            got.iter()
+                .find(|c| c.text == t)
+                .and_then(|c| c.annotation.clone())
+        };
+        // 出典の印しか無かったものは、共有辞書の説明で埋まる
+        assert_eq!(by("公演").as_deref(), Some("†performance.「劇団の-」"));
+        // 注釈が無いものも埋まる (共有辞書にも無ければ無いまま)
+        assert_eq!(by("公苑"), None);
+        assert_eq!(by("公園").as_deref(), Some("park"));
+        // 中身のある注釈は上書きしない
+        assert_eq!(by("講演").as_deref(), Some("†lecture.「作家の-」"));
+        // **並び順は利用者辞書のまま。** 学習を壊さない。
+        assert_eq!(
+            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["講演", "公演", "公苑", "公園"]
+        );
+    }
+
+    #[test]
+    fn a_one_letter_ascii_annotation_is_a_source_marker() {
+        assert!(!is_informative(Some("G")));
+        assert!(!is_informative(Some("")));
+        assert!(!is_informative(None));
+        // 短くても日本語なら説明
+        assert!(is_informative(Some("地名")));
+        assert!(is_informative(Some("park")));
     }
 
     /// 送り仮名ごとの宛先を、覚えて・書き出して・読み直せる。
