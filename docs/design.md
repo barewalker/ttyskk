@@ -65,7 +65,7 @@ GUI の入力メソッドは、この上にもう二層を重ねた形です。
 
 ```toml
 [dependencies]
-ttyskk = { version = "0.2", default-features = false }
+ttyskk = { version = "0.3", default-features = false }
 ```
 
 キーを一つずつ `Skk::handle` に渡し、返ってきた `Response` を出力に回します。入力中の表示は
