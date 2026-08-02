@@ -194,6 +194,7 @@ void TtyskkEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
         return;
     }
     auto *ic = keyEvent.inputContext();
+    updateContext(ic);
     const bool handled =
         ttyskk_key(engine_, static_cast<uint32_t>(keyEvent.key().sym()),
                    keyEvent.key().states().toInteger());
@@ -211,6 +212,31 @@ void TtyskkEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
 
     if (handled) {
         keyEvent.filterAndAccept();
+    }
+}
+
+/* 入力欄に見えている文章を文脈として渡す。同音異義語の順序に効く。
+ *
+ * 端末の ttyskk は子アプリの画面の控えを持っていて、そこから組んで渡している。GUI で
+ * それにあたるのが **fcitx5 の周辺テキスト**で、カーソルはどちらも文字数で数えるので
+ * (`SurroundingText::cursor()` は "offset of cursor in character") そのまま渡せる。
+ *
+ * **周辺テキストは子アプリが送ってこなければ無い。** GTK/Qt の入力欄は概ね送ってくる
+ * が、端末エミュレータや一部のアプリは持たない。無いときは**忘れさせる** — エンジンは
+ * 窓ごとに分かれていないので、渡しっぱなしにすると前の窓の話題で並べ替えてしまう。
+ *
+ * 打鍵のたびに渡している。端末側は画面を組み直すのが高くつくので変化を見ているが、
+ * ここでは fcitx5 が持っている文字列を写すだけなので、見張る仕掛けに見合わない。 */
+void TtyskkEngine::updateContext(InputContext *ic) {
+    if (!ttyskk_wants_context(engine_)) {
+        return; /* 設定で切ってあれば、組み立てること自体をしない */
+    }
+    const SurroundingText &surrounding = ic->surroundingText();
+    if (surrounding.isValid()) {
+        ttyskk_set_context(engine_, surrounding.text().c_str(),
+                           surrounding.cursor());
+    } else {
+        ttyskk_set_context(engine_, nullptr, 0);
     }
 }
 

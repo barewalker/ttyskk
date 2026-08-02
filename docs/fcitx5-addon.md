@@ -210,7 +210,16 @@ ttyskk/
 
 fcitx5 の addon は共有ライブラリ (`libttyskk.so`) と二つの `.conf` を所定の場所へ置く。
 `find_package(Fcitx5Core)` と `find_package(Fcitx5Utils)` が要るので、Ubuntu なら
-`libfcitx5core-dev` と `fcitx5-modules-dev` (いずれも未導入)。
+`libfcitx5core-dev` と `fcitx5-modules-dev`。
+
+**この addon をビルドするのはホスト (Ubuntu) 側。** fcitx5 そのものが動いているのが
+ホストなので、開発用のパッケージもそちらに入っている (`build/CMakeCache.txt` の
+`Fcitx5Core_DIR` が `/usr/lib/x86_64-linux-gnu/…` を指している)。distrobox の中から
+触るときは `distrobox-host-exec` を通す。
+
+```sh
+distrobox-host-exec bash -lc 'cd ~/Projects/ttyskk/fcitx5 && cmake --build build'
+```
 
 Rust 側は cargo でビルドし、CMake から呼ぶ (`corrosion` か、単に `add_custom_command`)。
 
@@ -229,9 +238,8 @@ Rust 側は cargo でビルドし、CMake から呼ぶ (`corrosion` か、単に
    には届かないため
 5. ~~**モード表示**~~ — **済**。`subMode` で「あ / ア / 半 / Ａ」を出す。あわせて歯車を
    開けるようにし、設定ファイルの場所を案内して開けるようにした
-
-2 に入るには `libfcitx5core-dev` と `fcitx5-modules-dev` が要る (どちらも未導入)。
-C++ のビルドなので distrobox の側の作業になる。
+6. ~~**画面の文脈**~~ — **済**。周辺テキストを渡して、同音異義語の並べ替えを GUI でも
+   効かせた (下の節)
 
 ### capi を叩いてみる
 
@@ -240,63 +248,66 @@ cargo build -p ttyskk-capi --release     # target/release/libttyskk.so と capi/
 cargo test -p ttyskk-capi                # C ABI をそのままの形で叩くテスト
 ```
 
-## 次にやること — 文脈による並べ替えを GUI でも効かせる
+## 文脈による並べ替えを GUI でも効かせる — 済
 
-端末側には「画面に見えている文章で同音異義語を選び分ける」機能が入っている
-(`[behavior] context_order`、README の「画面の文脈で候補を選び分ける」)。**GUI では
-まだ効かない** — addon が文脈を渡していないため。まだ着手していない。
+端末側にある「画面に見えている文章で同音異義語を選び分ける」機能
+(`[behavior] context_order`、README の「画面の文脈で候補を選び分ける」) を GUI へ通した。
 
-### 何が足りないか
+エンジンは文脈を**文字列とカーソル位置で受け取る**作りなので、画面を知らない。端末は
+`Screen::visible_text()` で控えから組んで渡し (`src/main.rs` の `Event::Input`)、GUI は
+fcitx5 の周辺テキストを同じ口に流す。
 
-エンジンは文脈を**文字列とカーソル位置で受け取る**作りになっている。画面を知らないので、
-端末からでも GUI からでも同じ口に流せる。
-
-```rust
-pub fn set_context(&mut self, text: &str, cursor: usize)   // cursor は文字数
-pub fn wants_context(&self) -> bool                        // 設定が無効なら false
+```c
+bool ttyskk_wants_context(const TtyskkEngine *);   // 設定が無効なら false
+void ttyskk_set_context(TtyskkEngine *, const char *text, size_t cursor);  // cursor は文字数
 ```
 
-端末側は `Screen::visible_text()` で控えから組んで渡している (`src/main.rs` の
-`Event::Input`)。**capi にはこれを通す関数が無く、addon も呼んでいない。**
-
-### fcitx5 側の材料は揃っている
-
-`InputContext::surroundingText()` が使える。求める形とそのまま一致する。
+addon 側は `keyEvent` の頭で毎回渡す (`TtyskkEngine::updateContext`)。
 
 ```cpp
 const SurroundingText &s = ic->surroundingText();
 if (s.isValid()) {
-    s.text();      // 周辺の文字列
-    s.cursor();    // カーソル位置。**文字数単位** (エンジンと同じ)
+    ttyskk_set_context(engine_, s.text().c_str(), s.cursor());
+} else {
+    ttyskk_set_context(engine_, nullptr, 0);   // 忘れさせる
 }
 ```
 
-`CapabilityFlag::SurroundingText` (`capabilityflags.h:30`) が立っている入力コンテキスト
-でしか使えない。**対応する子アプリは限られる** — GTK/Qt のテキスト入力欄は概ね対応
-するが、端末エミュレータや一部のアプリは持たない。無ければ何もしないだけでよい
-(エンジンは文脈が無ければ並びを変えない)。
+**周辺テキストが無いときに黙って見送ってはいけない。** エンジンは窓ごとに分かれて
+いない (Skk は一つ) ので、渡しっぱなしにすると**前の窓の話題で並べ替える**。持たない
+入力欄へ移ったら空を渡して忘れさせる。`CapabilityFlag::SurroundingText` を持つ子アプリ
+は限られる — GTK/Qt の入力欄は概ね対応するが、端末エミュレータや一部のアプリは持たない。
 
-### 手順
+### 端末と同じようには効かない
 
-1. **capi に口を足す。** `ttyskk_set_context(engine, text, cursor)` と
-   `ttyskk_wants_context(engine)`。文字列は UTF-8、`cursor` は**文字数**で受ける
-   (バイト数ではない — C++ 側で数え違えないよう、ヘッダにも明記する)
-2. **addon から渡す。** `keyEvent` の中で、変換が始まる前に一度。毎打鍵ごとに組むと
-   無駄なので、`wants_context` が false なら何もしない。周辺テキストが無効なら渡さない
-3. **capability を要求する。** 入力コンテキストが `SurroundingText` を持つとは限らない
-   ので、`isValid()` を必ず見る
-4. **試験。** capi のテストで、文脈を渡すと「こうせい」の順序が変わることを見る
-   (`capi/src/tests.rs` に倣う)
+**周辺テキストは「入力欄の中身」であって「画面に見えている文章」ではない。** ここが
+端末との決定的な違いで、期待を合わせておかないと「効いていない」と誤解する。
 
-### 決めておくこと
+検索結果の頁に「公演」が並んでいても、検索窓に `こうえん` と打ったときの周辺テキストは
+自分が打った数文字だけで、**頁の中身は入力メソッドから見えない**。手掛かりが無いので
+辞書と学習の順のまま出る (実際にこれで一度誤解した)。効くのは編集器・メールの本文・
+長い textarea のように、**入力欄そのものに文章が溜まっている**場に限られる。
 
-- **周辺テキストはどれだけ来るか。** アプリによっては数十文字しか渡してこない。
-  端末の画面 (数千文字) と比べて手掛かりが乏しくなるので、**効き方が端末と違う**
-  ことになる。それでよいか、それとも GUI では別の重み (`context_half_distance`) を
-  使えるようにするか
-- **カーソルの単位。** fcitx5 は文字数、エンジンも文字数。**ただし C++ の
-  `std::string` はバイト列**なので、`s.cursor()` をそのまま渡してよいことを試験で
-  確かめる
+端末側が子アプリの画面の控えを持っているのは、この機能にとって単なる実装の都合ではなく
+**能力の差**だった、ということでもある。
+
+**変化を見張る仕掛けは置かなかった。** 端末は画面を組み直すのが高くつくので変化した
+ときだけ渡しているが、GUI では fcitx5 が既に持っている文字列を写すだけなので、打鍵ごと
+に渡しても釣り合う。
+
+### 決めたこと
+
+- **周辺テキストの量が端末より乏しくても、重みは分けない。** アプリによっては数十文字
+  しか来ないが、`context_half_distance` (既定 200 文字) は「重みが半分になる距離」
+  なので、短ければ全部が近距離に入って重みがほぼ揃うだけで、悪い方へは倒れない。
+  設定を分けると端末と GUI で二重に持つことになり、config.toml を共有する方針と
+  食い違う。**効き方が違う**のは残るので、必要になってから分ける
+- **カーソルは文字数。** fcitx5 の `SurroundingText::cursor()` は "offset of cursor in
+  character" (`surroundingtext.h`) で、エンジンと同じ単位。`s.cursor()` をそのまま渡す。
+  **C++ の `std::string` はバイト列**なので取り違えやすく、日本語では三倍ずれる。
+  `the_cursor_is_counted_in_characters` が、同じ位置を文字数で渡すかバイト数で渡すかで
+  順序が逆になる形で見張っている (重みを 2 文字に絞ってある — 既定の 200 文字では
+  ずれても答えが変わらず、試験が空回りする)
 
 ## 未確定のこと
 

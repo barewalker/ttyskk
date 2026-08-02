@@ -254,6 +254,76 @@ fn modifier_presses_leave_the_composition_alone() {
     unsafe { ttyskk_free(p) };
 }
 
+/// 入力欄に見えている文章で、同音異義語の順序が変わること。
+///
+/// 端末では画面の控えから組んで渡している (`Screen::visible_text`)。GUI では fcitx5 の
+/// 周辺テキストを同じ口に流す。**エンジンは画面を知らない**ので、どちらから来ても同じ。
+#[test]
+fn the_surrounding_text_reorders_the_homophones() {
+    // 注釈の共起語 (「新聞の-」の「新聞」) が効く並べ方
+    let p = engine(&[("こうせい", "/構成;composition/校正;proofread.「新聞の-」/")]);
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+
+    // 文脈が無ければ辞書の順のまま
+    typed(p, "Kousei ");
+    assert_eq!(candidates(p), vec!["構成", "校正"]);
+    unsafe { ttyskk_reset(p) };
+
+    // 校正の話をしている入力欄。**「校正」そのものはどこにも書いていない**ので、
+    // 当たれば注釈の共起語が効いたことになる
+    let ctx = CString::new("新聞の記事を直している。").unwrap();
+    assert!(unsafe { ttyskk_wants_context(p) }, "既定では文脈を見る");
+    unsafe { ttyskk_set_context(p, ctx.as_ptr(), 12) };
+
+    typed(p, "Kousei ");
+    assert_eq!(candidates(p), vec!["校正", "構成"], "文脈で入れ替わる");
+    assert_eq!(preedit(p), "▼校正");
+    unsafe { ttyskk_reset(p) };
+
+    // 空を渡せば忘れる。周辺テキストを持たない入力欄へ移ったとき、前の窓の話題が
+    // 残ったまま並べ替えないように。
+    unsafe { ttyskk_set_context(p, std::ptr::null(), 0) };
+    typed(p, "Kousei ");
+    assert_eq!(candidates(p), vec!["構成", "校正"]);
+
+    unsafe { ttyskk_free(p) };
+}
+
+/// カーソルは**文字数**で受ける。バイト数を渡すと違う答えになる。
+///
+/// C++ の `std::string` はバイト列なので、位置を数え違えやすい。fcitx5 の
+/// `SurroundingText::cursor()` は文字数 (`surroundingtext.h` の "offset of cursor in
+/// character") なのでそのまま渡してよいが、**取り違えると日本語では三倍ずれる**。
+///
+/// 距離の重みは既定 (200 文字) だと近くも遠くも似た重さになり、ずれても答えが変わらない。
+/// ここでは重みを 2 文字に絞り、**同じ位置を文字数で渡すかバイト数で渡すかで順序が
+/// 逆になる**ようにして、取り違えを捕まえられる形にしてある。
+#[test]
+fn the_cursor_is_counted_in_characters() {
+    let p = engine(&[("こうえん", "/公園/講演/")]);
+    let toml = CString::new("[behavior]\ncontext_half_distance = 2\n").unwrap();
+    unsafe { ttyskk_set_config(p, toml.as_ptr()) };
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+
+    // 「講演」が前 (0 文字目)、「公園」が後ろ (7 文字目)
+    let text = "講演を聞いた。公園で遊んだ。";
+    let ctx = CString::new(text).unwrap();
+    // 「聞いた」のあたり。文字数なら 2、バイト数なら 6
+    assert_eq!(text.char_indices().nth(2).unwrap().0, 6);
+
+    unsafe { ttyskk_set_context(p, ctx.as_ptr(), 2) };
+    typed(p, "Kouen ");
+    assert_eq!(candidates(p), vec!["講演", "公園"], "手前の講演が近い");
+    unsafe { ttyskk_reset(p) };
+
+    // 同じ位置をバイト数で渡すと、六文字先 (公園のそば) を見てしまう
+    unsafe { ttyskk_set_context(p, ctx.as_ptr(), 6) };
+    typed(p, "Kouen ");
+    assert_eq!(candidates(p), vec!["公園", "講演"], "数え方で答えが変わる");
+
+    unsafe { ttyskk_free(p) };
+}
+
 /// 名前のあるキーが畳めること。
 #[test]
 fn named_keys_fold() {
