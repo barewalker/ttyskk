@@ -536,19 +536,25 @@ impl Dict {
         out.dedup();
         out.truncate(limit);
 
-        let mut rest: Vec<String> = self
+        // **要るのは上位 `limit` 件だけ**なので、範囲を丸ごと並べ替えない。「し」で
+        // 始まる見出し語は共有辞書に 1 万を超え、全部並べ替えると 2.8 ms かかる。
+        // 動的補完は打鍵ごとにここを引くので、その差がそのまま指に返る。
+        let mut rest: Vec<&String> = self
             .system_prefix_range(prefix)
             .iter()
             .filter(|k| k.len() > prefix.len())
-            .cloned()
             .collect();
-        rest.sort_by(&order);
+        if rest.len() > limit {
+            rest.select_nth_unstable_by(limit, |a, b| order(a, b));
+            rest.truncate(limit);
+        }
+        rest.sort_by(|a, b| order(a, b));
         for k in rest {
             if out.len() >= limit {
                 break;
             }
-            if !out.contains(&k) {
-                out.push(k);
+            if !out.contains(k) {
+                out.push(k.clone());
             }
         }
         out

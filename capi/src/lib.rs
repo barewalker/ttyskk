@@ -54,6 +54,9 @@ pub const TTYSKK_STYLE_ROMAJI: i32 = 1;
 pub const TTYSKK_STYLE_CANDIDATE: i32 = 2;
 /// 見出し語の中でカーソルが乗っている一文字。入力メソッド側で位置を示すのに使う。
 pub const TTYSKK_STYLE_READING_CURSOR: i32 = 3;
+/// 打つそばから見せている補完。**まだ打っていない文字**なので、打った分と
+/// 見分けの付く見た目にする (端末では薄字)。
+pub const TTYSKK_STYLE_COMPLETION: i32 = 4;
 
 fn mode_code(m: Mode) -> i32 {
     match m {
@@ -75,6 +78,8 @@ fn style_code(s: Style) -> Option<i32> {
         Style::ReadingCursor => Some(TTYSKK_STYLE_READING_CURSOR),
         Style::Romaji => Some(TTYSKK_STYLE_ROMAJI),
         Style::Candidate => Some(TTYSKK_STYLE_CANDIDATE),
+        // 補完は入力中の表示に混ぜる。打っている場所の続きとして見えないと読めない。
+        Style::Completion => Some(TTYSKK_STYLE_COMPLETION),
         Style::ListItem | Style::ListSelected => None,
         Style::ModeHiragana | Style::ModeKatakana | Style::ModeHankaku | Style::ModeZenkaku => None,
     }

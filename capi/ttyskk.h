@@ -40,6 +40,12 @@
 #define TTYSKK_STYLE_READING_CURSOR 3
 
 /**
+ * 打つそばから見せている補完。**まだ打っていない文字**なので、打った分と
+ * 見分けの付く見た目にする (端末では薄字)。
+ */
+#define TTYSKK_STYLE_COMPLETION 4
+
+/**
  * 変換エンジンひとつ分。C 側からは不透明な入れ物として扱う。
  */
 typedef struct TtyskkEngine TtyskkEngine;

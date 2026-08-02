@@ -325,13 +325,26 @@ void TtyskkEngine::updateUI(InputContext *ic) {
     const size_t n = ttyskk_preedit_len(engine_);
     for (size_t i = 0; i < n; i++) {
         TextFormatFlags fmt = TextFormatFlag::Underline;
-        if (ttyskk_preedit_style(engine_, i) == TTYSKK_STYLE_CANDIDATE) {
+        const int32_t style = ttyskk_preedit_style(engine_, i);
+        if (style == TTYSKK_STYLE_CANDIDATE) {
             fmt = TextFormatFlag::HighLight;
+        } else if (style == TTYSKK_STYLE_COMPLETION) {
+            /* 打つそばから見せている補完。**まだ打っていない文字**なので、下線を
+             * 外して打った分と見分けが付くようにする (端末では薄字にあたる)。 */
+            fmt = TextFormatFlag::NoFlag;
         }
         preedit.append(std::string(ttyskk_preedit_text(engine_, i)), fmt);
     }
     if (n > 0) {
-        preedit.setCursor(preedit.textLength());
+        /* カーソルは**打った分の末尾**に置く。補完は打っていない文字なので、
+         * その後ろへ置くと打ち込み位置を見失う。 */
+        size_t typed = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (ttyskk_preedit_style(engine_, i) != TTYSKK_STYLE_COMPLETION) {
+                typed += std::string(ttyskk_preedit_text(engine_, i)).size();
+            }
+        }
+        preedit.setCursor(static_cast<int>(typed == 0 ? preedit.textLength() : typed));
     }
 
     ic->inputPanel().reset();

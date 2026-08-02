@@ -4,7 +4,7 @@
 //! 途中経過は [`Skk::preedit`] が返す区間列、候補は [`Skk::candidates`] に回す。
 //! 解釈しなかったキーは [`Response::passthrough`] としてそのまま返す。
 
-use crate::config::{Config, Layout, Marker, OkuriMatch};
+use crate::config::{Config, DynamicCompletion, Layout, Marker, OkuriMatch};
 use crate::context::Context;
 use crate::dict::{Candidate, Dict};
 
@@ -26,6 +26,12 @@ use crate::snippet;
 
 /// TAB 補完で拾う見出し語の上限。多すぎると巡るのに手間がかかる。
 const COMPLETIONS: usize = 64;
+
+/// 動的補完で並べる見出し語の数 (`multiple`)。
+///
+/// 一行に収める前提なので、多くしても端に落ちる。打鍵ごとに目に入るものなので、
+/// 一目で見渡せる数に留める。
+const DYNAMIC_SHOWN: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -100,6 +106,12 @@ pub enum Style {
     ListItem,
     /// 候補一覧で選択中の項目
     ListSelected,
+    /// 打つそばから見せている補完。**まだ打っていない文字**。
+    ///
+    /// 候補一覧と同じ薄字で描くが、一覧とは行き先が違う。GUI の入力メソッドでは
+    /// 一覧を候補窓へ回す一方、こちらは入力中の表示に混ぜないと意味を成さない
+    /// (打っている場所の続きとして見えて初めて読める)。
+    Completion,
     /// モードの印。色でモードを表すので、モードごとに分かれている。
     ModeHiragana,
     ModeKatakana,
@@ -458,6 +470,10 @@ pub struct Skk {
     regs: Vec<Registration>,
     /// TAB 補完の途中。見出し語が変わったら捨てる。
     completion: Option<Completion>,
+    /// 打つそばから見せる前方一致の見出し語 ([`Skk::refresh_suggestion`])。
+    ///
+    /// 打鍵のたびに引き直すので、古いものが残ることはない。無効なら常に空。
+    suggestion: Vec<String>,
     /// 直前に確定した変換 (見出し語, 出力)。合成語の学習に使う。
     ///
     /// 直接入力で何か文字を出したら捨てる。接頭辞と次の語が画面上で隣り合って
@@ -509,6 +525,7 @@ impl Skk {
             dict,
             regs: Vec::new(),
             completion: None,
+            suggestion: Vec::new(),
             last_commit: None,
             context: None,
             context_note: None,
@@ -730,6 +747,7 @@ impl Skk {
                     }
                 }
                 segs.extend(self.completion_hint());
+                self.show_suggestion(&mut segs, &mut floating);
             }
             Phase::Selecting => {
                 let cur = self
@@ -1113,6 +1131,14 @@ impl Skk {
     }
 
     pub fn handle(&mut self, key: Key) -> Response {
+        let r = self.handle_key(key);
+        // 動的補完は「いまの見出し語」に紐づくので、状態が動いたあとに引き直す。
+        // 入り口を一つに絞ってあるので、どの経路を通っても取り残されない。
+        self.refresh_suggestion();
+        r
+    }
+
+    fn handle_key(&mut self, key: Key) -> Response {
         // 定型文の編集はどの段からでも呼べる。割り当てが無ければ何も起きない。
         // ASCII モードでは効かせない — 子アプリの持ち物であるキーを奪ってしまう。
         if self.mode != Mode::Ascii
@@ -1650,6 +1676,66 @@ impl Skk {
         if let Some(c) = self.completion.as_ref() {
             let word = c.words[c.index].clone();
             self.set_reading(word);
+        }
+    }
+
+    /// 打つそばから見せる見出し語を引き直す ([`Config::dynamic_completion`])。
+    ///
+    /// 引くのは「▽ の末尾で、かなが一区切りついたところ」だけ。ローマ字が打ちかけの
+    /// うちは伸ばす先が決まらず (`k` の続きは分からない)、送り仮名に入ったあとや
+    /// 見出し語の途中へ戻ったあとは、伸ばす場所が末尾ではなくなる。`TAB` で補完して
+    /// いる間も出さない — そちらは既に選んでいる最中で、[`Skk::completion_hint`] が
+    /// 何番目かを示している。
+    fn refresh_suggestion(&mut self) {
+        self.suggestion.clear();
+        let limit = match self.cfg.dynamic_completion {
+            DynamicCompletion::Off => return,
+            DynamicCompletion::Single => 1,
+            DynamicCompletion::Multiple => DYNAMIC_SHOWN,
+        };
+        if self.phase != Phase::Composing
+            || self.abbrev
+            || self.completion.is_some()
+            || self.okuri_head.is_some()
+            || !self.romaji.is_empty()
+            || self.reading.is_empty()
+            || self.read_cursor != self.reading.len()
+        {
+            return;
+        }
+        self.suggestion = self.dict.complete(&self.reading, limit);
+    }
+
+    /// 動的補完を表示に足す。`TAB` を押せば先頭のものが見出し語に入る。
+    ///
+    /// **打った分と見分けが付くようにする。** 見出し語は太字 + 下線、補ったものは
+    /// 薄字で、どこまでが自分の打鍵かが色で分かる。
+    fn show_suggestion(&self, segs: &mut Vec<Segment>, floating: &mut Vec<Segment>) {
+        let Some(first) = self.suggestion.first() else {
+            return;
+        };
+        match self.cfg.dynamic_completion {
+            DynamicCompletion::Off => {}
+            DynamicCompletion::Single => {
+                // 見出し語の続きだけを添える。行の長さが伸びるのは補う分だけで済む。
+                segs.push(Segment {
+                    style: Style::Completion,
+                    text: self.shown_reading(&first[self.reading.len()..]),
+                });
+            }
+            DynamicCompletion::Multiple => {
+                // 並べ方は候補一覧に合わせる。一覧が浮くようにしてある人の画面で、
+                // 補完だけが行を伸ばしては辻褄が合わない。
+                let inline = self.cfg.layout == Layout::Inline;
+                let list = if inline { &mut *segs } else { floating };
+                for (i, w) in self.suggestion.iter().enumerate() {
+                    let sep = if i == 0 && !inline { "" } else { " " };
+                    list.push(Segment {
+                        style: Style::Completion,
+                        text: format!("{sep}{}", self.shown_reading(w)),
+                    });
+                }
+            }
         }
     }
 
@@ -3054,6 +3140,114 @@ mod tests {
             "▽かんじや",
             "前方一致しないので変わらない"
         );
+    }
+
+    /// 動的補完。既定では出ないので、設定を入れた側だけで見える。
+    #[test]
+    fn dynamic_completion_shows_the_rest_while_typing() {
+        let entries = &[
+            ("にほんご", "/日本語/"),
+            ("にほんじん", "/日本人/"),
+            ("にほん", "/日本/"),
+        ];
+        let mut skk = skk_with(entries);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihonn");
+        assert_eq!(preedit_text(&skk), "▽にほん", "既定では出さない");
+
+        let mut skk = skk_with(entries);
+        skk.set_config(Config::parse("[behavior]\ndynamic_completion = \"single\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihonn");
+        // 打っていない「ご」が続く。短い順なので「にほんご」が先。
+        assert_eq!(preedit_text(&skk), "▽にほんご");
+        // 薄字なのは補った分だけ。打った分は見出し語のまま。
+        let p = skk.preedit();
+        assert_eq!(p.at_cursor[0].style, Style::Reading);
+        assert_eq!(p.at_cursor[0].text, "▽にほん");
+        assert_eq!(p.at_cursor[1].style, Style::Completion);
+        assert_eq!(p.at_cursor[1].text, "ご");
+
+        // 見せているだけなので、そのまま変換すれば打った分だけが対象になる
+        let mut probe = skk_with(entries);
+        probe.set_config(Config::parse("[behavior]\ndynamic_completion = \"single\"\n").unwrap());
+        probe.handle(Key::Ctrl(0x0a));
+        typed(&mut probe, "Nihonn ");
+        assert_eq!(preedit_text(&probe), "▼日本");
+
+        // TAB を押すと、見せていたものがそのまま見出し語に入る
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽にほんご 日本語 [1/2]");
+    }
+
+    #[test]
+    fn dynamic_completion_can_list_several() {
+        let mut skk = skk_with(&[
+            ("にほんご", "/日本語/"),
+            ("にほんじん", "/日本人/"),
+            ("にほんかい", "/日本海/"),
+        ]);
+        skk.set_config(Config::parse("[behavior]\ndynamic_completion = \"multiple\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihonn");
+        assert_eq!(preedit_text(&skk), "▽にほん にほんご にほんかい にほんじん");
+        // 先頭が TAB で入るもの
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽にほんご 日本語 [1/3]");
+
+        // 一覧の出し方は候補一覧に合わせる。float なら浮かせる行へ回る。
+        let mut skk = skk_with(&[("にほんご", "/日本語/")]);
+        skk.set_config(
+            Config::parse(
+                "[behavior]\ndynamic_completion = \"multiple\"\n[candidates]\nlayout = \"float\"\n",
+            )
+            .unwrap(),
+        );
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihonn");
+        let p = skk.preedit();
+        assert_eq!(
+            p.at_cursor
+                .iter()
+                .map(|s| s.text.clone())
+                .collect::<String>(),
+            "▽にほん"
+        );
+        assert_eq!(
+            p.floating
+                .iter()
+                .map(|s| s.text.clone())
+                .collect::<String>(),
+            "にほんご"
+        );
+    }
+
+    /// 伸ばす先が末尾でない間は出さない。出しても打ち込みと辻褄が合わない。
+    #[test]
+    fn dynamic_completion_keeps_quiet_where_it_cannot_extend() {
+        let mut skk = skk_with(&[("にほんご", "/日本語/"), ("にほんかい", "/日本海/")]);
+        skk.set_config(Config::parse("[behavior]\ndynamic_completion = \"single\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Nihonn");
+        assert_eq!(preedit_text(&skk), "▽にほんご");
+
+        // ローマ字が打ちかけの間は、続きが決まらない
+        typed(&mut skk, "k");
+        assert_eq!(preedit_text(&skk), "▽にほんk");
+        typed(&mut skk, "a");
+        assert_eq!(preedit_text(&skk), "▽にほんかい", "かなが揃えば出る");
+
+        // 見出し語の途中へ戻ったら、伸ばす場所は末尾ではない
+        skk.handle(Key::Ctrl(0x02));
+        assert_eq!(cursor_char(&skk), "か");
+        assert_eq!(preedit_text(&skk), "▽にほんか");
+
+        // 送り仮名に入ったら見出し語は伸びない
+        let mut skk = skk_with(&[("にほんご", "/日本語/")]);
+        skk.set_config(Config::parse("[behavior]\ndynamic_completion = \"single\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "NihonnN");
+        assert_eq!(preedit_text(&skk), "▽にほん*n");
     }
 
     #[test]
