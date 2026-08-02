@@ -51,6 +51,8 @@ private:
     void updateUI(InputContext *ic);
     /* 入力欄に見えている文章をエンジンへ渡す (同音異義語の順序に効く)。 */
     void updateContext(InputContext *ic);
+    /* 何が届いているかを記録に出す (TTYSKK_CONTEXT_LOG=1 のときだけ)。 */
+    void logContext(InputContext *ic, const SurroundingText &surrounding);
     /* 設定ファイルを読み直してエンジンへ渡す。 */
     void reloadConfig() override;
     /* 覚えたことの書き出しを予約する。 */
