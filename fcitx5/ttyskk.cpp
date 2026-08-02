@@ -412,6 +412,29 @@ std::string TtyskkEngine::subModeLabelImpl(const InputMethodEntry &entry,
     return subMode(entry, ic);
 }
 
+/* モードごとのアイコン。名前は `fcitx5/icons/` に置いたものと揃える。
+ *
+ * **直接入力だけ色を沈めてある。** ttyskk が変換に関わらない状態で、全角英数の Ａ とは
+ * 意味がまるで違うのに、字幅だけでは 22 ピクセルの札で見分けが付かないため。 */
+std::string TtyskkEngine::subModeIconImpl(const InputMethodEntry &,
+                                          InputContext &) {
+    if (!engine_) {
+        return "fcitx-ttyskk";
+    }
+    switch (ttyskk_mode(engine_)) {
+    case TTYSKK_MODE_HIRAGANA:
+        return "fcitx-ttyskk-hiragana";
+    case TTYSKK_MODE_KATAKANA:
+        return "fcitx-ttyskk-katakana";
+    case TTYSKK_MODE_HANKAKU_KATAKANA:
+        return "fcitx-ttyskk-halfkana";
+    case TTYSKK_MODE_ZENKAKU_ASCII:
+        return "fcitx-ttyskk-fullwidth";
+    default:
+        return "fcitx-ttyskk-latin";
+    }
+}
+
 } // namespace fcitx
 
 FCITX_ADDON_FACTORY(fcitx::TtyskkEngineFactory)
