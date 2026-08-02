@@ -21,6 +21,8 @@ fn style_sgr(style: Style) -> &'static str {
         // 選択中の候補は太字 + 下線 + 赤
         Style::Candidate => "\x1b[0;1;4;31m",
         Style::ListItem => "\x1b[0;2m",
+        // 打つそばから見せる補完も薄字。打った分 (太字 + 下線) と見分けが付く。
+        Style::Completion => "\x1b[0;2m",
         Style::ListSelected => "\x1b[0;7m",
         // モードの印。反転させて色を地にすることで、小さくても目に入る。
         // カーソルの色 (OSC 12) と同じ配色にしてあるが、こちらは文字なので

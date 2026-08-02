@@ -135,6 +135,21 @@ pub enum Layout {
     Float,
 }
 
+/// 動的補完 (打つそばから前方一致の見出し語を見せる) の出し方。
+///
+/// ddskk の `skk-dcomp-activate` / `skk-dcomp-multiple-activate` にあたる。
+/// どちらの形でも、出したものを取り込むのは `TAB` (補完キー) で、そこから先は
+/// いつもの補完と同じように送れる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DynamicCompletion {
+    /// 出さない。`TAB` を押したときだけ補完する。
+    Off,
+    /// 見出し語の続きを一つだけ薄く添える。行が伸びず、目の動きも小さい。
+    Single,
+    /// 前方一致する見出し語を数件並べる。並べ方は `candidates.layout` に従う。
+    Multiple,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// ASCII / 全角英数から かなモードへ入る
@@ -217,6 +232,12 @@ pub struct Config {
     /// 「2 文字めに《ん》が来る」「二重母音」の並びを 2 打で打てるようにする方式。
     /// 標準のローマ字を土台にしているので、打てなくなる綴りは無い。
     pub azik: bool,
+    /// 打つそばから前方一致の見出し語を見せるか。**既定は出さない**。
+    ///
+    /// `TAB` の補完と元は同じで、押す前から見えるかどうかだけが違う。既定を無効に
+    /// してあるのは、**打っている最中に文字が増えるのを嫌う人がいる**ため。出す形は
+    /// [`DynamicCompletion`] で選ぶ。
+    pub dynamic_completion: DynamicCompletion,
     /// 見出し語の入力中にこれらの文字が来たら、その手前までで変換を始める。
     ///
     /// 「ほんやくを」と打つと `を` の直前で変換に入り、`を` は候補の後ろに置かれる。
@@ -326,6 +347,7 @@ impl Default for Config {
             mode_marker: Marker::Cell,
             kutouten: Kutouten::Jp,
             azik: false,
+            dynamic_completion: DynamicCompletion::Off,
             // ddskk の skk-auto-start-henkan-keyword-list と同じ顔ぶれ
             auto_start_henkan: "を、。．，？」！；：);:）”】』》〉}]?.,!".chars().collect(),
             learn_combined: true,
@@ -587,6 +609,16 @@ impl Config {
                             Some("only") => OkuriMatch::Only,
                             _ => bail!(
                                 "behavior.okuri_match は \"off\" / \"first\" (既定) / \"only\""
+                            ),
+                        }
+                    }
+                    "dynamic_completion" => {
+                        cfg.dynamic_completion = match value.as_str() {
+                            Some("off") => DynamicCompletion::Off,
+                            Some("single") => DynamicCompletion::Single,
+                            Some("multiple") => DynamicCompletion::Multiple,
+                            _ => bail!(
+                                "behavior.dynamic_completion は \"off\" (既定) / \"single\" / \"multiple\""
                             ),
                         }
                     }
