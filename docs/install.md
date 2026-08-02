@@ -23,7 +23,7 @@ cargo install --locked --git https://github.com/barewalker/ttyskk
 
 ```console
 $ ttyskk --version
-ttyskk 0.2.1 (9cfaa5d5)
+ttyskk 0.3.0 (9be15104)
 ```
 
 末尾の `+` は、手を入れたまま組み立てた印です。crates.io から入れた場合は、公開した時点の

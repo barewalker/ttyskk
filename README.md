@@ -741,7 +741,7 @@ ttyskk が画面に対して守っている決まりは四つです。
 
 ```toml
 [dependencies]
-ttyskk = { version = "0.2", default-features = false }
+ttyskk = { version = "0.3", default-features = false }
 ```
 
 内訳と、エンジンを直接使うときの呼び方は [`docs/design.md`](docs/design.md) にあります。
