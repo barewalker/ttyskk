@@ -39,6 +39,9 @@ public:
     /* 入力メソッドの札に出すモード (あ / ア / 半 / Ａ)。 */
     std::string subMode(const InputMethodEntry &entry,
                         InputContext &ic) override;
+    /* アイコンを出せない画面のための文字。中身は subMode と同じ。 */
+    std::string subModeLabelImpl(const InputMethodEntry &entry,
+                                 InputContext &ic) override;
 
     /* fcitx5 の設定画面 (歯車) に出すもの。**設定項目は置かず、案内だけ**を返す。
      * 中身の型は ttyskk.cpp に閉じている。 */
@@ -53,6 +56,8 @@ private:
     void updateContext(InputContext *ic);
     /* 何が届いているかを記録に出す (TTYSKK_CONTEXT_LOG=1 のときだけ)。 */
     void logContext(InputContext *ic, const SurroundingText &surrounding);
+    /* モードが変わったら札と吹き出しを出し直す。 */
+    void notifyModeChange(InputContext *ic);
     /* 設定ファイルを読み直してエンジンへ渡す。 */
     void reloadConfig() override;
     /* 覚えたことの書き出しを予約する。 */
@@ -68,6 +73,8 @@ private:
     std::unique_ptr<Configuration> config_;
     /* 書き出しの予約。打鍵のたびに書くとディスクを叩きすぎるので少し待つ。 */
     std::unique_ptr<EventSourceTime> saveTimer_;
+    /* 直前に知らせたモード。**変わったときだけ**札を出し直すために持つ。 */
+    int lastMode_ = -1;
 };
 
 class TtyskkEngineFactory : public AddonFactory {

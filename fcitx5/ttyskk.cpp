@@ -212,10 +212,34 @@ void TtyskkEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
         scheduleSave();
     }
     updateUI(ic);
+    notifyModeChange(ic);
 
     if (handled) {
         keyEvent.filterAndAccept();
     }
+}
+
+/* モードが変わったことを画面へ知らせる。
+ *
+ * **fcitx5 は勝手に気付かない。** `subMode` は問われたときに答える口でしかないので、
+ * ttyskk の中で かな→カナ と移っても、こちらから言わなければ札は前のままになる
+ * (fcitx5-skk では出ていたのに ttyskk では出ない、という形で現れる)。
+ *
+ * 二つに知らせる。**札 (トレイ) は残る表示**で、いま何モードかを常時示す。**吹き出しは
+ * 消える表示**で、切り替えた瞬間だけカーソルの脇に出る。前者だけだと視線を札まで
+ * 動かすことになり、後者だけだと少し経つと分からなくなる。 */
+void TtyskkEngine::notifyModeChange(InputContext *ic) {
+    if (!engine_) {
+        return;
+    }
+    const int mode = ttyskk_mode(engine_);
+    if (mode == lastMode_) {
+        return;
+    }
+    lastMode_ = mode;
+    ic->updateUserInterface(UserInterfaceComponent::StatusArea);
+    /* 「ttyskk (あ)」の吹き出し。利用者が全体設定で切っていれば出ない。 */
+    instance_->showInputMethodInformation(ic);
 }
 
 /* 入力欄に見えている文章を文脈として渡す。同音異義語の順序に効く。
@@ -381,6 +405,11 @@ std::string TtyskkEngine::subMode(const InputMethodEntry &, InputContext &) {
     default:
         return "A";
     }
+}
+
+std::string TtyskkEngine::subModeLabelImpl(const InputMethodEntry &entry,
+                                           InputContext &ic) {
+    return subMode(entry, ic);
 }
 
 } // namespace fcitx
