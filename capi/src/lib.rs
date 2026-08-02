@@ -301,6 +301,46 @@ pub unsafe extern "C" fn ttyskk_reset(p: *mut TtyskkEngine) {
     });
 }
 
+/// 文脈を渡す意味があるか。
+///
+/// 設定 (`[behavior] context_order`) が無効なら false。**周辺テキストを組み立てる前に
+/// これを見る** — 呼ぶ側で毎打鍵ごとに文字列を作る手間を省ける。
+///
+/// # Safety
+/// `p` は有効なハンドル。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyskk_wants_context(p: *const TtyskkEngine) -> bool {
+    unsafe { p.as_ref() }.is_some_and(|e| e.skk.wants_context())
+}
+
+/// 入力欄に見えている文章を文脈として渡す。同音異義語の順序に効く。
+///
+/// - `text` … UTF-8 の文字列。NULL か空なら**文脈を忘れる** (順序を変えなくなる)
+/// - `cursor` … カーソルの位置。**バイト数ではなく文字数**で数える。fcitx5 の
+///   `SurroundingText::cursor()` はこの単位なのでそのまま渡してよい。長すぎる値は
+///   末尾に丸める
+///
+/// 渡した文脈は次に渡し直すまで残る。**入力欄が周辺テキストを持たない場に移ったら、
+/// 空を渡して忘れさせること** — 前の窓の話題が残ったまま並べ替えてしまう。
+///
+/// # Safety
+/// `p` は有効なハンドル。`text` は NULL か、NUL で終わる有効な文字列。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyskk_set_context(
+    p: *mut TtyskkEngine,
+    text: *const c_char,
+    cursor: usize,
+) {
+    let Some(e) = (unsafe { p.as_mut() }) else {
+        return;
+    };
+    guard((), || {
+        // 壊れた UTF-8 は「文脈なし」として扱う。手掛かりが無いだけで実害は無い。
+        let text = unsafe { borrow(text) }.unwrap_or_default();
+        e.skk.set_context(text, cursor);
+    });
+}
+
 /// キーを一つ渡す。**エンジンが受け取ったなら true**。
 ///
 /// false のときは呼ぶ側がそのキーを自分で扱う (矢印や機能キー、ASCII モードの打鍵)。

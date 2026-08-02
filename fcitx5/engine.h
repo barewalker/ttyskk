@@ -49,6 +49,8 @@ public:
 private:
     /* 直前の打鍵の結果を画面へ反映する。 */
     void updateUI(InputContext *ic);
+    /* 入力欄に見えている文章をエンジンへ渡す (同音異義語の順序に効く)。 */
+    void updateContext(InputContext *ic);
     /* 設定ファイルを読み直してエンジンへ渡す。 */
     void reloadConfig() override;
     /* 覚えたことの書き出しを予約する。 */
