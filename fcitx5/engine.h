@@ -39,6 +39,10 @@ public:
     /* 入力メソッドの札に出すモード (あ / ア / 半 / Ａ)。 */
     std::string subMode(const InputMethodEntry &entry,
                         InputContext &ic) override;
+    /* 札のアイコン。**モードごとに別の絵**にしてあり、これが「いまどのモードか」を
+     * 常時示す唯一の手掛かりになる (吹き出しは消えてしまうため)。 */
+    std::string subModeIconImpl(const InputMethodEntry &entry,
+                                InputContext &ic) override;
     /* アイコンを出せない画面のための文字。中身は subMode と同じ。 */
     std::string subModeLabelImpl(const InputMethodEntry &entry,
                                  InputContext &ic) override;

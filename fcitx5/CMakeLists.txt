@@ -63,3 +63,31 @@ install(FILES ttyskk-addon.conf
         DESTINATION "${FCITX_INSTALL_PKGDATADIR}/addon")
 install(FILES ttyskk.conf
         DESTINATION "${FCITX_INSTALL_PKGDATADIR}/inputmethod")
+
+# ---- アイコン ----
+#
+# **モードごとに別の絵を置く。** 札 (トレイ) の絵が変われば、いま かな なのか カナ なのか
+# を見るために視線を動かすだけで済む。切り替えの吹き出しは消えてしまうので、常時見える
+# 手掛かりはこちらだけ。名前は engine.cpp の subModeIconImpl と揃っている必要がある。
+#
+# SVG と PNG の両方を置く。**環境によっては札が SVG を描けない**ので、既存の入力メソッド
+# に倣う。中身は fcitx5/icons/generate.py が作る (普段は走らせない。出来上がりを置く)。
+
+set(TTYSKK_ICONS
+  fcitx-ttyskk
+  fcitx-ttyskk-hiragana
+  fcitx-ttyskk-katakana
+  fcitx-ttyskk-halfkana
+  fcitx-ttyskk-fullwidth
+  fcitx-ttyskk-latin)
+set(TTYSKK_ICON_SIZES 16 22 24 32 48 64)
+
+foreach(icon ${TTYSKK_ICONS})
+  install(FILES "icons/${icon}.svg"
+          DESTINATION "${FCITX_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
+  foreach(px ${TTYSKK_ICON_SIZES})
+    install(FILES "icons/${icon}-${px}.png"
+            RENAME "${icon}.png"
+            DESTINATION "${FCITX_INSTALL_DATADIR}/icons/hicolor/${px}x${px}/apps")
+  endforeach()
+endforeach()
