@@ -1,9 +1,12 @@
 #include "engine.h"
 
 #include <fcitx-utils/i18n.h>
+#include <fcitx-utils/log.h>
+#include <fcitx-utils/utf8.h>
 #include <fcitx/candidatelist.h>
 #include <fcitx/inputpanel.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -238,6 +241,59 @@ void TtyskkEngine::updateContext(InputContext *ic) {
     } else {
         ttyskk_set_context(engine_, nullptr, 0);
     }
+    logContext(ic, surrounding);
+}
+
+/* 何が届いているかを見る口。`TTYSKK_CONTEXT_LOG=1` のときだけ喋る。
+ *
+ * **周辺テキストを送るかどうかは子アプリ次第**で、同じブラウザでも入力欄の種類や
+ * 接続経路 (Wayland の text-input か、GTK の入力モジュールか) で変わる。効かないとき
+ * に「文脈の効き方が悪い」のか「そもそも届いていない」のかを分けられないと、直す先が
+ * 決まらない。文字数とカーソル位置を見れば、どちらかはすぐ分かる。
+ *
+ * **打った文章そのものが記録に出る**ので、既定では黙っている。 */
+void TtyskkEngine::logContext(InputContext *ic,
+                              const SurroundingText &surrounding) {
+    static const bool enabled = [] {
+        const char *v = std::getenv("TTYSKK_CONTEXT_LOG");
+        return v && *v && std::string(v) != "0";
+    }();
+    if (!enabled) {
+        return;
+    }
+    const bool capable =
+        ic->capabilityFlags().test(CapabilityFlag::SurroundingText);
+    if (!surrounding.isValid()) {
+        FCITX_INFO() << "ttyskk 文脈: 無し (capability=" << capable
+                     << " program=" << ic->program() << ")";
+        return;
+    }
+    /* カーソルの前後だけ出す。全部出すと長すぎて読めない。 */
+    const std::string &text = surrounding.text();
+    const size_t len = utf8::length(text);
+    const size_t cursor = std::min<size_t>(surrounding.cursor(), len);
+    const size_t around = 20;
+    const size_t from = cursor > around ? cursor - around : 0;
+    const size_t to = std::min(len, cursor + around);
+
+    /* 文字数での切り出し。改行はそのまま出すと行が割れるので印に替える。 */
+    const auto cut = [&text](size_t fromChar, size_t toChar) {
+        const int begin = utf8::ncharByteLength(text.begin(), fromChar);
+        const int end = utf8::ncharByteLength(text.begin(), toChar);
+        if (begin < 0 || end < begin) {
+            return std::string("?");
+        }
+        std::string out = text.substr(begin, end - begin);
+        for (char &c : out) {
+            if (c == '\n' || c == '\r') {
+                c = ' ';
+            }
+        }
+        return out;
+    };
+    FCITX_INFO() << "ttyskk 文脈: " << len << "文字 位置" << cursor << " …"
+                 << cut(from, cursor) << "▮" << cut(cursor, to)
+                 << "… program=" << ic->program();
 }
 
 void TtyskkEngine::updateUI(InputContext *ic) {
