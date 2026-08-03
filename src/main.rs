@@ -56,6 +56,8 @@ fn usage_head() -> String {
     -h, --help        この使い方を表示する
     -V, --version     版を表示する
     --check-config    設定ファイルを検査して終わる
+    --reload          包んでいる ttyskk に、新しいバイナリへの差し替えを頼む
+                      (包まれている端末の中から呼ぶ)
     --config-example  設定の見本を書き出す (全項目を既定値のまま # で無効にしたもの)
     --import <辞書>   別の SKK 辞書を利用者辞書に取り込む (他の実装からの移行)
     --edit-snippets [見出し語]
@@ -182,6 +184,38 @@ enum Event {
     DictChanged,
     /// スニペットが編集器で書き換えられた
     SnippetsChanged,
+    /// 新しいバイナリへ差し替えるよう頼まれた (`ttyskk --reload`)
+    Reload,
+}
+
+/// 包んでいる ttyskk に、新しいバイナリへ差し替えるよう頼む。
+///
+/// **包まれている端末の中から自分を入れ替えるための入口。** 子 (シェルや、その中で
+/// 動いている編集器・エージェント) を生かしたまま ttyskk だけを新しくしたい。
+/// 更新のたびに端末を閉じて開き直すのは、中で長く動いているものほど高くつく。
+///
+/// 合図は `SIGUSR2`。`SIGUSR1` は読み込みを中断させるのに使っていて空いていない。
+/// 宛先は [`ACTIVE_ENV`] に入れてある親の PID。
+fn ask_the_wrapper_to_reload() -> Result<()> {
+    let Some(v) = config::env_os(ACTIVE_ENV) else {
+        bail!("ttyskk の中にいない。包まれている端末から呼ぶ");
+    };
+    // 古い版は目印に `1` を入れる。数として読めなければそれと見て、断りを返す。
+    let pid: i32 = v
+        .to_str()
+        .and_then(|s| s.parse().ok())
+        .filter(|p| *p > 1)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "包んでいる ttyskk が古く、差し替えに対応していない。一度抜けて起動し直す"
+            )
+        })?;
+    if unsafe { libc::kill(pid, libc::SIGUSR2) } != 0 {
+        return Err(anyhow::Error::new(std::io::Error::last_os_error())
+            .context(format!("ttyskk (pid {pid}) に合図を送れない")));
+    }
+    println!("ttyskk: 差し替えを頼んだ (pid {pid})");
+    Ok(())
 }
 
 /// 端末を raw モードにし、終了時に必ず元へ戻す。
@@ -864,6 +898,7 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            "--reload" => return ask_the_wrapper_to_reload(),
             "--" => {}
             _ => command.push(first),
         }
@@ -968,8 +1003,12 @@ fn main() -> Result<()> {
     for (k, v) in std::env::vars_os() {
         cmd.env(k, v);
     }
-    // 子の中でうっかり ttyskk を起こしても包み直さないための目印
-    cmd.env(ACTIVE_ENV, "1");
+    // 子の中でうっかり ttyskk を起こしても包み直さないための目印。
+    //
+    // **値は自分の PID。** 包まれている側から `ttyskk --reload` で差し替えを頼む
+    // ときの宛先になる ([`ask_the_wrapper_to_reload`])。包み直しの判定は有無しか
+    // 見ないので、古い版が入れた `1` と混ざっても困らない。
+    cmd.env(ACTIVE_ENV, std::process::id().to_string());
     if let Ok(cwd) = std::env::current_dir() {
         cmd.cwd(cwd);
     }
@@ -1046,11 +1085,21 @@ fn main() -> Result<()> {
     // 端末の大きさの変化
     {
         let tx = tx.clone();
-        let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH])
-            .context("SIGWINCH を捕まえられない")?;
+        // SIGUSR2 は差し替えの合図 (`ttyskk --reload`)。SIGUSR1 は読み込みを
+        // 中断させるのに使っていて空いていない。
+        let mut signals = signal_hook::iterator::Signals::new([
+            signal_hook::consts::SIGWINCH,
+            signal_hook::consts::SIGUSR2,
+        ])
+        .context("SIGWINCH / SIGUSR2 を捕まえられない")?;
         std::thread::spawn(move || {
-            for _ in signals.forever() {
-                if tx.send(Event::Winch).is_err() {
+            for sig in signals.forever() {
+                let ev = if sig == signal_hook::consts::SIGUSR2 {
+                    Event::Reload
+                } else {
+                    Event::Winch
+                };
+                if tx.send(ev).is_err() {
                     break;
                 }
             }
@@ -1415,6 +1464,12 @@ fn main() -> Result<()> {
                     awaiting_report = true;
                     report_usable = true;
                 }
+            }
+            Event::Reload => {
+                // **まだ差し替えない。** 合図が端末をまたいで届くことと、主ループが
+                // 受け取れることを先に確かめるための段。実際の入れ替え (擬似端末と
+                // 子を抱えたままの exec) はこの次。
+                trace.log(format_args!("--- 差し替えを頼まれた"));
             }
             Event::DictChanged => {
                 // 自分が保存した直後なら、目印が一致するので読み直しは起きない
