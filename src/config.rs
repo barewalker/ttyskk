@@ -170,6 +170,24 @@ pub struct Config {
     pub start_conversion: Vec<Key>,
     /// ASCII の見出し語で変換する
     pub abbrev: Vec<Key>,
+    /// 次の一打鍵を大文字として扱う前置キー (sticky shift)。**既定は空 (割り当てなし)**。
+    ///
+    /// `;k` `;a` と打てば `▽か` に入り、`▽かんが` のあと `;e` と打てば送り仮名が
+    /// 始まる。Shift の同時押しを使わずに SKK を回すための道で、ddskk の
+    /// `skk-sticky-key` と同じ考え方。区切りを打つ人が決めるという SKK の骨格は
+    /// そのままで、代わりに打鍵が一つ増える。
+    ///
+    /// **かなモードでだけ効く。** ASCII・全角英数では子アプリの持ち物になる。
+    /// `/` の ASCII 見出し語 (abbrev) の途中でも効かない — あそこは記号をそのまま
+    /// 打つ場所だから。
+    ///
+    /// **既定を空にしてあるのは、割り当てた文字が二度押しでしか打てなくなる**ため。
+    /// `;` に割り当てれば `;` 自身は `;;` になる。Shift の押せる人には打鍵が増える
+    /// だけなので、要る人が選ぶ。
+    ///
+    /// **AZIK では `;` が「っ」なので衝突する** (`behavior.romaji = "azik"`)。
+    /// 前置キーが先に食べるので「っ」が打てなくなる。AZIK と併せるなら別のキーへ。
+    pub sticky: Vec<Key>,
     /// 変換する / 次の候補へ
     pub convert: Vec<Key>,
     /// 前の候補へ
@@ -324,6 +342,7 @@ impl Default for Config {
             hankaku_katakana: vec![Key::Ctrl(0x11)],
             start_conversion: vec![Key::Char('Q')],
             abbrev: vec![Key::Char('/')],
+            sticky: Vec::new(),
             convert: vec![Key::Char(' ')],
             previous: vec![Key::Char('x')],
             complete: vec![Key::Tab],
@@ -369,7 +388,7 @@ impl Config {
     }
 
     /// SKK 自身の操作に割り当てられているキーを節ごとに並べて返す。
-    fn key_slots(&self) -> [&Vec<Key>; 22] {
+    fn key_slots(&self) -> [&Vec<Key>; 23] {
         self.key_bindings().map(|(_, _, keys)| keys)
     }
 
@@ -385,7 +404,7 @@ impl Config {
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 22] {
+    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 23] {
         [
             ("kana", "かなモードへ入る", &self.kana),
             (
@@ -408,6 +427,11 @@ impl Config {
                 &self.start_conversion,
             ),
             ("abbrev", "ASCII の見出し語で変換する", &self.abbrev),
+            (
+                "sticky",
+                "次の一打鍵を大文字として扱う (Shift の代わり)",
+                &self.sticky,
+            ),
             ("convert", "変換する / 次の候補へ", &self.convert),
             ("previous", "前の候補へ", &self.previous),
             (
@@ -502,6 +526,7 @@ impl Config {
                     "hankaku_katakana" => &mut cfg.hankaku_katakana,
                     "start_conversion" => &mut cfg.start_conversion,
                     "abbrev" => &mut cfg.abbrev,
+                    "sticky" => &mut cfg.sticky,
                     "convert" => &mut cfg.convert,
                     "previous" => &mut cfg.previous,
                     "complete" => &mut cfg.complete,
@@ -686,6 +711,23 @@ impl Config {
                     other => {
                         skip_or_reject(on, &mut notes, &format!("snippets.{other} は知らない項目"))?
                     }
+                }
+            }
+        }
+
+        // AZIK は `;` や `:` を一打鍵でかなにする。前置キー (sticky) はそれより先に
+        // 打鍵を食べるので、両方を既定のままにすると「っ」が打てなくなる。**設定を
+        // 黙って書き換えず、断りだけ出す** — どちらを取るかは打つ人が決めること。
+        if cfg.azik {
+            let single = crate::romaji::azik_single_keys();
+            for k in &cfg.sticky {
+                if let Key::Char(c) = k
+                    && let Some((_, kana)) = single.iter().find(|(s, _)| s == c)
+                {
+                    notes.push(format!(
+                        "keys.sticky の \"{c}\" は AZIK では「{kana}」。前置キーが先に効くので\
+                         「{kana}」が打てない (別のキーへ移すか sticky = [] で外す)"
+                    ));
                 }
             }
         }
@@ -1235,6 +1277,44 @@ mod tests {
                 "検査では誤りにする: {text:?}"
             );
         }
+    }
+
+    /// 前置キーは既定で割り当てが無い。書いた人だけが使う。
+    #[test]
+    fn the_sticky_key_is_unbound_until_asked_for() {
+        assert!(Config::default().sticky.is_empty());
+        let cfg = Config::parse("[keys]\nsticky = \";\"\n").unwrap();
+        assert_eq!(cfg.sticky, vec![Key::Char(';')]);
+    }
+
+    /// AZIK は `;` を「っ」に使うので、そこへ前置キーを置くと食い合う。
+    ///
+    /// **設定を黙って書き換えず、断りだけ出す。** どちらを取るかは打つ人が決める。
+    #[test]
+    fn azik_says_when_the_sticky_key_is_taken() {
+        let (_, notes) = Config::parse_with(
+            "[behavior]\nromaji = \"azik\"\n[keys]\nsticky = \";\"\n",
+            OnUnknown::Skip,
+        )
+        .unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("sticky") && n.contains('っ')),
+            "AZIK の「っ」と食い合うことを断るはず: {notes:?}"
+        );
+
+        // 前置キーを別のキーに置けば何も言わない
+        let (_, notes) = Config::parse_with(
+            "[behavior]\nromaji = \"azik\"\n[keys]\nsticky = \"]\"\n",
+            OnUnknown::Skip,
+        )
+        .unwrap();
+        assert!(notes.is_empty(), "移したのに断りが出た: {notes:?}");
+
+        // 標準のローマ字では `;` に別の意味が無いので、断りも出ない
+        let (_, notes) = Config::parse_with("[keys]\nsticky = \";\"\n", OnUnknown::Skip).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     /// 同梱の見本が、書いてあるとおりに動くこと。

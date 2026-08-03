@@ -458,6 +458,11 @@ pub struct Skk {
     okuri_kana: String,
     /// `/` で始めた ASCII 見出し語の入力中か。
     abbrev: bool,
+    /// 前置キー (sticky shift) を受け取って、次の一打鍵を待っている状態。
+    ///
+    /// 立っている間は打ちかけと同じ扱いにする ([`Skk::is_idle`])。ここで ASCII へ
+    /// 降ろされると、次の打鍵が大文字のまま子アプリへ抜けてしまうため。
+    sticky: bool,
     candidates: Vec<Choice>,
     cand_index: usize,
     /// 見出し語から取り出した数字 (数値変換で `#` に戻す)
@@ -518,6 +523,7 @@ impl Skk {
             okuri_head: None,
             okuri_kana: String::new(),
             abbrev: false,
+            sticky: false,
             candidates: Vec::new(),
             cand_index: 0,
             numbers: Vec::new(),
@@ -639,6 +645,28 @@ impl Skk {
             && self.phase == Phase::Direct
             && self.romaji.is_empty()
             && self.filling.is_none()
+            && !self.sticky
+    }
+
+    /// 前置キー (sticky) を受け取っている間に出す印。立っていなければ空。
+    ///
+    /// **押した手応えが要る。** 次の一打鍵まで画面が動かないと、効いたのかどうかが
+    /// 分からない。印は ddskk が実際に入れるものと同じにしてある — かなモードでは
+    /// `▽` (ここから読み)、`▽` の途中では `*` (ここから送り仮名)。意味がそのまま
+    /// 印になるので、記号を新しく覚えなくて済む。
+    ///
+    /// 送り仮名を打っている最中は出さない。`*` はもう出ているし、そこでもう一度
+    /// 押しても送りの頭は動かないため。
+    fn sticky_hint(&self) -> &'static str {
+        if !self.sticky {
+            return "";
+        }
+        match self.phase {
+            // ▼ で押したときは、確定して次の見出し語に入る予告になる
+            Phase::Direct | Phase::Selecting => "▽",
+            Phase::Composing if self.okuri_head.is_none() => "*",
+            Phase::Composing => "",
+        }
     }
 
     /// 入力途中の表示。空なら重ね描きするものは無い。
@@ -701,6 +729,12 @@ impl Skk {
         }
         match self.phase {
             Phase::Direct => {
+                if !self.sticky_hint().is_empty() {
+                    segs.push(Segment {
+                        style: Style::Reading,
+                        text: self.sticky_hint().to_string(),
+                    });
+                }
                 if !self.romaji.is_empty() {
                     segs.push(Segment {
                         style: Style::Romaji,
@@ -715,9 +749,13 @@ impl Skk {
                 let (before, after) = self.reading.split_at(self.read_cursor);
                 let mut head = String::from("▽");
                 head.push_str(&self.shown_reading(before));
-                if after.is_empty() && self.okuri_head.is_some() {
-                    head.push('*');
-                    head.push_str(&self.okuri_kana);
+                if after.is_empty() {
+                    if self.okuri_head.is_some() {
+                        head.push('*');
+                        head.push_str(&self.okuri_kana);
+                    } else {
+                        head.push_str(self.sticky_hint());
+                    }
                 }
                 segs.push(Segment {
                     style: Style::Reading,
@@ -738,6 +776,8 @@ impl Skk {
                     if self.okuri_head.is_some() {
                         tail.push('*');
                         tail.push_str(&self.okuri_kana);
+                    } else {
+                        tail.push_str(self.sticky_hint());
                     }
                     if !tail.is_empty() {
                         segs.push(Segment {
@@ -758,6 +798,12 @@ impl Skk {
                     style: Style::Candidate,
                     text: format!("▼{}{}{}", cur, self.okuri_kana, self.auto_suffix),
                 });
+                if !self.sticky_hint().is_empty() {
+                    segs.push(Segment {
+                        style: Style::Reading,
+                        text: self.sticky_hint().to_string(),
+                    });
+                }
                 if let Some(annot) = self
                     .current_candidate()
                     .and_then(|c| c.cand.annotation.clone())
@@ -879,17 +925,19 @@ impl Skk {
     /// いま打ちかけのものを一続きの文字にする (定型文を埋めている最中の表示用)。
     fn pending_text(&self) -> String {
         match self.phase {
-            Phase::Direct => self.romaji.pending().to_string(),
+            Phase::Direct => format!("{}{}", self.sticky_hint(), self.romaji.pending()),
             Phase::Composing => format!(
-                "▽{}{}",
+                "▽{}{}{}",
                 self.shown_reading(&self.reading),
-                self.romaji.pending()
+                self.romaji.pending(),
+                self.sticky_hint()
             ),
             Phase::Selecting => format!(
-                "▼{}",
+                "▼{}{}",
                 self.current_candidate()
                     .map(|c| self.shown(c))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                self.sticky_hint()
             ),
         }
     }
@@ -1272,11 +1320,42 @@ impl Skk {
     }
 
     fn dispatch(&mut self, key: Key) -> Response {
+        let Some(key) = self.take_sticky(key) else {
+            // 前置キーを受け取っただけ。画面は動かさず次の一打鍵を待つ。
+            return Response::default();
+        };
         match self.phase {
             Phase::Direct => self.handle_direct(key),
             Phase::Composing => self.handle_composing(key),
             Phase::Selecting => self.handle_selecting(key),
         }
+    }
+
+    /// 前置キー (sticky shift) を解いて、実際に処理する打鍵を返す。
+    ///
+    /// Shift の同時押しがしていること — 「ここから読み」「ここから送り仮名」という
+    /// **区切りの宣言** — を、押す順番に置き換えたもの。宣言そのものは無くならない
+    /// (無くせば読みの範囲を推し量ることになり、SKK ではなくなる) ので、同時押しと
+    /// 打鍵一つを取り替えているだけ。ddskk の `skk-sticky-key` と同じ考え方。
+    ///
+    /// 前置キーを受け取った打鍵では何も起こさない (`None`)。続けてもう一度押せば
+    /// その文字が出る (`;;` → `;`) — 記号は大文字にしても変わらないので、素通し
+    /// するだけで済む。
+    fn take_sticky(&mut self, key: Key) -> Option<Key> {
+        if self.sticky {
+            self.sticky = false;
+            return Some(match key {
+                Key::Char(c) => Key::Char(c.to_ascii_uppercase()),
+                k => k,
+            });
+        }
+        // かなモードでだけ効かせる。ASCII・全角英数のキーは子アプリの持ち物で、
+        // `/` の ASCII 見出し語では記号をそのまま打ちたい。
+        if self.mode.is_kana() && !self.abbrev && self.cfg.sticky.contains(&key) {
+            self.sticky = true;
+            return None;
+        }
+        Some(key)
     }
 
     /// 候補が尽きたので辞書登録を始める。
@@ -2301,6 +2380,18 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    /// 前置キーを `;` に割り当てた Skk。
+    ///
+    /// **既定は割り当てなし**なので、前置キーを試すものはここから作る。
+    fn skk_with_sticky(entries: &[(&str, &str)]) -> Skk {
+        let mut skk = skk_with(entries);
+        skk.set_config(Config {
+            sticky: vec![Key::Char(';')],
+            ..Config::default()
+        });
+        skk
+    }
+
     /// 打ち込み中の内容だけ。モードの印は編集の対象ではないので外す。
     fn preedit_text(skk: &Skk) -> String {
         let p = skk.preedit();
@@ -2346,6 +2437,134 @@ mod tests {
             })
             .map(|s| s.text)
             .collect()
+    }
+
+    /// 前置キーを押した時点で、どこを切るのかが画面に出る。
+    ///
+    /// **押した手応えが無いと、効いたのかどうか分からない。** 印は ddskk が実際に
+    /// 入れるものと同じ (`▽` = ここから読み、`*` = ここから送り仮名)。
+    #[test]
+    fn sticky_shows_where_it_will_cut() {
+        let mut skk = skk_with_sticky(&[("かんがe", "/考/")]);
+        skk.handle(Key::Ctrl(0x0a));
+
+        typed(&mut skk, ";");
+        assert_eq!(preedit_text(&skk), "▽");
+        typed(&mut skk, "kanga");
+        assert_eq!(preedit_text(&skk), "▽かんが");
+
+        typed(&mut skk, ";");
+        assert_eq!(preedit_text(&skk), "▽かんが*");
+        typed(&mut skk, "e");
+        assert_eq!(preedit_text(&skk), "▼考え");
+
+        // ▼ で押したときは、確定して次の見出し語に入る予告
+        typed(&mut skk, ";");
+        assert_eq!(preedit_text(&skk), "▼考え▽");
+        typed(&mut skk, "kanga");
+        assert_eq!(preedit_text(&skk), "▽かんが");
+
+        // 打ちかけのローマ字があっても、印は読みの頭に付く
+        skk.handle(Key::Ctrl(0x07));
+        typed(&mut skk, "k;");
+        assert_eq!(preedit_text(&skk), "▽k");
+    }
+
+    /// 前置キーと Shift の結果は、**打ちかけのローマ字があっても**食い違わない。
+    ///
+    /// ddskk はここを取りこぼした前例がある (skk-dev/ddskk#197 — `;has;su` と打つと
+    /// 打ちかけの `s` が消え、`HasSuru` と結果が変わる)。読み替えを打鍵の入口だけで
+    /// 済ませ、下流を一切分岐させていないので、両者がずれる余地が無い。
+    #[test]
+    fn sticky_and_shift_agree_even_mid_romaji() {
+        let dict = &[("はしr", "/走/"), ("かんじ", "/漢字/")];
+        for (shift, sticky) in [
+            ("HasSuru", ";has;suru"), // 送り仮名の頭が促音になる (#197 の打鍵列)
+            ("HasiRu", ";hasi;ru"),
+            ("Kanji ", ";kanji "),
+        ] {
+            let mut a = skk_with_sticky(dict);
+            a.handle(Key::Ctrl(0x0a));
+            let out_a = typed(&mut a, shift);
+            let mut b = skk_with_sticky(dict);
+            b.handle(Key::Ctrl(0x0a));
+            let out_b = typed(&mut b, sticky);
+            assert_eq!(
+                (out_a, preedit_text(&a)),
+                (out_b, preedit_text(&b)),
+                "{shift} と {sticky} で結果が違う"
+            );
+        }
+    }
+
+    /// 前置キー (sticky) は Shift の同時押しと同じ結果になる。
+    #[test]
+    fn sticky_takes_the_place_of_shift() {
+        let mut skk = skk_with_sticky(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, ";kanji");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+    }
+
+    /// 送り仮名の始まりも同じ手で示せる (`UgoKu` と打ったのと同じ)。
+    #[test]
+    fn sticky_starts_the_okuri() {
+        let mut skk = skk_with_sticky(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, ";ugo;ku");
+        assert_eq!(preedit_text(&skk), "[登録:うご*く]");
+    }
+
+    /// 二度押せばその文字が出る。記号は大文字にしても変わらないため。
+    #[test]
+    fn sticky_pressed_twice_types_the_character() {
+        let mut skk = skk_with_sticky(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, ";;"), ";");
+        assert!(preedit_text(&skk).is_empty());
+    }
+
+    /// かなモードの外では前置しない。あそこのキーは子アプリの持ち物。
+    #[test]
+    fn sticky_does_not_reach_the_ascii_modes() {
+        let mut skk = skk_with_sticky(&[]);
+        assert_eq!(typed(&mut skk, ";a"), ";a");
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "L");
+        assert_eq!(typed(&mut skk, ";a"), "；ａ");
+    }
+
+    /// `/` の ASCII 見出し語でも前置しない。あそこは記号をそのまま打つ場所。
+    #[test]
+    fn sticky_does_not_reach_the_ascii_reading() {
+        let mut skk = skk_with_sticky(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "/c;;");
+        assert_eq!(preedit_text(&skk), "▽c;;");
+    }
+
+    /// 前置キーを持っている間は打ちかけと同じ。ここで ASCII へ降ろされると、
+    /// 次の打鍵が大文字のまま子アプリへ抜けてしまう。
+    #[test]
+    fn sticky_is_not_idle() {
+        let mut skk = skk_with_sticky(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, ";");
+        assert!(!skk.leave_to_ascii());
+        assert_eq!(typed(&mut skk, "ka"), "");
+        assert_eq!(preedit_text(&skk), "▽か");
+    }
+
+    /// 既定では割り当てが無いので、`;` はただの記号のまま。
+    #[test]
+    fn sticky_is_off_until_it_is_asked_for() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, ";k"), ";");
+        // `;` はその場で出て、`k` は打ちかけのローマ字として残る
+        assert_eq!(preedit_text(&skk), "k");
     }
 
     #[test]
