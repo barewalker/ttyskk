@@ -850,8 +850,13 @@ fn main() -> Result<()> {
                 let path = config::config_path();
                 // **ここだけは知らない項目も誤りとして扱う。** 打ち間違いを見つける
                 // ために呼ぶ命令なので、黙って読み飛ばしては役に立たない。
-                Config::load_with(&path, config::OnUnknown::Reject)
+                let (_, notes) = Config::load_with(&path, config::OnUnknown::Reject)
                     .with_context(|| format!("{}", path.display()))?;
+                // 誤りではないが、食い合っている割り当ての断り。**見つけるために
+                // 呼ぶ命令なので、ここで黙ってはいけない。**
+                for note in &notes {
+                    println!("ttyskk: {note}");
+                }
                 if path.exists() {
                     println!("ttyskk: {} に問題なし", path.display());
                 } else {

@@ -381,6 +381,24 @@ const AZIK_DIRECT: &[(&str, &str)] = &[
     ("fp", "ふぉー"),
 ];
 
+/// AZIK で**一打鍵そのものがかなになる**綴りと、その行き先 (`;` → 「っ」)。
+///
+/// キーの割り当てが AZIK と食い合っていないかを確かめるのに使う
+/// ([`crate::config::Config::sticky`])。表を二重に持たないよう、変換表そのもの
+/// から拾う。
+pub fn azik_single_keys() -> Vec<(char, &'static str)> {
+    AZIK_DIRECT
+        .iter()
+        .filter_map(|(spell, kana)| {
+            let mut it = spell.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) => Some((c, *kana)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// AZIK の変換表。標準表から組み立てるので、起動時に一度だけ作る。
 fn azik_table() -> &'static [(String, String)] {
     static CACHE: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
