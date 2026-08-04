@@ -77,7 +77,8 @@ fn usage_head() -> String {
     TTYSKK_CONFIG        設定ファイルのパス
     TTYSKK_MIGEMO_INDEX  migemo の索引のパス
     TTYSKK_NO_CURSOR     モードに応じたカーソルの形・色の変更をやめる
-    TTYSKK_ACTIVE        ttyskk の中にいる印。あるときは包まずに子をそのまま起こす
+    TTYSKK_ACTIVE        ttyskk の中にいる印 (値は包んでいる ttyskk の PID)。
+                         あるときは包まずに子をそのまま起こす。--reload の宛先
     TTYSKK_DEBUG         不具合を追う記録の書き出し先
     XDG_CONFIG_HOME      設定の置き場所 (既定 ~/.config)
     XDG_DATA_HOME        利用者辞書と定型文の置き場所 (既定 ~/.local/share)
@@ -186,6 +187,144 @@ enum Event {
     SnippetsChanged,
     /// 新しいバイナリへ差し替えるよう頼まれた (`ttyskk --reload`)
     Reload,
+}
+
+/// 差し替えの申し送り。`<擬似端末の fd>:<子の PID>` を入れる。
+///
+/// **擬似端末を開き直さない。** 開き直せば子との繋がりが切れてしまう。`exec` は
+/// プロセスの中身を入れ替えるだけで、開いてあるファイル記述子も PID も子との
+/// 親子関係もそのまま残るので、番号さえ伝えれば次の版がそれを拾える。
+const HANDOVER_ENV: &str = "TTYSKK_HANDOVER";
+
+/// 擬似端末の親側。自分で開いたものと、差し替えで引き継いだものを同じに扱う。
+struct Master {
+    fd: std::os::fd::RawFd,
+    /// 自分で開いたときの持ち主。落とすと fd が閉じるので抱えておく。
+    _owner: Option<Box<dyn portable_pty::MasterPty + Send>>,
+}
+
+impl Master {
+    fn opened(m: Box<dyn portable_pty::MasterPty + Send>) -> Result<Self> {
+        let fd = m.as_raw_fd().context("擬似端末の fd を取れない")?;
+        Ok(Master {
+            fd,
+            _owner: Some(m),
+        })
+    }
+
+    /// 差し替えで受け取った fd。
+    fn inherited(fd: std::os::fd::RawFd) -> Self {
+        Master { fd, _owner: None }
+    }
+
+    /// 読み書きの口。**複製を返す** — 元の fd は差し替えのときに渡すので、
+    /// 読み書き側が閉じてしまっては困る。
+    fn stream(&self) -> Result<std::fs::File> {
+        use std::os::fd::FromRawFd;
+        let dup = unsafe { libc::dup(self.fd) };
+        if dup < 0 {
+            return Err(anyhow::Error::new(std::io::Error::last_os_error())
+                .context("擬似端末の fd を複製できない"));
+        }
+        Ok(unsafe { std::fs::File::from_raw_fd(dup) })
+    }
+
+    /// 大きさを教える。子には `SIGWINCH` が飛ぶ。
+    fn resize(&self, rows: u16, cols: u16) {
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe { libc::ioctl(self.fd, libc::TIOCSWINSZ, &ws) };
+    }
+}
+
+/// 包んでいる子。差し替えでは PID だけを引き継ぐ。
+enum Kid {
+    /// 自分で起こしたもの。
+    Spawned(Box<dyn portable_pty::Child + Send + Sync>),
+    /// 差し替えで引き継いだもの。**PID は変わらない** — `exec` は中身を入れ替える
+    /// だけなので、親子の関係もそのまま残る。
+    Inherited(libc::pid_t),
+}
+
+impl Kid {
+    fn pid(&self) -> Option<libc::pid_t> {
+        match self {
+            Kid::Spawned(c) => c.process_id().map(|p| p as libc::pid_t),
+            Kid::Inherited(p) => Some(*p),
+        }
+    }
+
+    /// 終わるまで待って、終了コードを返す。
+    fn wait(&mut self) -> Result<i32> {
+        match self {
+            Kid::Spawned(c) => {
+                Ok(c.wait().context("子プロセスの終了を待てない")?.exit_code() as i32)
+            }
+            Kid::Inherited(pid) => {
+                let mut status = 0;
+                if unsafe { libc::waitpid(*pid, &mut status, 0) } < 0 {
+                    return Err(anyhow::Error::new(std::io::Error::last_os_error())
+                        .context("子プロセスの終了を待てない"));
+                }
+                Ok(if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else if libc::WIFSIGNALED(status) {
+                    128 + libc::WTERMSIG(status)
+                } else {
+                    0
+                })
+            }
+        }
+    }
+}
+
+/// 擬似端末と子を抱えたまま、自分だけを新しいバイナリへ入れ替える。
+///
+/// **成功すれば戻らない。** 戻ってきたのは差し替えられなかったということなので、
+/// 呼び手はそのまま元の姿で動き続ける (端末も raw に戻してある)。子を道連れに
+/// するくらいなら、差し替えは次の機会でよい。
+///
+/// `exe` は**起動時に控えておいたパス**を渡すこと。`/proc/self/exe` は入れ替え前の
+/// 実体を指し続けるので (`cargo install` は別のファイルを作って置き換える)、
+/// そこから取ると何度やっても古い版が起きる。
+fn hand_over(exe: &Path, master: &Master, pid: libc::pid_t, raw: &RawGuard) -> anyhow::Error {
+    use std::os::unix::process::CommandExt;
+
+    // 端末を元の設定へ戻す。**次の版は起動時に `tcgetattr` で原本を控える**ので、
+    // raw のまま渡すと「raw が原本」になり、抜けたときに戻せなくなる。
+    raw.suspend();
+
+    // `exec` をまたいで fd を残す
+    let flags = unsafe { libc::fcntl(master.fd, libc::F_GETFD) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(master.fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+    }
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let err = std::process::Command::new(exe)
+        .args(&args)
+        .env(HANDOVER_ENV, format!("{}:{}", master.fd, pid))
+        .exec();
+
+    // ここへ来たのは失敗したとき。開いたものを元の閉じ方に戻し、raw へ戻る。
+    if flags >= 0 {
+        unsafe { libc::fcntl(master.fd, libc::F_SETFD, flags) };
+    }
+    raw.resume();
+    anyhow::Error::new(err).context(format!("{} へ差し替えられない", exe.display()))
+}
+
+/// 差し替えの申し送りを読む。**読んだら消す** — 子がさらに ttyskk を起こしたときに、
+/// 他人の擬似端末を引き継がせてはいけない。
+fn take_handover() -> Option<(std::os::fd::RawFd, libc::pid_t)> {
+    let raw = std::env::var(HANDOVER_ENV).ok()?;
+    unsafe { std::env::remove_var(HANDOVER_ENV) };
+    let (fd, pid) = raw.split_once(':')?;
+    Some((fd.parse().ok()?, pid.parse().ok()?))
 }
 
 /// 包んでいる ttyskk に、新しいバイナリへ差し替えるよう頼む。
@@ -960,6 +1099,13 @@ fn main() -> Result<()> {
 
     let mut skk = Skk::new(dict, cfg);
 
+    // 差し替えの申し送り。読んだ時点で環境から消えるので、子へは漏れない。
+    let handover = take_handover();
+    // 自分の置き場所を**いま**控える。`/proc/self/exe` は入れ替え前の実体を指し
+    // 続けるので (`cargo install` は別のファイルを作って置き換える)、差し替えの
+    // ときにそこから取ると何度やっても古い版が起きる。
+    let exe = std::env::current_exe().context("自分の置き場所が分からない")?;
+
     let (rows, cols) = winsize();
 
     // 子を起こす前に、raw モードにしてカーソル位置を尋ねる。
@@ -986,43 +1132,53 @@ fn main() -> Result<()> {
         None => screen.set_cursor(rows as usize - 1, 0),
     }
 
-    let pty = native_pty_system();
-    let pair = pty
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .context("擬似端末を開けない")?;
+    // 差し替えで来たのなら、擬似端末も子もそのまま引き継ぐ。開き直せば繋がりが
+    // 切れて、せっかく生かした子が孤児になる。
+    let (master, mut child) = match handover {
+        Some((fd, pid)) => {
+            trace.log(format_args!(
+                "--- 差し替えで起きた (擬似端末 fd {fd} 子 {pid})"
+            ));
+            (Master::inherited(fd), Kid::Inherited(pid))
+        }
+        None => {
+            let pty = native_pty_system();
+            let pair = pty
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .context("擬似端末を開けない")?;
 
-    let mut cmd = CommandBuilder::new(&command[0]);
-    for a in &command[1..] {
-        cmd.arg(a);
-    }
-    for (k, v) in std::env::vars_os() {
-        cmd.env(k, v);
-    }
-    // 子の中でうっかり ttyskk を起こしても包み直さないための目印。
-    //
-    // **値は自分の PID。** 包まれている側から `ttyskk --reload` で差し替えを頼む
-    // ときの宛先になる ([`ask_the_wrapper_to_reload`])。包み直しの判定は有無しか
-    // 見ないので、古い版が入れた `1` と混ざっても困らない。
-    cmd.env(ACTIVE_ENV, std::process::id().to_string());
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
-    }
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .with_context(|| format!("起動できない: {}", command[0]))?;
-    drop(pair.slave);
+            let mut cmd = CommandBuilder::new(&command[0]);
+            for a in &command[1..] {
+                cmd.arg(a);
+            }
+            for (k, v) in std::env::vars_os() {
+                cmd.env(k, v);
+            }
+            // 子の中でうっかり ttyskk を起こしても包み直さないための目印。
+            //
+            // **値は自分の PID。** 包まれている側から `ttyskk --reload` で差し替えを
+            // 頼むときの宛先になる ([`ask_the_wrapper_to_reload`])。包み直しの判定は
+            // 有無しか見ないので、古い版が入れた `1` と混ざっても困らない。
+            cmd.env(ACTIVE_ENV, std::process::id().to_string());
+            if let Ok(cwd) = std::env::current_dir() {
+                cmd.cwd(cwd);
+            }
+            let child = pair
+                .slave
+                .spawn_command(cmd)
+                .with_context(|| format!("起動できない: {}", command[0]))?;
+            drop(pair.slave);
+            (Master::opened(pair.master)?, Kid::Spawned(child))
+        }
+    };
 
-    let mut writer = pair.master.take_writer().context("擬似端末に書けない")?;
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .context("擬似端末を読めない")?;
+    let mut writer = master.stream().context("擬似端末に書けない")?;
+    let mut reader = master.stream().context("擬似端末を読めない")?;
 
     let (tx, rx): (Sender<Event>, Receiver<Event>) = channel();
 
@@ -1337,6 +1493,22 @@ fn main() -> Result<()> {
                     trace.log(format_args!("  切り出し {} 個 {:?}", keys.len(), keys));
                 }
                 for key in keys {
+                    // 差し替えは入力の操作ではなく**包んでいる側の操作**なので、
+                    // SKK へ渡す前にここで受け取る。モードは問わない (ASCII で
+                    // 使っているときこそ入れ替えたい)。
+                    //
+                    // **打ちかけがあるときは素通しする。** 変換や辞書登録の途中で
+                    // 入れ替えると打ち込んだものが消えるので、そのときは普段の
+                    // 意味で使わせる。
+                    if !skk.config().reload.is_empty()
+                        && skk.config().reload.contains(&key)
+                        && skk.is_idle()
+                    {
+                        // いまの打鍵の後始末 (重ね描きの消去・子への書き出し) が
+                        // 済んでから差し替わるように、行列へ積む。
+                        let _ = tx.send(Event::Reload);
+                        continue;
+                    }
                     let r = skk.handle(key);
                     // 確定したなら何か覚えた見込みがある。手が止まったら書き出す。
                     unsaved |= !r.commit.is_empty();
@@ -1443,12 +1615,7 @@ fn main() -> Result<()> {
             }
             Event::Winch => {
                 let (r, c) = winsize();
-                let _ = pair.master.resize(PtySize {
-                    rows: r,
-                    cols: c,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
+                master.resize(r, c);
                 screen.resize(r as usize, c as usize);
                 // 座標が意味を失うので、消さずに忘れる (子が描き直す)
                 overlay.forget();
@@ -1466,10 +1633,33 @@ fn main() -> Result<()> {
                 }
             }
             Event::Reload => {
-                // **まだ差し替えない。** 合図が端末をまたいで届くことと、主ループが
-                // 受け取れることを先に確かめるための段。実際の入れ替え (擬似端末と
-                // 子を抱えたままの exec) はこの次。
                 trace.log(format_args!("--- 差し替えを頼まれた"));
+                // 重ね描きを消してから渡す。**次の版は控えを持っていない**ので、
+                // 残したまま入れ替えると誰にも消せない染みになる。
+                if touched {
+                    let mut out = overlay.erase(&screen);
+                    if show_cursor_color {
+                        out.extend_from_slice(CURSOR_RESET);
+                    }
+                    out.extend_from_slice(b"\x1b[0m\x1b[?25h");
+                    let _ = stdout.write_all(&out);
+                    let _ = stdout.flush();
+                }
+                // 覚えたものを落としておく。次の版は起きたときに読み直す。
+                if let Err(e) = skk.dict_mut().save() {
+                    trace.log(format_args!("--- 利用者辞書を保存できない: {e}"));
+                }
+                match child.pid() {
+                    // 戻ってきたのは差し替えられなかったということ。**子を道連れに
+                    // するくらいなら、そのまま動き続ける。**
+                    Some(pid) => {
+                        let e = hand_over(&exe, &master, pid, &raw);
+                        trace.log(format_args!("--- 差し替えられない: {e:#}"));
+                        // 消した重ね描きは次の打鍵で描き直される
+                        overlay.forget();
+                    }
+                    None => trace.log(format_args!("--- 子の PID が分からず差し替えられない")),
+                }
             }
             Event::DictChanged => {
                 // 自分が保存した直後なら、目印が一致するので読み直しは起きない
@@ -1514,9 +1704,9 @@ fn main() -> Result<()> {
         eprintln!("ttyskk: 利用者辞書を保存できない: {e}");
     }
 
-    let status = child.wait().context("子プロセスの終了を待てない")?;
+    let code = child.wait()?;
     drop(raw);
-    std::process::exit(status.exit_code() as i32);
+    std::process::exit(code);
 }
 
 #[cfg(test)]

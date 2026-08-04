@@ -265,6 +265,9 @@ fn named_key(code: u32, mods: u32) -> Option<Key> {
         0x20 if ctrl => Some(Key::Ctrl(0x00)),
         // a-z
         c @ 0x61..=0x7a if ctrl => Some(Key::Ctrl(c as u8 & 0x1f)),
+        // @ \ ] ^ _ — Ctrl は記号にも付く (`C-]` = 0x1d)。
+        // `[` は入れない。Ctrl+[ は Esc そのもので、設定でも書けないようにしてある。
+        c @ (0x40 | 0x5c..=0x5f) if ctrl => Some(Key::Ctrl(c as u8 & 0x1f)),
         // Tab
         0x09 if shift && !ctrl => Some(Key::ShiftTab),
         _ => None,
@@ -447,6 +450,22 @@ mod tests {
     fn lone_escape() {
         let mut d = decoder();
         assert_eq!(d.feed(b"\x1b"), vec![Key::Esc]);
+    }
+
+    /// 記号に付いた Ctrl も、拡張鍵盤プロトコルの下で素の形へ戻ること。
+    ///
+    /// `C-]` は「子アプリから奪っても痛くないキー」として `keys.reload` の置き場に
+    /// なる。奪う相手が Claude Code なのだから、その下で効かなければ意味が無い。
+    #[test]
+    fn decodes_kitty_control_symbols() {
+        let cfg = Config::parse("[keys]\nreload = \"C-]\"\n").unwrap();
+        let mut d = Decoder::new(&cfg);
+        assert_eq!(d.feed(b"\x1b[93;5u"), vec![Key::Ctrl(0x1d)]); // Ctrl+]
+        // 素の端末では制御文字そのものが届く
+        assert_eq!(d.feed(b"\x1d"), vec![Key::Ctrl(0x1d)]);
+        // 割り当てが無ければ元のバイト列のまま子へ渡す
+        let mut plain = decoder();
+        assert_ne!(plain.feed(b"\x1b[93;5u"), vec![Key::Ctrl(0x1d)]);
     }
 
     /// Claude Code のように kitty 鍵盤プロトコルを有効にするアプリの下でも
