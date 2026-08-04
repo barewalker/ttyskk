@@ -1676,12 +1676,27 @@ impl Skk {
                 Response::default()
             }
             Key::Char(c) if c.is_ascii_uppercase() && !self.reading.is_empty() => {
-                // 送り仮名の始まり
+                // 送り仮名の始まり。
+                //
+                // **打ちかけのローマ字から出るかなは、見出し語の側。** 「か」を打って
+                // `n` が残っているところへ `J` が来たら、`n`+`j` の「ん」は見出し語に
+                // 付いて「かん」になり、送り仮名は `j` から始まる (辞書の見出しは
+                // `かんj`)。促音も同じで、`HasSuru` は見出し「はっ」送り「する」、
+                // 見出しは `はっs` になる。
+                //
+                // ここを送り仮名に入れると見出しが `かj` や `はs` になり、どの辞書にも
+                // 当たらない。どこで切るかは打つ人が決めていて、`KaTta` (見出し `かt`
+                // 送り「った」) と `KatTa` (見出し `かっt` 送り「た」) は別物になる。
+                let carry_to_reading = self.okuri_head.is_none() && !self.romaji.is_empty();
                 if self.okuri_head.is_none() {
                     self.okuri_head = Some(c.to_ascii_lowercase());
                 }
                 let kana = self.romaji.feed(c.to_ascii_lowercase());
-                if !kana.is_empty() {
+                if kana.is_empty() {
+                    // まだローマ字が組み上がっていない。送り仮名はこの先から。
+                } else if carry_to_reading {
+                    self.insert_reading(&kana);
+                } else {
                     self.okuri_kana.push_str(&kana);
                     self.start_conversion();
                 }
@@ -2495,6 +2510,56 @@ mod tests {
                 "{shift} と {sticky} で結果が違う"
             );
         }
+    }
+
+    /// 打ちかけのローマ字から出るかなは、**見出し語の側**に付く。
+    ///
+    /// 「か」を打って `n` が残っているところへ `J` が来たら、`n`+`j` の「ん」は
+    /// 見出し語について「かん」になり、送り仮名は `j` から始まる。辞書の見出しは
+    /// `かんj`。ここを送り仮名に入れると `かj` になり、どの辞書にも当たらない。
+    ///
+    /// **撥音・促音を含む送りあり語がまるごと引けなくなる**ところだった。感じる・
+    /// 信ずる・発する・察する・欲する — どれも普通の語で、他の打ち方では出せない。
+    #[test]
+    fn the_pending_romaji_belongs_to_the_reading() {
+        let mut skk = skk_with(&[("かんj", "/感/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "KanJi"), "");
+        assert_eq!(preedit_text(&skk), "▼感じ");
+
+        let mut skk = skk_with(&[("はっs", "/発/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "HasSuru"), "発する");
+    }
+
+    /// どこで切るかは打つ人が決める。**同じ語でも打ち方で見出しが変わる。**
+    ///
+    /// `KaTta` は見出し `かt` 送り「った」、`KatTa` は見出し `かっt` 送り「た」。
+    /// 促音を見出し語に入れるか送り仮名に入れるかを、Shift をどちらの子音に置くかで
+    /// 打ち分ける。取り違えると勝った・買った・言った の類が引けなくなる。
+    #[test]
+    fn where_the_shift_falls_decides_where_to_cut() {
+        let dict = &[
+            ("かt", "/勝/"),
+            ("かっt", "/買/"),
+            ("はっs", "/発/"),
+            ("はs", "/端/"),
+        ];
+
+        let mut skk = skk_with(dict);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "KaTta"), "");
+        assert_eq!(preedit_text(&skk), "▼勝った");
+
+        let mut skk = skk_with(dict);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "KatTa"), "");
+        assert_eq!(preedit_text(&skk), "▼買た");
+
+        // 送り仮名の頭が促音になる打ち方は、見出しが `はs` のまま
+        let mut skk = skk_with(dict);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "HaSsuru"), "端っする");
     }
 
     /// 前置キー (sticky) は Shift の同時押しと同じ結果になる。
