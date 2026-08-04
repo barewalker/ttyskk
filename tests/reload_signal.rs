@@ -86,18 +86,20 @@ fn the_reload_signal_reaches_the_wrapper() {
         w.flush().expect("流せない");
     }
 
-    // 記録に出るまで待つ
+    // **両方が揃うまで待つ。** 頼む側の断りは合図を送ったあとに出るので、記録だけを
+    // 見て抜けると、擬似端末を通ってくる文字がまだ届いていないことがある。
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut logged = String::new();
+    let mut out = String::new();
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
         logged = std::fs::read_to_string(&log).unwrap_or_default();
-        if logged.contains("差し替えを頼まれた") {
+        out = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+        if logged.contains("差し替えを頼まれた") && out.contains("差し替えを頼んだ") {
             break;
         }
     }
 
-    let out = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
     let _ = child.kill();
     let _ = child.wait();
 

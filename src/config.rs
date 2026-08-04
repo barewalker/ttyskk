@@ -318,6 +318,21 @@ pub struct Config {
     /// 使っている。制御キーは端末・シェル・編集器・GUI の入力メソッドのどれかが
     /// 必ず使っているので、環境ごとに空きが違う。決め打ちせず、要る人が選ぶ。
     pub snippet_edit: Vec<Key>,
+    /// 新しい実体へ差し替えるキー。**既定は空 (割り当てなし)**。
+    ///
+    /// `ttyskk --reload` と同じことを、シェルへ戻らずに起こす。子アプリ (編集器や
+    /// エージェント) の中にいるときほど、抜けて打ち直す手間が高くつく。
+    ///
+    /// **どのモードでも効く。** 差し替えは入力の操作ではなく包んでいる側の操作
+    /// なので、ASCII モードでも受け取る。その代わり、ここに挙げたキーは子アプリへ
+    /// 渡らなくなる。子が使っていないキーを選ぶこと (`C-]` や `C-\` はほとんど
+    /// 空いている)。
+    ///
+    /// **打ちかけがあるときは素通しする。** 変換や辞書登録の途中で入れ替えると、
+    /// 打ち込んだものが消える。何も抱えていないときだけ効く。
+    ///
+    /// 既定を空にしてあるのは、押し間違いで端末が入れ替わる驚きが大きいため。
+    pub reload: Vec<Key>,
     /// スニペット (定型文) を書いたファイル。
     ///
     /// 住所や電話番号、メールの署名のような「打つのが面倒で、内容が決まっている」
@@ -376,6 +391,7 @@ impl Default for Config {
             ascii_keys: vec![Key::Esc, Key::Ctrl(0x03)],
             follow_cursor_shape: false,
             snippet_edit: Vec::new(),
+            reload: Vec::new(),
             snippets: Vec::new(),
         }
     }
@@ -388,7 +404,7 @@ impl Config {
     }
 
     /// SKK 自身の操作に割り当てられているキーを節ごとに並べて返す。
-    fn key_slots(&self) -> [&Vec<Key>; 23] {
+    fn key_slots(&self) -> [&Vec<Key>; 24] {
         self.key_bindings().map(|(_, _, keys)| keys)
     }
 
@@ -404,7 +420,7 @@ impl Config {
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 23] {
+    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 24] {
         [
             ("kana", "かなモードへ入る", &self.kana),
             (
@@ -465,6 +481,11 @@ impl Config {
                 &self.backspace,
             ),
             ("snippet_edit", "定型文を編集器で開く", &self.snippet_edit),
+            (
+                "reload",
+                "新しい実体へ差し替える (子はそのまま)",
+                &self.reload,
+            ),
         ]
     }
 
@@ -540,6 +561,7 @@ impl Config {
                     "delete_forward" => &mut cfg.delete_forward,
                     "backspace" => &mut cfg.backspace,
                     "snippet_edit" => &mut cfg.snippet_edit,
+                    "reload" => &mut cfg.reload,
                     "select" => {
                         cfg.select = parse_select(value)?;
                         continue;
@@ -890,11 +912,21 @@ fn parse_key(spec: &str) -> Result<Vec<Key>> {
             let (Some(c), None) = (it.next(), it.next()) else {
                 bail!("{spec} は解せない (Ctrl は一文字にだけ付く)");
             };
-            if !c.is_ascii_alphabetic() {
-                bail!("{spec} は解せない (Ctrl は英字にだけ付く)");
+            // Ctrl は上位 2 ビットを落とす。英字だけでなく `@ \ ] ^ _` にも付く。
+            //
+            // **記号側は空きが多い。** 英字の制御キーは端末・シェル・編集器の
+            // どれかが必ず使っているが、`C-]` や `C-\` を使うアプリはほとんど無い。
+            // 子アプリからキーを奪う割り当て (`keys.reload` など) の逃げ場になる。
+            if c.is_ascii_alphabetic() || matches!(c, '@' | '\\' | ']' | '^' | '_') {
+                // C-a = 0x01 … C-z = 0x1a、C-@ = 0x00、C-\ = 0x1c … C-_ = 0x1f
+                return Ok(vec![Key::Ctrl(c as u8 & 0x1f)]);
             }
-            // C-a = 0x01 … C-z = 0x1a
-            return Ok(vec![Key::Ctrl(c as u8 & 0x1f)]);
+            // `C-[` は 0x1b、つまり Esc そのもの。別のキーのふりをさせず、
+            // 素直に `esc` と書いてもらう。
+            if c == '[' {
+                bail!("{spec} は Esc として届く (esc と書く)");
+            }
+            bail!("{spec} は解せない (Ctrl が付くのは英字と @ \\ ] ^ _ だけ)");
         }
     }
     let mut it = s.chars();
@@ -926,6 +958,8 @@ pub fn key_name(k: &Key) -> String {
         Key::Ctrl(0x00) => "C-space".to_string(),
         // C-a = 0x01 … C-z = 0x1a
         Key::Ctrl(b @ 0x01..=0x1a) => format!("C-{}", (b + 0x60) as char),
+        // C-\ = 0x1c … C-_ = 0x1f
+        Key::Ctrl(b @ 0x1c..=0x1f) => format!("C-{}", (b + 0x40) as char),
         Key::Char(c) => c.to_string(),
         other => format!("{other:?}"),
     }
@@ -1285,6 +1319,38 @@ mod tests {
         assert!(Config::default().sticky.is_empty());
         let cfg = Config::parse("[keys]\nsticky = \";\"\n").unwrap();
         assert_eq!(cfg.sticky, vec![Key::Char(';')]);
+    }
+
+    /// Ctrl は `@ \ ] ^ _` にも付く。
+    ///
+    /// **記号側は空きが多い。** 英字の制御キーは端末・シェル・編集器のどれかが
+    /// 必ず使っているが、`C-]` や `C-\` を使うアプリはほとんど無い。子アプリから
+    /// キーを奪う割り当て (`keys.reload`) を置く先になる。
+    #[test]
+    fn ctrl_also_goes_on_the_symbols() {
+        assert_eq!(parse_key("C-]").unwrap(), vec![Key::Ctrl(0x1d)]);
+        assert_eq!(parse_key("C-\\").unwrap(), vec![Key::Ctrl(0x1c)]);
+        assert_eq!(parse_key("C-^").unwrap(), vec![Key::Ctrl(0x1e)]);
+        assert_eq!(parse_key("C-_").unwrap(), vec![Key::Ctrl(0x1f)]);
+        assert_eq!(parse_key("C-@").unwrap(), vec![Key::Ctrl(0x00)]);
+        // 書いた形に戻せる
+        assert_eq!(key_name(&Key::Ctrl(0x1d)), "C-]");
+        assert_eq!(key_name(&Key::Ctrl(0x1c)), "C-\\");
+        // C-[ は Esc そのもの。別のキーのふりをさせない。
+        let e = parse_key("C-[").unwrap_err().to_string();
+        assert!(e.contains("Esc"), "{e}");
+        // 通す記号は決め打ちの一覧。増やすときは復号側 (input::named_key) と揃える。
+        assert!(parse_key("C-;").is_err());
+    }
+
+    /// 差し替えのキーも割り当てなしから始める。
+    ///
+    /// 押し間違いで端末が入れ替わるのは驚きが大きい。要る人が選ぶ。
+    #[test]
+    fn the_reload_key_is_unbound_until_asked_for() {
+        assert!(Config::default().reload.is_empty());
+        let cfg = Config::parse("[keys]\nreload = \"C-t\"\n").unwrap();
+        assert_eq!(cfg.reload, vec![Key::Ctrl(0x14)]);
     }
 
     /// AZIK は `;` を「っ」に使うので、そこへ前置キーを置くと食い合う。
