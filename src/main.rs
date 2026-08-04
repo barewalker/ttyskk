@@ -58,6 +58,8 @@ fn usage_head() -> String {
     --check-config    設定ファイルを検査して終わる
     --reload          包んでいる ttyskk に、新しいバイナリへの差し替えを頼む
                       (包まれている端末の中から呼ぶ)
+    --status          包んでいる ttyskk の版と実体を示す。手元の実体と見比べて、
+                      差し替えると新しくなるかどうかまで言う
     --config-example  設定の見本を書き出す (全項目を既定値のまま # で無効にしたもの)
     --import <辞書>   別の SKK 辞書を利用者辞書に取り込む (他の実装からの移行)
     --edit-snippets [見出し語]
@@ -79,6 +81,7 @@ fn usage_head() -> String {
     TTYSKK_NO_CURSOR     モードに応じたカーソルの形・色の変更をやめる
     TTYSKK_ACTIVE        ttyskk の中にいる印 (値は包んでいる ttyskk の PID)。
                          あるときは包まずに子をそのまま起こす。--reload の宛先
+    XDG_RUNTIME_DIR      --status が読む控えの置き場所 (既定は一時ディレクトリ)
     TTYSKK_DEBUG         不具合を追う記録の書き出し先
     XDG_CONFIG_HOME      設定の置き場所 (既定 ~/.config)
     XDG_DATA_HOME        利用者辞書と定型文の置き場所 (既定 ~/.local/share)
@@ -325,6 +328,117 @@ fn take_handover() -> Option<(std::os::fd::RawFd, libc::pid_t)> {
     unsafe { std::env::remove_var(HANDOVER_ENV) };
     let (fd, pid) = raw.split_once(':')?;
     Some((fd.parse().ok()?, pid.parse().ok()?))
+}
+
+/// 動いている ttyskk が自分の中身を書き留めておく場所。
+///
+/// **差し替えは PID も画面も変えない。** 中身だけが入れ替わるので、外からは起きた
+/// かどうかが見えない。起動のたびにここへ版と実体を書いておき、[`print_status`] が
+/// 読む。PID で名前を付けるので、差し替えのたびに同じ場所が上書きされる
+/// (`exec` は PID を変えない)。
+fn status_path(pid: u32) -> PathBuf {
+    let dir = config::env_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join("ttyskk").join(format!("{pid}.status"))
+}
+
+/// 実体を見分けるための印。**版だけでは足りない** — 同じ版のまま中身が入れ替わる
+/// ことがあるので、大きさと更新時刻も見る。
+fn exe_mark(exe: &Path) -> String {
+    let m = std::fs::metadata(exe).ok();
+    let len = m.as_ref().map(|m| m.len()).unwrap_or(0);
+    let secs = m
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{len}:{secs}")
+}
+
+/// いまの姿を書き留める。書けなくても動きに障りは無いので、失敗は黙って捨てる。
+fn write_status(exe: &Path) {
+    let path = status_path(std::process::id());
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write(
+        &path,
+        format!(
+            "version={}\nexe={}\nmark={}\nstarted={}\n",
+            env!("CARGO_PKG_VERSION"),
+            exe.display(),
+            exe_mark(exe),
+            started
+        ),
+    );
+}
+
+/// 包んでいる ttyskk の姿を示す。
+///
+/// **「差し替えたのに何も起きない」に答えるためのもの。** 差し替えは見た目を変えない
+/// ので、効いたかどうかを確かめる術が要る。手元の実体と見比べて、入れ替えると新しく
+/// なるかどうかまで言う。
+fn print_status() -> Result<()> {
+    let Some(v) = config::env_os(ACTIVE_ENV) else {
+        bail!("ttyskk の中にいない。包まれている端末から呼ぶ");
+    };
+    let pid: u32 = v
+        .to_str()
+        .and_then(|s| s.parse().ok())
+        .filter(|p| *p > 1)
+        .ok_or_else(|| anyhow::anyhow!("包んでいる ttyskk が古く、姿を書き留めていない"))?;
+    let path = status_path(pid);
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("包んでいる ttyskk (pid {pid}) の控えを読めない"))?;
+    let field = |name: &str| {
+        body.lines()
+            .find_map(|l| l.strip_prefix(&format!("{name}=")))
+            .unwrap_or("")
+            .to_string()
+    };
+    let (version, exe, mark, started) = (
+        field("version"),
+        field("exe"),
+        field("mark"),
+        field("started"),
+    );
+
+    println!("ttyskk {version} (pid {pid})");
+    println!("  実体   {exe}");
+    if let Ok(secs) = started.parse::<i64>() {
+        println!("  起きた {}", stamp(secs));
+    }
+    // 手元の実体と見比べる。差し替えると新しくなるのかどうかが、ここで分かる。
+    let now = exe_mark(Path::new(&exe));
+    if now == "0:0" {
+        println!("  実体が見つからない (消されたか、別の場所へ移された)");
+    } else if now != mark {
+        println!("  実体が入れ替わっている。差し替えると新しくなる (ttyskk --reload)");
+    } else {
+        println!("  実体は起きたときのまま。差し替えても変わらない");
+    }
+    Ok(())
+}
+
+/// UNIX 時刻を地方時の文字列にする。
+fn stamp(secs: i64) -> String {
+    let t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
 }
 
 /// 包んでいる ttyskk に、新しいバイナリへ差し替えるよう頼む。
@@ -1038,6 +1152,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--reload" => return ask_the_wrapper_to_reload(),
+            "--status" => return print_status(),
             "--" => {}
             _ => command.push(first),
         }
@@ -1105,6 +1220,9 @@ fn main() -> Result<()> {
     // 続けるので (`cargo install` は別のファイルを作って置き換える)、差し替えの
     // ときにそこから取ると何度やっても古い版が起きる。
     let exe = std::env::current_exe().context("自分の置き場所が分からない")?;
+    // いまの姿を書き留める。差し替えは見た目を変えないので、これが唯一の手応えになる
+    // (`ttyskk --status`)。差し替えでも PID は変わらないので、同じ場所を上書きする。
+    write_status(&exe);
 
     let (rows, cols) = winsize();
 
@@ -1703,6 +1821,9 @@ fn main() -> Result<()> {
     if let Err(e) = skk.dict_mut().save() {
         eprintln!("ttyskk: 利用者辞書を保存できない: {e}");
     }
+    // 書き留めた姿を片付ける。差し替えのときは通らない (`exec` で入れ替わり、
+    // 次の版が同じ場所を書き直す)。
+    let _ = std::fs::remove_file(status_path(std::process::id()));
 
     let code = child.wait()?;
     drop(raw);
