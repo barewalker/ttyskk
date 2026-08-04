@@ -95,7 +95,8 @@ fn the_reload_signal_reaches_the_wrapper() {
         std::thread::sleep(Duration::from_millis(200));
         logged = std::fs::read_to_string(&log).unwrap_or_default();
         out = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
-        if logged.contains("差し替えを頼まれた") && out.contains("差し替えを頼んだ") {
+        if logged.contains("差し替えを頼まれた") && out.contains("差し替えを頼んだ")
+        {
             break;
         }
     }

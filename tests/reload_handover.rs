@@ -286,6 +286,126 @@ fn the_bound_key_hands_over_only_when_nothing_is_in_hand() {
     );
 }
 
+/// `--status` が、包んでいる ttyskk の**いまの中身**を映すこと。
+///
+/// 差し替えは PID も画面も変えないので、効いたかどうかを確かめる術がここしかない。
+/// 見るのは三つ。起きたときのままなら「変わらない」と言うこと、実体をすげ替えたら
+/// 「入れ替わっている」と気づくこと、差し替えたあとは**また「変わらない」に戻る**
+/// こと。最後のが要 — 新しい版が自分の姿を書き直していなければ、ここで気づく。
+#[test]
+fn the_status_follows_the_handover() {
+    let dir = std::env::temp_dir().join(format!("ttyskk-status-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("一時の置き場所を作れない");
+    let dict = dir.join("sys.dict");
+    std::fs::write(&dict, "かんじ /漢字/\n").expect("辞書を書けない");
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).expect("控えの置き場所を作れない");
+
+    let exe = dir.join("ttyskk");
+    std::fs::copy(env!("CARGO_BIN_EXE_ttyskk"), &exe).expect("実行ファイルを写せない");
+
+    let pty = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("擬似端末を開けない");
+
+    let mut cmd = CommandBuilder::new(&exe);
+    cmd.args(["--", "sh"]);
+    cmd.env_remove("TTYSKK_ACTIVE");
+    cmd.env("TTYSKK_JISYO", &dict);
+    cmd.env("TTYSKK_USER_JISYO", dir.join("user.dict"));
+    cmd.env("TTYSKK_CONFIG", dir.join("no-such-config.toml"));
+    cmd.env("XDG_RUNTIME_DIR", &run);
+
+    let mut child = pty.slave.spawn_command(cmd).expect("ttyskk を起こせない");
+    drop(pty.slave);
+
+    let mut reader = pty.master.try_clone_reader().expect("読めない");
+    let writer = Arc::new(Mutex::new(pty.master.take_writer().expect("書けない")));
+    {
+        let writer = writer.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                    let mut w = writer.lock().unwrap();
+                    let _ = w.write_all(b"\x1b[1;1R");
+                    let _ = w.flush();
+                }
+            }
+        });
+    }
+    let line = |s: &str| {
+        let mut w = writer.lock().unwrap();
+        w.write_all(format!("{s}\r").as_bytes()).expect("書けない");
+        w.flush().expect("流せない");
+    };
+
+    std::thread::sleep(Duration::from_millis(700));
+    line("stty -echo");
+    std::thread::sleep(Duration::from_millis(300));
+
+    // 尋ねる側は本物でよい。控えは PID で引くので、どの実体から呼んでも同じものを見る。
+    let ask = |n: u32| {
+        let out = dir.join(format!("status{n}"));
+        let _ = std::fs::remove_file(&out);
+        line(&format!(
+            "{} --status > {} 2>&1",
+            env!("CARGO_BIN_EXE_ttyskk"),
+            out.display()
+        ));
+        wait_for_file(&out, 10)
+    };
+
+    let fresh = ask(1);
+
+    // 実体をすげ替える。**末尾に一バイト足すだけ** — 大きさと更新時刻は変わるが、
+    // ELF は末尾の余りを読まないので、そのまま起動できる。
+    // 消してから作る (走っているファイルは書き換えられない)。
+    let mut bytes = std::fs::read(&exe).expect("読めない");
+    bytes.push(0);
+    std::fs::remove_file(&exe).expect("消せない");
+    std::fs::write(&exe, &bytes).expect("書けない");
+    std::fs::set_permissions(
+        &exe,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("実行できるようにできない");
+
+    let stale = ask(2);
+
+    line(&format!("{} --reload", env!("CARGO_BIN_EXE_ttyskk")));
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let after = ask(3);
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let fresh = fresh.expect("--status が答えない");
+    let stale = stale.unwrap_or_default();
+    let after = after.unwrap_or_default();
+    assert!(
+        fresh.contains("起きたときのまま"),
+        "起きた直後なのに入れ替わったと言う: {fresh:?}"
+    );
+    assert!(
+        stale.contains("入れ替わっている"),
+        "実体をすげ替えたのに気づかない: {stale:?}"
+    );
+    assert!(
+        after.contains("起きたときのまま"),
+        "差し替えたのに、新しい版が自分の姿を書き直していない: {after:?}"
+    );
+}
+
 /// 差し替え先が起動できないときは、**そのまま動き続ける**。
 ///
 /// 子を道連れにするくらいなら、差し替えは次の機会でよい。
