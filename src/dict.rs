@@ -155,7 +155,8 @@ fn parse_line(line: &str) -> Option<(String, Vec<Candidate>, OkuriBlocks)> {
 
 /// EUC-JP でも UTF-8 でも読めるように、まず UTF-8 を試して駄目なら EUC-JP とみなす。
 fn read_jisyo(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("辞書を読み込めません: {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("辞書を読み込めません: {}", path.display()))?;
     Ok(decode_jisyo(&bytes))
 }
 
@@ -756,7 +757,12 @@ mod tests {
     use super::*;
 
     /// 辞書の本文を読み、候補の表と送り仮名ごとの宛先を返す。
-    fn loaded(text: &str) -> (HashMap<String, Vec<Candidate>>, HashMap<String, OkuriBlocks>) {
+    fn loaded(
+        text: &str,
+    ) -> (
+        HashMap<String, Vec<Candidate>>,
+        HashMap<String, OkuriBlocks>,
+    ) {
         let (mut map, mut okuri) = (HashMap::new(), HashMap::new());
         load_into(&mut map, &mut okuri, text);
         (map, okuri)
@@ -871,8 +877,9 @@ mod tests {
     #[test]
     fn annotations_are_filled_in_from_the_shared_dictionary() {
         let (user, user_okuri) = loaded("こうえん /講演;†lecture.「作家の-」/公演;G/公苑/\n");
-        let (system, system_okuri) =
-            loaded("こうえん /公園;park/講演;†lecture.「作家の-」/公演;†performance.「劇団の-」/\n");
+        let (system, system_okuri) = loaded(
+            "こうえん /公園;park/講演;†lecture.「作家の-」/公演;†performance.「劇団の-」/\n",
+        );
         let d = Dict {
             system,
             user,

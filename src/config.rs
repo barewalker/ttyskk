@@ -567,7 +567,11 @@ impl Config {
                         continue;
                     }
                     other => {
-                        skip_or_reject(on, &mut notes, &format!("keys.{other} は知らない項目です"))?;
+                        skip_or_reject(
+                            on,
+                            &mut notes,
+                            &format!("keys.{other} は知らない項目です"),
+                        )?;
                         continue;
                     }
                 };
@@ -645,9 +649,9 @@ impl Config {
                         cfg.auto_start_henkan = parse_chars("auto_start_henkan", value)?
                     }
                     "learn_combined" => {
-                        cfg.learn_combined = value
-                            .as_bool()
-                            .ok_or_else(|| anyhow::anyhow!("behavior.learn_combined は true か false で書きます"))?
+                        cfg.learn_combined = value.as_bool().ok_or_else(|| {
+                            anyhow::anyhow!("behavior.learn_combined は true か false で書きます")
+                        })?
                     }
                     "okuri_match" => {
                         cfg.okuri_match = match value.as_str() {
@@ -670,24 +674,30 @@ impl Config {
                         }
                     }
                     "context_order" => {
-                        cfg.context_order = value
-                            .as_bool()
-                            .ok_or_else(|| anyhow::anyhow!("behavior.context_order は true か false で書きます"))?
+                        cfg.context_order = value.as_bool().ok_or_else(|| {
+                            anyhow::anyhow!("behavior.context_order は true か false で書きます")
+                        })?
                     }
                     "context_half_distance" => {
                         let n = value.as_integer().filter(|n| *n > 0).ok_or_else(|| {
-                            anyhow::anyhow!("behavior.context_half_distance は 1 以上の整数 (文字数) で書きます")
+                            anyhow::anyhow!(
+                                "behavior.context_half_distance は 1 以上の整数 (文字数) で書きます"
+                            )
                         })?;
                         cfg.context_half_distance = n as usize
                     }
                     "follow_cursor_shape" => {
                         cfg.follow_cursor_shape = value.as_bool().ok_or_else(|| {
-                            anyhow::anyhow!("behavior.follow_cursor_shape は true か false で書きます")
+                            anyhow::anyhow!(
+                                "behavior.follow_cursor_shape は true か false で書きます"
+                            )
                         })?
                     }
-                    other => {
-                        skip_or_reject(on, &mut notes, &format!("behavior.{other} は知らない項目です"))?
-                    }
+                    other => skip_or_reject(
+                        on,
+                        &mut notes,
+                        &format!("behavior.{other} は知らない項目です"),
+                    )?,
                 }
             }
         }
@@ -730,9 +740,11 @@ impl Config {
             for (name, value) in s {
                 match name.as_str() {
                     "files" => cfg.snippets = parse_paths(name, value)?,
-                    other => {
-                        skip_or_reject(on, &mut notes, &format!("snippets.{other} は知らない項目です"))?
-                    }
+                    other => skip_or_reject(
+                        on,
+                        &mut notes,
+                        &format!("snippets.{other} は知らない項目です"),
+                    )?,
                 }
             }
         }
@@ -777,8 +789,9 @@ fn parse_paths(name: &str, value: &toml::Value) -> Result<Vec<PathBuf>> {
         toml::Value::Array(a) => a
             .iter()
             .map(|v| {
-                v.as_str()
-                    .ok_or_else(|| anyhow::anyhow!("snippets.{name} の並びには文字列だけを書きます"))
+                v.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("snippets.{name} の並びには文字列だけを書きます")
+                })
             })
             .collect::<Result<Vec<_>>>()?,
         _ => bail!("snippets.{name} は文字列か文字列の並びで書きます"),
@@ -849,9 +862,9 @@ fn parse_chars(name: &str, value: &toml::Value) -> Result<Vec<char>> {
         toml::Value::Array(a) => {
             let mut out = Vec::new();
             for v in a {
-                let s = v
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("behavior.{name} の並びには文字列だけを書きます"))?;
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("behavior.{name} の並びには文字列だけを書きます")
+                })?;
                 out.extend(s.chars());
             }
             Ok(out)

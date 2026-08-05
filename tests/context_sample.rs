@@ -84,7 +84,8 @@ fn each_section_picks_its_own_homophone() {
             cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let (top_score, top_text) = &cands[0];
             assert_eq!(
-                top_text, want_text,
+                top_text,
+                want_text,
                 "{section} で {reading} を引いたら {want_text} が先頭に来るはず\n  \
                  上位: {:?}",
                 cands.iter().take(3).collect::<Vec<_>>()

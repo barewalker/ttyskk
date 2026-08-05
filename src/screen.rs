@@ -773,10 +773,16 @@ mod tests {
         feed(&mut s, "\x1b[5;36H");
 
         let (text, at) = s.visible_text();
-        assert!(text.contains("劇団のみなさんは"), "全角が落ちている: {text:?}");
+        assert!(
+            text.contains("劇団のみなさんは"),
+            "全角が落ちている: {text:?}"
+        );
         assert!(text.contains("▶ ここで Kouen"), "行が落ちている: {text:?}");
         assert!(!text.contains("劇劇"), "全角を二度数えている: {text:?}");
-        assert!(at > 0 && at <= text.chars().count(), "カーソルの位置が範囲外: {at}");
+        assert!(
+            at > 0 && at <= text.chars().count(),
+            "カーソルの位置が範囲外: {at}"
+        );
         // 右端の空白は落ちる (距離が実際の文章より遠くならないように)
         assert!(!text.contains("  \n"), "行末の空白が残っている: {text:?}");
     }

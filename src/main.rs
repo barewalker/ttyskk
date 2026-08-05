@@ -120,7 +120,11 @@ fn usage_body(cfg: &Config, path: &Path, broken: Option<String>) -> String {
     places.extend(snippet_paths(cfg).into_iter().map(|p| ("定型文", p)));
     let width = places.iter().map(|(n, _)| columns(n)).max().unwrap_or(0);
     for (name, p) in &places {
-        let mark = if p.exists() { "" } else { "  (ありません)" };
+        let mark = if p.exists() {
+            ""
+        } else {
+            "  (ありません)"
+        };
         let pad = " ".repeat(width - columns(name));
         out.push_str(&format!("    {name}{pad}  {}{mark}\n", p.display()));
     }
@@ -264,9 +268,10 @@ impl Kid {
     /// 終わるまで待って、終了コードを返す。
     fn wait(&mut self) -> Result<i32> {
         match self {
-            Kid::Spawned(c) => {
-                Ok(c.wait().context("子プロセスの終了を待てません")?.exit_code() as i32)
-            }
+            Kid::Spawned(c) => Ok(c
+                .wait()
+                .context("子プロセスの終了を待てません")?
+                .exit_code() as i32),
             Kid::Inherited(pid) => {
                 let mut status = 0;
                 if unsafe { libc::waitpid(*pid, &mut status, 0) } < 0 {
@@ -581,7 +586,8 @@ fn edit_snippets(prefix: &str) -> Result<Option<String>> {
     }
     let before = fs::read_to_string(&path).unwrap_or_default();
     let (with_template, line) = ttyskk::snippet::append_template(&before, prefix);
-    fs::write(&path, &with_template).with_context(|| format!("{} に書き込めません", path.display()))?;
+    fs::write(&path, &with_template)
+        .with_context(|| format!("{} に書き込めません", path.display()))?;
 
     // 指定された編集器が無くて別のものに落ちたら、その旨が返る
     let note = match open_editor(&path, line) {
@@ -1076,7 +1082,9 @@ fn migemo_main(args: &[String]) -> Result<()> {
 
     let query = query.join(" ");
     if query.trim().is_empty() {
-        bail!("探す語を渡してください (使い方: ttyskk migemo [--flavour vim|rg] [--limit N] <ローマ字>)");
+        bail!(
+            "探す語を渡してください (使い方: ttyskk migemo [--flavour vim|rg] [--limit N] <ローマ字>)"
+        );
     }
 
     let dict = migemo::source(&paths, user_jisyo())?;
