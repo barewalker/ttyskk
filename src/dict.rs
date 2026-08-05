@@ -155,7 +155,7 @@ fn parse_line(line: &str) -> Option<(String, Vec<Candidate>, OkuriBlocks)> {
 
 /// EUC-JP でも UTF-8 でも読めるように、まず UTF-8 を試して駄目なら EUC-JP とみなす。
 fn read_jisyo(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("辞書を読めない: {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("辞書を読み込めません: {}", path.display()))?;
     Ok(decode_jisyo(&bytes))
 }
 

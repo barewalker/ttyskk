@@ -49,44 +49,44 @@ fn usage_head() -> String {
 使い方:
     ttyskk [オプション] [--] [コマンド [引数...]]
 
-コマンドを省くと $SHELL を起動する。すでに ttyskk の中にいるときは包み直さず、
-子をそのまま起こす (承知のうえで重ねるなら env -u TTYSKK_ACTIVE ttyskk ...)。
+コマンドを省くと $SHELL を起動します。すでに ttyskk の中にいるときは包み直さず、
+子をそのまま起動します (承知のうえで重ねるなら env -u TTYSKK_ACTIVE ttyskk ...)。
 
 オプション:
-    -h, --help        この使い方を表示する
-    -V, --version     版を表示する
-    --check-config    設定ファイルを検査して終わる
-    --reload          包んでいる ttyskk に、新しいバイナリへの差し替えを頼む
-                      (包まれている端末の中から呼ぶ)
-    --status          包んでいる ttyskk の版と実体を示す。手元の実体と見比べて、
-                      差し替えると新しくなるかどうかまで言う
-    --config-example  設定の見本を書き出す (全項目を既定値のまま # で無効にしたもの)
-    --import <辞書>   別の SKK 辞書を利用者辞書に取り込む (他の実装からの移行)
+    -h, --help        この使い方を表示します
+    -V, --version     版を表示します
+    --check-config    設定ファイルを検査して終わります
+    --reload          包んでいる ttyskk に、新しいバイナリへの差し替えを頼みます
+                      (包まれている端末の中から実行します)
+    --status          包んでいる ttyskk の版と実体を示します。手元の実体と見比べ、
+                      差し替えると新しくなるかどうかまで示します
+    --config-example  設定の見本を書き出します (全項目を既定値のまま # で無効にしたもの)
+    --import <辞書>   別の SKK 辞書を利用者辞書に取り込みます (他の実装からの移行)
     --edit-snippets [見出し語]
-                      定型文を $EDITOR で編集する。新しい項目の雛形を末尾に足し、
-                      その行を開く。見出し語を渡すとそれを埋めておく
+                      定型文を $EDITOR で編集します。新しい項目の雛形を末尾に足し、
+                      その行を開きます。見出し語を渡すとそれを埋めておきます
 
 命令:
     migemo [--flavour vim|rg] [--limit N] <ローマ字>
                       ローマ字に当たる日本語 (かな・カタカナ・漢字・全角・半角カナ) を
-                      探す正規表現を書き出す。方言の既定は rg、上限の既定は {limit}
+                      探す正規表現を書き出します。方言の既定は rg、上限の既定は {limit}
     migemo --build-index
-                      migemo が辞書を読む時間を詰めるための索引を作る
+                      migemo が辞書を読む時間を詰めるための索引を作ります
 
-環境変数 (値の無いものは、設定していないのと同じに扱う):
+環境変数 (値の無いものは、設定していないのと同じに扱います):
     TTYSKK_JISYO         共有辞書のパス (`:` 区切り)
     TTYSKK_USER_JISYO    利用者辞書のパス
     TTYSKK_CONFIG        設定ファイルのパス
     TTYSKK_MIGEMO_INDEX  migemo の索引のパス
-    TTYSKK_NO_CURSOR     モードに応じたカーソルの形・色の変更をやめる
+    TTYSKK_NO_CURSOR     モードに応じたカーソルの形・色の変更をやめます
     TTYSKK_ACTIVE        ttyskk の中にいる印 (値は包んでいる ttyskk の PID)。
-                         あるときは包まずに子をそのまま起こす。--reload の宛先
+                         あるときは包まずに子をそのまま起動します。--reload の宛先
     XDG_RUNTIME_DIR      --status が読む控えの置き場所 (既定は一時ディレクトリ)
     TTYSKK_DEBUG         不具合を追う記録の書き出し先
     XDG_CONFIG_HOME      設定の置き場所 (既定 ~/.config)
     XDG_DATA_HOME        利用者辞書と定型文の置き場所 (既定 ~/.local/share)
     XDG_CACHE_HOME       migemo の索引の置き場所 (既定 ~/.cache)
-    SHELL                コマンドを省いたときに起こすもの
+    SHELL                コマンドを省いたときに起動するもの
     VISUAL / EDITOR      定型文を開く編集器 (どちらも無ければ vi)
 ",
         limit = migemo::DEFAULT_LIMIT
@@ -120,13 +120,13 @@ fn usage_body(cfg: &Config, path: &Path, broken: Option<String>) -> String {
     places.extend(snippet_paths(cfg).into_iter().map(|p| ("定型文", p)));
     let width = places.iter().map(|(n, _)| columns(n)).max().unwrap_or(0);
     for (name, p) in &places {
-        let mark = if p.exists() { "" } else { "  (無い)" };
+        let mark = if p.exists() { "" } else { "  (ありません)" };
         let pad = " ".repeat(width - columns(name));
         out.push_str(&format!("    {name}{pad}  {}{mark}\n", p.display()));
     }
     if let Some(e) = broken {
         out.push_str(&format!(
-            "\n    ※ 設定を読めないので、以下は既定の割り当て: {e}\n"
+            "\n    ※ 設定を読み込めないので、以下は既定の割り当てです: {e}\n"
         ));
     }
 
@@ -151,14 +151,14 @@ fn usage_body(cfg: &Config, path: &Path, broken: Option<String>) -> String {
     }
 
     out.push_str(&format!(
-        "\n    大文字で変換を始める (▽)。途中の大文字から送り仮名。\n    \
-         候補一覧から選ぶキーは {}。\n    \
-         Enter は候補の確定だけを行い、改行は送らない。\n",
+        "\n    大文字で変換を始めます (▽)。途中の大文字から送り仮名になります。\n    \
+         候補一覧から選ぶキーは {} です。\n    \
+         Enter は候補の確定だけを行い、改行は送りません。\n",
         cfg.select.iter().collect::<String>()
     ));
 
     out.push_str(&format!(
-        "\n割り当ては {} で変えられる (--config-example が雛形)。\n",
+        "\n割り当ては {} で変えられます (--config-example が雛形です)。\n",
         path.display()
     ));
     out
@@ -208,7 +208,7 @@ struct Master {
 
 impl Master {
     fn opened(m: Box<dyn portable_pty::MasterPty + Send>) -> Result<Self> {
-        let fd = m.as_raw_fd().context("擬似端末の fd を取れない")?;
+        let fd = m.as_raw_fd().context("擬似端末の fd を取得できません")?;
         Ok(Master {
             fd,
             _owner: Some(m),
@@ -227,7 +227,7 @@ impl Master {
         let dup = unsafe { libc::dup(self.fd) };
         if dup < 0 {
             return Err(anyhow::Error::new(std::io::Error::last_os_error())
-                .context("擬似端末の fd を複製できない"));
+                .context("擬似端末の fd を複製できません"));
         }
         Ok(unsafe { std::fs::File::from_raw_fd(dup) })
     }
@@ -265,13 +265,13 @@ impl Kid {
     fn wait(&mut self) -> Result<i32> {
         match self {
             Kid::Spawned(c) => {
-                Ok(c.wait().context("子プロセスの終了を待てない")?.exit_code() as i32)
+                Ok(c.wait().context("子プロセスの終了を待てません")?.exit_code() as i32)
             }
             Kid::Inherited(pid) => {
                 let mut status = 0;
                 if unsafe { libc::waitpid(*pid, &mut status, 0) } < 0 {
                     return Err(anyhow::Error::new(std::io::Error::last_os_error())
-                        .context("子プロセスの終了を待てない"));
+                        .context("子プロセスの終了を待てません"));
                 }
                 Ok(if libc::WIFEXITED(status) {
                     libc::WEXITSTATUS(status)
@@ -318,7 +318,7 @@ fn hand_over(exe: &Path, master: &Master, pid: libc::pid_t, raw: &RawGuard) -> a
         unsafe { libc::fcntl(master.fd, libc::F_SETFD, flags) };
     }
     raw.resume();
-    anyhow::Error::new(err).context(format!("{} へ差し替えられない", exe.display()))
+    anyhow::Error::new(err).context(format!("{} へ差し替えられません", exe.display()))
 }
 
 /// 差し替えの申し送りを読む。**読んだら消す** — 子がさらに ttyskk を起こしたときに、
@@ -385,16 +385,16 @@ fn write_status(exe: &Path) {
 /// なるかどうかまで言う。
 fn print_status() -> Result<()> {
     let Some(v) = config::env_os(ACTIVE_ENV) else {
-        bail!("ttyskk の中にいない。包まれている端末から呼ぶ");
+        bail!("ttyskk の中ではありません。包まれている端末から実行してください");
     };
     let pid: u32 = v
         .to_str()
         .and_then(|s| s.parse().ok())
         .filter(|p| *p > 1)
-        .ok_or_else(|| anyhow::anyhow!("包んでいる ttyskk が古く、姿を書き留めていない"))?;
+        .ok_or_else(|| anyhow::anyhow!("包んでいる ttyskk が古く、姿を書き留めていません"))?;
     let path = status_path(pid);
     let body = std::fs::read_to_string(&path)
-        .with_context(|| format!("包んでいる ttyskk (pid {pid}) の控えを読めない"))?;
+        .with_context(|| format!("包んでいる ttyskk (pid {pid}) の控えを読み込めません"))?;
     let field = |name: &str| {
         body.lines()
             .find_map(|l| l.strip_prefix(&format!("{name}=")))
@@ -416,11 +416,11 @@ fn print_status() -> Result<()> {
     // 手元の実体と見比べる。差し替えると新しくなるのかどうかが、ここで分かる。
     let now = exe_mark(Path::new(&exe));
     if now == "0:0" {
-        println!("  実体が見つからない (消されたか、別の場所へ移された)");
+        println!("  実体が見つかりません (消されたか、別の場所へ移されました)");
     } else if now != mark {
-        println!("  実体が入れ替わっている。差し替えると新しくなる (ttyskk --reload)");
+        println!("  実体が入れ替わっています。差し替えると新しくなります (ttyskk --reload)");
     } else {
-        println!("  実体は起きたときのまま。差し替えても変わらない");
+        println!("  実体は起きたときのままです。差し替えても変わりません");
     }
     Ok(())
 }
@@ -451,7 +451,7 @@ fn stamp(secs: i64) -> String {
 /// 宛先は [`ACTIVE_ENV`] に入れてある親の PID。
 fn ask_the_wrapper_to_reload() -> Result<()> {
     let Some(v) = config::env_os(ACTIVE_ENV) else {
-        bail!("ttyskk の中にいない。包まれている端末から呼ぶ");
+        bail!("ttyskk の中ではありません。包まれている端末から実行してください");
     };
     // 古い版は目印に `1` を入れる。数として読めなければそれと見て、断りを返す。
     let pid: i32 = v
@@ -460,14 +460,14 @@ fn ask_the_wrapper_to_reload() -> Result<()> {
         .filter(|p| *p > 1)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "包んでいる ttyskk が古く、差し替えに対応していない。一度抜けて起動し直す"
+                "包んでいる ttyskk が古く、差し替えに対応していません。一度抜けて起動し直してください"
             )
         })?;
     if unsafe { libc::kill(pid, libc::SIGUSR2) } != 0 {
         return Err(anyhow::Error::new(std::io::Error::last_os_error())
-            .context(format!("ttyskk (pid {pid}) に合図を送れない")));
+            .context(format!("ttyskk (pid {pid}) に合図を送れません")));
     }
-    println!("ttyskk: 差し替えを頼んだ (pid {pid})");
+    println!("ttyskk: 差し替えを頼みました (pid {pid})");
     Ok(())
 }
 
@@ -480,10 +480,10 @@ impl RawGuard {
     fn new() -> Result<Self> {
         use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
         let stdin = std::io::stdin();
-        let original = tcgetattr(&stdin).context("端末属性を取得できない")?;
+        let original = tcgetattr(&stdin).context("端末属性を取得できません")?;
         let mut raw = original.clone();
         cfmakeraw(&mut raw);
-        tcsetattr(&stdin, SetArg::TCSANOW, &raw).context("端末を raw モードにできない")?;
+        tcsetattr(&stdin, SetArg::TCSANOW, &raw).context("端末を raw モードにできません")?;
         Ok(RawGuard { original })
     }
 }
@@ -581,7 +581,7 @@ fn edit_snippets(prefix: &str) -> Result<Option<String>> {
     }
     let before = fs::read_to_string(&path).unwrap_or_default();
     let (with_template, line) = ttyskk::snippet::append_template(&before, prefix);
-    fs::write(&path, &with_template).with_context(|| format!("{} に書けない", path.display()))?;
+    fs::write(&path, &with_template).with_context(|| format!("{} に書き込めません", path.display()))?;
 
     // 指定された編集器が無くて別のものに落ちたら、その旨が返る
     let note = match open_editor(&path, line) {
@@ -609,7 +609,7 @@ fn edit_snippets(prefix: &str) -> Result<Option<String>> {
             }))
         }
         // 直すのは書いた本人なので、消したり戻したりはしない
-        Err(e) => Err(e).with_context(|| format!("{} を読み直せない", path.display())),
+        Err(e) => Err(e).with_context(|| format!("{} を読み直せません", path.display())),
     }
 }
 
@@ -824,12 +824,12 @@ fn open_editor(path: &Path, line: usize) -> Result<Option<String>> {
         match run_editor(&spec, path, line) {
             Ok(()) => {
                 return Ok((!missing.is_empty())
-                    .then(|| format!("{} が無いので {spec} で開いた", missing.join(" と "))));
+                    .then(|| format!("{} が無いので {spec} で開きました", missing.join(" と "))));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 missing.push(format!("{source}={spec}"));
             }
-            Err(e) => bail!("{spec} を起こせない: {e}"),
+            Err(e) => bail!("{spec} を起動できません: {e}"),
         }
     }
     bail!(
@@ -863,7 +863,7 @@ fn run_editor(spec: &str, path: &Path, line: usize) -> std::io::Result<()> {
 
     let status = cmd.status()?;
     if !status.success() {
-        return Err(std::io::Error::other(format!("{status} で終わった")));
+        return Err(std::io::Error::other(format!("{status} で終了しました")));
     }
     Ok(())
 }
@@ -1030,20 +1030,20 @@ fn migemo_main(args: &[String]) -> Result<()> {
             "--build-index" => build_index = true,
             "--flavour" | "--flavor" => {
                 let Some(name) = iter.next() else {
-                    bail!("--flavour には vim か rg が要る");
+                    bail!("--flavour には vim か rg を渡してください");
                 };
                 let Some(f) = migemo::flavour(name) else {
-                    bail!("知らない方言 {name} (vim か rg)");
+                    bail!("知らない方言です: {name} (vim か rg)");
                 };
                 rx = f;
             }
             "--limit" => {
                 let Some(n) = iter.next() else {
-                    bail!("--limit には数が要る");
+                    bail!("--limit には数を渡してください");
                 };
                 limit = n
                     .parse()
-                    .with_context(|| format!("--limit の値が数でない: {n}"))?;
+                    .with_context(|| format!("--limit の値が数ではありません: {n}"))?;
             }
             // これ以降は先頭が `-` でも探す語として扱う
             "--" => query.extend(iter.by_ref().cloned()),
@@ -1058,7 +1058,7 @@ fn migemo_main(args: &[String]) -> Result<()> {
         if !paths.iter().any(|p| p.exists()) {
             let places: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
             bail!(
-                "共有辞書が無い ({})。TTYSKK_JISYO で場所を指せる",
+                "共有辞書がありません ({})。TTYSKK_JISYO で場所を指せます",
                 places.join(", ")
             );
         }
@@ -1076,7 +1076,7 @@ fn migemo_main(args: &[String]) -> Result<()> {
 
     let query = query.join(" ");
     if query.trim().is_empty() {
-        bail!("探す語が要る (使い方: ttyskk migemo [--flavour vim|rg] [--limit N] <ローマ字>)");
+        bail!("探す語を渡してください (使い方: ttyskk migemo [--flavour vim|rg] [--limit N] <ローマ字>)");
     }
 
     let dict = migemo::source(&paths, user_jisyo())?;
@@ -1109,15 +1109,15 @@ fn main() -> Result<()> {
             }
             "--import" => {
                 let Some(path) = iter.next() else {
-                    bail!("--import には取り込む辞書のパスが要る");
+                    bail!("--import には取り込む辞書のパスを渡してください");
                 };
                 let path = PathBuf::from(path);
                 let mut dict = Dict::load(&[], user_jisyo(), None)?;
                 let added = dict
                     .import_user(&path)
-                    .with_context(|| format!("{} を取り込めない", path.display()))?;
+                    .with_context(|| format!("{} を取り込めません", path.display()))?;
                 println!(
-                    "ttyskk: {} から {added} 件を {} へ取り込んだ",
+                    "ttyskk: {} から {added} 件を {} へ取り込みました",
                     path.display(),
                     user_jisyo().display()
                 );
@@ -1145,9 +1145,9 @@ fn main() -> Result<()> {
                     println!("ttyskk: {note}");
                 }
                 if path.exists() {
-                    println!("ttyskk: {} に問題なし", path.display());
+                    println!("ttyskk: {} に問題はありません", path.display());
                 } else {
-                    println!("ttyskk: {} は無い (既定で動く)", path.display());
+                    println!("ttyskk: {} はありません (既定で動きます)", path.display());
                 }
                 return Ok(());
             }
@@ -1176,11 +1176,11 @@ fn main() -> Result<()> {
         let err = std::process::Command::new(&command[0])
             .args(&command[1..])
             .exec();
-        return Err(anyhow::Error::new(err).context(format!("{} を起こせない", command[0])));
+        return Err(anyhow::Error::new(err).context(format!("{} を起動できません", command[0])));
     }
 
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
-        bail!("標準入力が端末ではない");
+        bail!("標準入力が端末ではありません");
     }
 
     let import =
@@ -1188,7 +1188,7 @@ fn main() -> Result<()> {
     let mut dict = Dict::load(&default_system_jisyo(), user_jisyo(), import.as_deref())?;
     if dict.system_len() == 0 {
         eprintln!(
-            "ttyskk: 共有辞書が見つからない。TTYSKK_JISYO でパスを指定できる。変換はできないが起動は続ける。"
+            "ttyskk: 共有辞書が見つかりません。TTYSKK_JISYO でパスを指定できます。変換はできませんが起動は続けます。"
         );
     }
     // 設定は子を起こす前に読む。ここで駄目なら画面を触る前に知らせられる。
@@ -1199,7 +1199,7 @@ fn main() -> Result<()> {
     // 打ち間違いを見つけたいときは `--check-config` を呼ぶ (あちらは誤りとして扱う)。
     let config_path = config::config_path();
     let (cfg, notes) = Config::load_with(&config_path, config::OnUnknown::Skip)
-        .with_context(|| format!("設定 {} を読めない", config_path.display()))?;
+        .with_context(|| format!("設定 {} を読み込めません", config_path.display()))?;
     for note in &notes {
         eprintln!("ttyskk: 設定 {}: {note}", config_path.display());
     }
@@ -1209,7 +1209,7 @@ fn main() -> Result<()> {
     let snippets = snippet_paths(&cfg);
     let (snippet_count, failed) = dict.load_snippets(&snippets);
     for (path, e) in &failed {
-        eprintln!("ttyskk: {} を読めない: {e}", path.display());
+        eprintln!("ttyskk: {} を読み込めません: {e}", path.display());
     }
 
     let mut skk = Skk::new(dict, cfg);
@@ -1219,7 +1219,7 @@ fn main() -> Result<()> {
     // 自分の置き場所を**いま**控える。`/proc/self/exe` は入れ替え前の実体を指し
     // 続けるので (`cargo install` は別のファイルを作って置き換える)、差し替えの
     // ときにそこから取ると何度やっても古い版が起きる。
-    let exe = std::env::current_exe().context("自分の置き場所が分からない")?;
+    let exe = std::env::current_exe().context("自分の置き場所が分かりません")?;
     // いまの姿を書き留める。差し替えは見た目を変えないので、これが唯一の手応えになる
     // (`ttyskk --status`)。差し替えでも PID は変わらないので、同じ場所を上書きする。
     write_status(&exe);
@@ -1268,7 +1268,7 @@ fn main() -> Result<()> {
                     pixel_width: 0,
                     pixel_height: 0,
                 })
-                .context("擬似端末を開けない")?;
+                .context("擬似端末を開けません")?;
 
             let mut cmd = CommandBuilder::new(&command[0]);
             for a in &command[1..] {
@@ -1289,14 +1289,14 @@ fn main() -> Result<()> {
             let child = pair
                 .slave
                 .spawn_command(cmd)
-                .with_context(|| format!("起動できない: {}", command[0]))?;
+                .with_context(|| format!("{} を起動できません", command[0]))?;
             drop(pair.slave);
             (Master::opened(pair.master)?, Kid::Spawned(child))
         }
     };
 
-    let mut writer = master.stream().context("擬似端末に書けない")?;
-    let mut reader = master.stream().context("擬似端末を読めない")?;
+    let mut writer = master.stream().context("擬似端末に書き込めません")?;
+    let mut reader = master.stream().context("擬似端末を読み込めません")?;
 
     let (tx, rx): (Sender<Event>, Receiver<Event>) = channel();
 
@@ -1365,7 +1365,7 @@ fn main() -> Result<()> {
             signal_hook::consts::SIGWINCH,
             signal_hook::consts::SIGUSR2,
         ])
-        .context("SIGWINCH / SIGUSR2 を捕まえられない")?;
+        .context("SIGWINCH / SIGUSR2 を捕まえられません")?;
         std::thread::spawn(move || {
             for sig in signals.forever() {
                 let ev = if sig == signal_hook::consts::SIGUSR2 {
@@ -1819,7 +1819,7 @@ fn main() -> Result<()> {
     }
 
     if let Err(e) = skk.dict_mut().save() {
-        eprintln!("ttyskk: 利用者辞書を保存できない: {e}");
+        eprintln!("ttyskk: 利用者辞書を保存できません: {e}");
     }
     // 書き留めた姿を片付ける。差し替えのときは通らない (`exec` で入れ替わり、
     // 次の版が同じ場所を書き直す)。
