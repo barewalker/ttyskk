@@ -1392,8 +1392,7 @@ impl Skk {
         // 登録した語も送り仮名ごとの宛先へ入れる。次に同じ送り仮名で打ったとき、
         // いま登録したものが先に出る。
         if reg.okuri_head.is_some() {
-            self.dict
-                .learn_okuri(&reg.key, &reg.okuri_kana, &cand.text);
+            self.dict.learn_okuri(&reg.key, &reg.okuri_kana, &cand.text);
         }
         let text = format!("{}{}{}", reg.buffer, reg.okuri_kana, reg.auto_suffix);
         self.capture(Response::text(&text))
@@ -1921,9 +1920,8 @@ impl Skk {
     ///
     /// 変換を始めるたびに見るので、画面が変わったときだけ渡し直せばよい。
     pub fn set_context(&mut self, text: &str, cursor: usize) {
-        self.context = (!text.is_empty()).then(|| {
-            Context::with_half_distance(text, cursor, self.cfg.context_half_distance)
-        });
+        self.context = (!text.is_empty())
+            .then(|| Context::with_half_distance(text, cursor, self.cfg.context_half_distance));
     }
 
     /// 画面の文脈で候補を並べ替える。
@@ -1976,12 +1974,13 @@ impl Skk {
         ));
         // 点数の降順。**安定な並べ替え**なので、同点のものは元の順 (最近使った順) を保つ。
         let mut order: Vec<usize> = (0..self.candidates.len()).collect();
-        order.sort_by(|a, b| scored[*b].partial_cmp(&scored[*a]).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|a, b| {
+            scored[*b]
+                .partial_cmp(&scored[*a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut taken: Vec<Option<Choice>> = self.candidates.drain(..).map(Some).collect();
-        self.candidates = order
-            .into_iter()
-            .filter_map(|i| taken[i].take())
-            .collect();
+        self.candidates = order.into_iter().filter_map(|i| taken[i].take()).collect();
     }
 
     /// 送り仮名ごとの宛先で候補を並べ替える。
@@ -2014,7 +2013,11 @@ impl Skk {
             OkuriMatch::Only => {
                 // **空にはしない。** 宛先の候補が削除で消えているような場合に、
                 // 全部落として辞書登録へ移ると、打った語を出せなくなる。
-                if self.candidates.iter().any(|c| wanted.contains(&c.cand.text)) {
+                if self
+                    .candidates
+                    .iter()
+                    .any(|c| wanted.contains(&c.cand.text))
+                {
                     self.candidates.retain(|c| wanted.contains(&c.cand.text));
                 }
             }

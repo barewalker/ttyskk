@@ -193,8 +193,9 @@ impl Context {
         let before = at.checked_sub(1).map(|i| self.chars[i]);
         let after = self.chars.get(at + len).copied();
         if ascii {
-            let joined =
-                |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || "/._-".contains(c));
+            let joined = |c: Option<char>| {
+                c.is_some_and(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+            };
             return !joined(before) && !joined(after);
         }
         if len > 1 {

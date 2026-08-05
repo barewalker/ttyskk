@@ -136,7 +136,9 @@ fn function_keys_reach_the_child() {
             key(bytes);
             let got = take();
             if !got.contains(want) {
-                missing.push(format!("  {mode}モード {name} → 期待 {want:?} 実際 {got:?}"));
+                missing.push(format!(
+                    "  {mode}モード {name} → 期待 {want:?} 実際 {got:?}"
+                ));
             }
         }
     }
