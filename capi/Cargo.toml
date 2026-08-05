@@ -1,6 +1,6 @@
 [package]
 name = "ttyskk-capi"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "C ABI for the ttyskk SKK conversion engine, for use from input method frameworks."
 license = "MIT OR Apache-2.0"
