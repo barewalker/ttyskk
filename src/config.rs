@@ -170,6 +170,31 @@ pub struct Config {
     pub start_conversion: Vec<Key>,
     /// ASCII の見出し語で変換する
     pub abbrev: Vec<Key>,
+    /// ▽ の見出し語を、打った綴り (ASCII) に置き換える。
+    ///
+    /// `Kanji` と打って `▽かんじ` になったところで押すと `▽kanji` になり、`/` で
+    /// 始めたときと同じ ASCII の見出し語に移る。そこから続きを打つのも、`space` で
+    /// 変換するのも、`C-j` で確定するのも自由。**モードを行き来せずに、打ち直しも
+    /// せずに英数へ移るための道**で、打ってしまってから「これは英語のままがよかった」
+    /// と気づいたときに使う。
+    ///
+    /// **覚えているのは打鍵そのもの**で、かなから綴りを逆算するのではない。
+    /// `Shift` と打てば `▽しふと` になるが、戻るのは `sihuto` ではなく `shift`。
+    /// `Hello` のようにかなにならない綴りは `▽へllお` と崩れた姿になるが、戻せば
+    /// `hello` に揃う。
+    ///
+    /// **続けて押すと 小文字 → 先頭大文字 → 全て大文字 と巡る** (`kanji` → `Kanji`
+    /// → `KANJI` → `kanji`)。▽ は大文字でしか始められないので、そのままでは綴りが
+    /// 必ず大文字始まりになってしまう。一度目を小文字にしてあるのはそのため。
+    ///
+    /// **既定は `C-l`。** ASCII の見出し語の中では打った文字がそのまま入るので、
+    /// `l` のような文字キーだと `html` の `l` が打てなくなる。▽ の外では素通しする
+    /// ので、shell の画面消去はそのまま効く。
+    ///
+    /// 巡回できるのは**押した直後だけ**で、間に何か打てば終わる (そのあとの `C-l` は
+    /// 何も起こさない)。カーソルを動かしたり `TAB` で補完したりすると綴りを追えなく
+    /// なるので、そのときも何も起こさない。
+    pub latin: Vec<Key>,
     /// 次の一打鍵を大文字として扱う前置キー (sticky shift)。**既定は空 (割り当てなし)**。
     ///
     /// `;k` `;a` と打てば `▽か` に入り、`▽かんが` のあと `;e` と打てば送り仮名が
@@ -357,6 +382,7 @@ impl Default for Config {
             hankaku_katakana: vec![Key::Ctrl(0x11)],
             start_conversion: vec![Key::Char('Q')],
             abbrev: vec![Key::Char('/')],
+            latin: vec![Key::Ctrl(0x0c)],
             sticky: Vec::new(),
             convert: vec![Key::Char(' ')],
             previous: vec![Key::Char('x')],
@@ -404,7 +430,7 @@ impl Config {
     }
 
     /// SKK 自身の操作に割り当てられているキーを節ごとに並べて返す。
-    fn key_slots(&self) -> [&Vec<Key>; 24] {
+    fn key_slots(&self) -> [&Vec<Key>; 25] {
         self.key_bindings().map(|(_, _, keys)| keys)
     }
 
@@ -420,7 +446,7 @@ impl Config {
     /// `ascii_keys` は**入れない**。あれは子アプリが自分の操作に使っているキー
     /// (vim の `Esc` / `C-c`) に便乗して ASCII へ戻すためのもので、押されたキーは
     /// そのまま子へ渡る。持ち主でないキーの形を変えると子の操作が変質する。
-    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 24] {
+    pub fn key_bindings(&self) -> [(&'static str, &'static str, &Vec<Key>); 25] {
         [
             ("kana", "かなモードへ入る", &self.kana),
             (
@@ -443,6 +469,11 @@ impl Config {
                 &self.start_conversion,
             ),
             ("abbrev", "ASCII の見出し語で変換する", &self.abbrev),
+            (
+                "latin",
+                "▽ の見出し語を打った綴り (ASCII) に置き換える",
+                &self.latin,
+            ),
             (
                 "sticky",
                 "次の一打鍵を大文字として扱う (Shift の代わり)",
@@ -547,6 +578,7 @@ impl Config {
                     "hankaku_katakana" => &mut cfg.hankaku_katakana,
                     "start_conversion" => &mut cfg.start_conversion,
                     "abbrev" => &mut cfg.abbrev,
+                    "latin" => &mut cfg.latin,
                     "sticky" => &mut cfg.sticky,
                     "convert" => &mut cfg.convert,
                     "previous" => &mut cfg.previous,

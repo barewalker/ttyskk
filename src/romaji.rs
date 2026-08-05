@@ -584,6 +584,12 @@ impl Romaji {
         self.buf.clear();
     }
 
+    /// 打ちかけのローマ字を差し替える。控えておいた姿へ戻すときに使う。
+    pub fn set_pending(&mut self, s: &str) {
+        self.buf.clear();
+        self.buf.push_str(s);
+    }
+
     /// 末尾を 1 文字消す。消す文字があれば true。
     pub fn backspace(&mut self) -> bool {
         self.buf.pop().is_some()
