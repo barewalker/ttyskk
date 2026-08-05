@@ -160,9 +160,9 @@ fn strings(v: &serde_json::Value) -> Vec<String> {
 pub fn parse(text: &str) -> Result<Vec<Snippet>> {
     let json = strip_jsonc(text);
     let root: serde_json::Value =
-        serde_json::from_str(&json).context("スニペットの書式が JSON として読めない")?;
+        serde_json::from_str(&json).context("定型文の書式を JSON として読み取れません")?;
     let Some(table) = root.as_object() else {
-        anyhow::bail!("スニペットの最も外側は {{ }} でなければならない");
+        anyhow::bail!("定型文の最も外側は {{ }} で書きます");
     };
 
     let mut out = Vec::new();
@@ -935,6 +935,6 @@ mod tests {
     #[test]
     fn reports_broken_json() {
         let e = parse(r#"{"壊れ": {"prefix": "あ" "body": "亜"}}"#).unwrap_err();
-        assert!(format!("{e}").contains("読めない"), "{e}");
+        assert!(format!("{e}").contains("読み取れません"), "{e}");
     }
 }

@@ -57,7 +57,7 @@ pub enum OnUnknown {
 fn skip_or_reject(on: OnUnknown, notes: &mut Vec<String>, what: &str) -> Result<()> {
     match on {
         OnUnknown::Skip => {
-            notes.push(format!("{what}。読み飛ばした"));
+            notes.push(format!("{what}。読み飛ばしました"));
             Ok(())
         }
         OnUnknown::Reject => bail!("{what}"),
@@ -518,7 +518,7 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Ok((Config::default(), Vec::new()))
             }
-            Err(e) => bail!("{} を読めない: {e}", path.display()),
+            Err(e) => bail!("{} を読み込めません: {e}", path.display()),
         }
     }
 
@@ -535,7 +535,7 @@ impl Config {
         if let Some(keys) = table.get("keys") {
             let keys = keys
                 .as_table()
-                .ok_or_else(|| anyhow::anyhow!("[keys] は表でなければならない"))?;
+                .ok_or_else(|| anyhow::anyhow!("[keys] は表 (項目 = 値) で書きます"))?;
             for (name, value) in keys {
                 let slot = match name.as_str() {
                     "kana" => &mut cfg.kana,
@@ -567,7 +567,7 @@ impl Config {
                         continue;
                     }
                     other => {
-                        skip_or_reject(on, &mut notes, &format!("keys.{other} は知らない項目"))?;
+                        skip_or_reject(on, &mut notes, &format!("keys.{other} は知らない項目です"))?;
                         continue;
                     }
                 };
@@ -578,7 +578,7 @@ impl Config {
         if let Some(b) = table.get("behavior") {
             let b = b
                 .as_table()
-                .ok_or_else(|| anyhow::anyhow!("[behavior] は表でなければならない"))?;
+                .ok_or_else(|| anyhow::anyhow!("[behavior] は表 (項目 = 値) で書きます"))?;
             for (name, value) in b {
                 match name.as_str() {
                     // ここだけは空の並びを許す (割り当てを外す指定になる)
@@ -602,7 +602,7 @@ impl Config {
                     }
                     "mode_symbols" => {
                         let t = value.as_table().ok_or_else(|| {
-                            anyhow::anyhow!("behavior.mode_symbols は表 (名前 = 記号)")
+                            anyhow::anyhow!("behavior.mode_symbols は表 (名前 = 記号) で書きます")
                         })?;
                         for (name, v) in t {
                             let i = match name.as_str() {
@@ -614,7 +614,7 @@ impl Config {
                                     skip_or_reject(
                                         on,
                                         &mut notes,
-                                        &format!("mode_symbols.{other} は知らない項目"),
+                                        &format!("mode_symbols.{other} は知らない項目です"),
                                     )?;
                                     continue;
                                 }
@@ -626,7 +626,7 @@ impl Config {
                         cfg.azik = match value.as_str() {
                             Some("default") => false,
                             Some("azik") => true,
-                            _ => bail!("behavior.romaji は \"default\" か \"azik\""),
+                            _ => bail!("behavior.romaji は \"default\" か \"azik\" で書きます"),
                         }
                     }
                     "kutouten" => {
@@ -647,7 +647,7 @@ impl Config {
                     "learn_combined" => {
                         cfg.learn_combined = value
                             .as_bool()
-                            .ok_or_else(|| anyhow::anyhow!("behavior.learn_combined は真偽値"))?
+                            .ok_or_else(|| anyhow::anyhow!("behavior.learn_combined は true か false で書きます"))?
                     }
                     "okuri_match" => {
                         cfg.okuri_match = match value.as_str() {
@@ -672,21 +672,21 @@ impl Config {
                     "context_order" => {
                         cfg.context_order = value
                             .as_bool()
-                            .ok_or_else(|| anyhow::anyhow!("behavior.context_order は真偽値"))?
+                            .ok_or_else(|| anyhow::anyhow!("behavior.context_order は true か false で書きます"))?
                     }
                     "context_half_distance" => {
                         let n = value.as_integer().filter(|n| *n > 0).ok_or_else(|| {
-                            anyhow::anyhow!("behavior.context_half_distance は 1 以上の整数 (文字数)")
+                            anyhow::anyhow!("behavior.context_half_distance は 1 以上の整数 (文字数) で書きます")
                         })?;
                         cfg.context_half_distance = n as usize
                     }
                     "follow_cursor_shape" => {
                         cfg.follow_cursor_shape = value.as_bool().ok_or_else(|| {
-                            anyhow::anyhow!("behavior.follow_cursor_shape は真偽値")
+                            anyhow::anyhow!("behavior.follow_cursor_shape は true か false で書きます")
                         })?
                     }
                     other => {
-                        skip_or_reject(on, &mut notes, &format!("behavior.{other} は知らない項目"))?
+                        skip_or_reject(on, &mut notes, &format!("behavior.{other} は知らない項目です"))?
                     }
                 }
             }
@@ -695,15 +695,15 @@ impl Config {
         if let Some(c) = table.get("candidates") {
             let c = c
                 .as_table()
-                .ok_or_else(|| anyhow::anyhow!("[candidates] は表でなければならない"))?;
+                .ok_or_else(|| anyhow::anyhow!("[candidates] は表 (項目 = 値) で書きます"))?;
             for (name, value) in c {
                 match name.as_str() {
                     "inline" => {
                         let n = value
                             .as_integer()
-                            .ok_or_else(|| anyhow::anyhow!("candidates.inline は整数"))?;
+                            .ok_or_else(|| anyhow::anyhow!("candidates.inline は整数で書きます"))?;
                         if n < 1 {
-                            bail!("candidates.inline は 1 以上");
+                            bail!("candidates.inline は 1 以上にしてください");
                         }
                         cfg.inline_candidates = n as usize;
                     }
@@ -711,13 +711,13 @@ impl Config {
                         cfg.layout = match value.as_str() {
                             Some("inline") => Layout::Inline,
                             Some("float") => Layout::Float,
-                            _ => bail!("candidates.layout は \"inline\" か \"float\""),
+                            _ => bail!("candidates.layout は \"inline\" か \"float\" で書きます"),
                         }
                     }
                     other => skip_or_reject(
                         on,
                         &mut notes,
-                        &format!("candidates.{other} は知らない項目"),
+                        &format!("candidates.{other} は知らない項目です"),
                     )?,
                 }
             }
@@ -726,12 +726,12 @@ impl Config {
         if let Some(s) = table.get("snippets") {
             let s = s
                 .as_table()
-                .ok_or_else(|| anyhow::anyhow!("[snippets] は表でなければならない"))?;
+                .ok_or_else(|| anyhow::anyhow!("[snippets] は表 (項目 = 値) で書きます"))?;
             for (name, value) in s {
                 match name.as_str() {
                     "files" => cfg.snippets = parse_paths(name, value)?,
                     other => {
-                        skip_or_reject(on, &mut notes, &format!("snippets.{other} は知らない項目"))?
+                        skip_or_reject(on, &mut notes, &format!("snippets.{other} は知らない項目です"))?
                     }
                 }
             }
@@ -748,7 +748,7 @@ impl Config {
                 {
                     notes.push(format!(
                         "keys.sticky の \"{c}\" は AZIK では「{kana}」。前置キーが先に効くので\
-                         「{kana}」が打てない (別のキーへ移すか sticky = [] で外す)"
+                         「{kana}」が打てません (別のキーへ移すか sticky = [] で外してください)"
                     ));
                 }
             }
@@ -760,7 +760,7 @@ impl Config {
                 "keys" | "candidates" | "behavior" | "snippets"
             ) {
                 let _ = value;
-                skip_or_reject(on, &mut notes, &format!("[{name}] は知らない節"))?;
+                skip_or_reject(on, &mut notes, &format!("[{name}] は知らない節です"))?;
             }
         }
         Ok((cfg, notes))
@@ -778,10 +778,10 @@ fn parse_paths(name: &str, value: &toml::Value) -> Result<Vec<PathBuf>> {
             .iter()
             .map(|v| {
                 v.as_str()
-                    .ok_or_else(|| anyhow::anyhow!("snippets.{name} の並びは文字列だけ"))
+                    .ok_or_else(|| anyhow::anyhow!("snippets.{name} の並びには文字列だけを書きます"))
             })
             .collect::<Result<Vec<_>>>()?,
-        _ => bail!("snippets.{name} は文字列か文字列の並び"),
+        _ => bail!("snippets.{name} は文字列か文字列の並びで書きます"),
     };
     Ok(list.into_iter().map(expand_home).collect())
 }
@@ -804,13 +804,13 @@ fn parse_keys(name: &str, value: &toml::Value) -> Result<Vec<Key>> {
             .iter()
             .map(|v| {
                 v.as_str()
-                    .ok_or_else(|| anyhow::anyhow!("keys.{name} の並びは文字列だけ"))
+                    .ok_or_else(|| anyhow::anyhow!("keys.{name} の並びには文字列だけを書きます"))
             })
             .collect::<Result<_>>()?,
-        _ => bail!("keys.{name} は文字列か文字列の並び"),
+        _ => bail!("keys.{name} は文字列か文字列の並びで書きます"),
     };
     if specs.is_empty() {
-        bail!("keys.{name} が空。割り当てを外したいなら項目ごと消す");
+        bail!("keys.{name} が空です。割り当てを外すなら項目ごと消してください");
     }
     let mut out = Vec::new();
     for spec in specs {
@@ -822,20 +822,20 @@ fn parse_keys(name: &str, value: &toml::Value) -> Result<Vec<Key>> {
 fn parse_select(value: &toml::Value) -> Result<Vec<char>> {
     let arr = value
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("keys.select は文字の並び"))?;
+        .ok_or_else(|| anyhow::anyhow!("keys.select は文字の並びで書きます"))?;
     let mut out = Vec::new();
     for v in arr {
         let s = v
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("keys.select の並びは文字列だけ"))?;
+            .ok_or_else(|| anyhow::anyhow!("keys.select の並びには文字列だけを書きます"))?;
         let mut it = s.chars();
         match (it.next(), it.next()) {
             (Some(c), None) => out.push(c),
-            _ => bail!("keys.select は一文字ずつ書く ({s} は不可)"),
+            _ => bail!("keys.select は一文字ずつ書きます ({s} は不可)"),
         }
     }
     if out.is_empty() {
-        bail!("keys.select が空");
+        bail!("keys.select が空です");
     }
     Ok(out)
 }
@@ -851,12 +851,12 @@ fn parse_chars(name: &str, value: &toml::Value) -> Result<Vec<char>> {
             for v in a {
                 let s = v
                     .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("behavior.{name} の並びは文字列だけ"))?;
+                    .ok_or_else(|| anyhow::anyhow!("behavior.{name} の並びには文字列だけを書きます"))?;
                 out.extend(s.chars());
             }
             Ok(out)
         }
-        _ => bail!("behavior.{name} は文字列か文字列の並び"),
+        _ => bail!("behavior.{name} は文字列か文字列の並びで書きます"),
     }
 }
 
@@ -866,13 +866,13 @@ fn parse_chars(name: &str, value: &toml::Value) -> Result<Vec<char>> {
 fn parse_symbol(name: &str, value: &toml::Value) -> Result<char> {
     let s = value
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("mode_symbols.{name} は文字列"))?;
+        .ok_or_else(|| anyhow::anyhow!("mode_symbols.{name} は文字列で書きます"))?;
     let mut it = s.chars();
     let (Some(c), None) = (it.next(), it.next()) else {
-        bail!("mode_symbols.{name} は一文字だけ ({s} は不可)");
+        bail!("mode_symbols.{name} は一文字だけです ({s} は不可)");
     };
     if c.width().unwrap_or(0) != 1 {
-        bail!("mode_symbols.{name} は半角一桁の文字だけ ({c} は不可)");
+        bail!("mode_symbols.{name} は半角一桁の文字だけです ({c} は不可)");
     }
     Ok(c)
 }
@@ -887,7 +887,7 @@ fn parse_symbol(name: &str, value: &toml::Value) -> Result<char> {
 fn parse_key(spec: &str) -> Result<Vec<Key>> {
     let s = spec.trim();
     if s.is_empty() {
-        bail!("キーの指定が空");
+        bail!("キーの指定が空です");
     }
     let lower = s.to_ascii_lowercase();
     match lower.as_str() {
@@ -910,7 +910,7 @@ fn parse_key(spec: &str) -> Result<Vec<Key>> {
             }
             let mut it = rest.chars();
             let (Some(c), None) = (it.next(), it.next()) else {
-                bail!("{spec} は解せない (Ctrl は一文字にだけ付く)");
+                bail!("{spec} を読み取れません (Ctrl は一文字にだけ付きます)");
             };
             // Ctrl は上位 2 ビットを落とす。英字だけでなく `@ \ ] ^ _` にも付く。
             //
@@ -924,15 +924,15 @@ fn parse_key(spec: &str) -> Result<Vec<Key>> {
             // `C-[` は 0x1b、つまり Esc そのもの。別のキーのふりをさせず、
             // 素直に `esc` と書いてもらう。
             if c == '[' {
-                bail!("{spec} は Esc として届く (esc と書く)");
+                bail!("{spec} は Esc として届きます (esc と書いてください)");
             }
-            bail!("{spec} は解せない (Ctrl が付くのは英字と @ \\ ] ^ _ だけ)");
+            bail!("{spec} を読み取れません (Ctrl が付くのは英字と @ \\ ] ^ _ だけです)");
         }
     }
     let mut it = s.chars();
     match (it.next(), it.next()) {
         (Some(c), None) => Ok(vec![Key::Char(c)]),
-        _ => bail!("{spec} は解せない"),
+        _ => bail!("{spec} を読み取れません"),
     }
 }
 

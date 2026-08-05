@@ -95,7 +95,7 @@ fn the_reload_signal_reaches_the_wrapper() {
         std::thread::sleep(Duration::from_millis(200));
         logged = std::fs::read_to_string(&log).unwrap_or_default();
         out = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
-        if logged.contains("差し替えを頼まれた") && out.contains("差し替えを頼んだ")
+        if logged.contains("差し替えを頼まれた") && out.contains("差し替えを頼みました")
         {
             break;
         }
@@ -105,7 +105,7 @@ fn the_reload_signal_reaches_the_wrapper() {
     let _ = child.wait();
 
     assert!(
-        out.contains("差し替えを頼んだ"),
+        out.contains("差し替えを頼みました"),
         "頼む側が親を見つけられていない: {out:?}"
     );
     assert!(
@@ -124,7 +124,7 @@ fn asking_from_outside_is_refused() {
         .expect("起こせない");
     assert!(!out.status.success(), "外から呼べてしまう");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("ttyskk の中にいない"), "{err:?}");
+    assert!(err.contains("ttyskk の中ではありません"), "{err:?}");
 }
 
 /// 古い版に包まれているときは、そう分かる断りを返す。

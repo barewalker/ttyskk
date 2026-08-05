@@ -397,7 +397,7 @@ fn the_status_follows_the_handover() {
         "起きた直後なのに入れ替わったと言う: {fresh:?}"
     );
     assert!(
-        stale.contains("入れ替わっている"),
+        stale.contains("入れ替わっています"),
         "実体をすげ替えたのに気づかない: {stale:?}"
     );
     assert!(

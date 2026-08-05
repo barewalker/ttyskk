@@ -178,7 +178,7 @@ impl Index {
             return Ok(None);
         }
         let text = std::fs::read_to_string(path)
-            .with_context(|| format!("{} を読めない", path.display()))?;
+            .with_context(|| format!("{} を読み込めません", path.display()))?;
         let Some((first, _)) = text.split_once('\n') else {
             return Ok(None);
         };
@@ -202,9 +202,9 @@ impl Index {
     pub fn save(path: &Path, body: &str) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
-                .with_context(|| format!("{} を作れない", dir.display()))?;
+                .with_context(|| format!("{} を作れません", dir.display()))?;
         }
-        std::fs::write(path, body).with_context(|| format!("{} を書けない", path.display()))
+        std::fs::write(path, body).with_context(|| format!("{} に書き込めません", path.display()))
     }
 
     fn line(&self, i: usize) -> &str {
