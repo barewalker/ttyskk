@@ -40,6 +40,7 @@
 #hankaku_katakana = "C-q"    # ひらがな ⇄ 半角カタカナ / ▽ を半角カタカナにして確定
 #start_conversion = "Q"      # 空の見出し語で変換を始める (複合語向け)
 #abbrev = "/"                # ASCII の見出し語で変換する
+#latin = "C-l"               # ▽ の見出し語を打った綴り (ASCII) に置き換える
 #convert = "space"           # 変換する / 次の候補へ
 #previous = "x"              # 前の候補へ
 #complete = "tab"            # ▽ の見出し語を前方一致で補完する / 次の補完候補へ

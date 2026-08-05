@@ -442,6 +442,19 @@ struct Completion {
     index: usize,
 }
 
+/// ASCII の綴りに移る前の ▽ ([`Config::latin`])。
+///
+/// **取り消しは一段ずつ戻す。** `TAB` の補完を `C-g` で元の見出し語に戻せるのと
+/// 同じ流儀で、`C-l` で移ったあとの `C-g` はまず かな の見出し語へ戻す。もう一度
+/// 押せば普段どおり ▽ ごと取り消す。
+struct BeforeLatin {
+    reading: String,
+    okuri_head: Option<char>,
+    okuri_kana: String,
+    /// 打ちかけのローマ字。送り仮名の頭文字 (`▽うご*k` の `k`) はここにいる。
+    pending: String,
+}
+
 pub struct Skk {
     pub mode: Mode,
     phase: Phase,
@@ -458,6 +471,19 @@ pub struct Skk {
     okuri_kana: String,
     /// `/` で始めた ASCII 見出し語の入力中か。
     abbrev: bool,
+    /// ▽ に入ってから打った ASCII の並び ([`Config::latin`] で見出し語をこれに戻す)。
+    ///
+    /// **かなから綴りを逆算するのではなく、打鍵をそのまま控えておく。** 「し」を
+    /// `si` と打ったか `shi` と打ったかは、かなを見ても分からない。追えなくなった
+    /// ら `None` にして、`latin` キーには何もさせない。
+    spell: Option<String>,
+    /// ASCII に移る前の ▽ ([`Config::latin`])。取り消しで一段戻すために控える。
+    before_latin: Option<BeforeLatin>,
+    /// [`Config::latin`] を続けて押している最中の段 (0 小文字 / 1 先頭大文字 / 2 全大文字)。
+    ///
+    /// 巡回は押した直後だけ。間に何か打てば `None` に戻り、以降その見出し語では
+    /// 巡回しない — ASCII に移ったあとの打鍵で綴りとずれるため。
+    latin_step: Option<u8>,
     /// 前置キー (sticky shift) を受け取って、次の一打鍵を待っている状態。
     ///
     /// 立っている間は打ちかけと同じ扱いにする ([`Skk::is_idle`])。ここで ASCII へ
@@ -523,6 +549,9 @@ impl Skk {
             okuri_head: None,
             okuri_kana: String::new(),
             abbrev: false,
+            spell: None,
+            before_latin: None,
+            latin_step: None,
             sticky: false,
             candidates: Vec::new(),
             cand_index: 0,
@@ -1090,6 +1119,9 @@ impl Skk {
         self.okuri_head = None;
         self.okuri_kana.clear();
         self.abbrev = false;
+        self.spell = None;
+        self.before_latin = None;
+        self.latin_step = None;
         self.candidates.clear();
         self.cand_index = 0;
         self.numbers.clear();
@@ -1113,9 +1145,14 @@ impl Skk {
     }
 
     /// 見出し語を丸ごと置き換える。カーソルは末尾へ。
+    ///
+    /// **控えてある綴りは捨てる。** 置き換えた見出し語は打鍵の並びと関わりが無く
+    /// なる (補完で別の語になる、登録から戻る、など)。綴りから置き換える
+    /// [`Skk::latin_spelling`] だけは、そのあとで控えを戻す。
     fn set_reading(&mut self, s: String) {
         self.reading = s;
         self.read_cursor = self.reading.len();
+        self.spell = None;
     }
 
     /// カーソルの手前の一文字を消す。消せたら true。
@@ -1513,6 +1550,7 @@ impl Skk {
             k if self.cfg.start_conversion.contains(&k) => {
                 self.phase = Phase::Composing;
                 self.romaji.clear();
+                self.spell = Some(String::new());
                 Response::default()
             }
             k if self.romaji.is_empty() && self.cfg.abbrev.contains(&k) => {
@@ -1522,6 +1560,9 @@ impl Skk {
             }
             Key::Char(c) if c.is_ascii_uppercase() => {
                 self.phase = Phase::Composing;
+                // ここから打った ASCII を控え始める ([`Config::latin`])。打ちかけの
+                // ローマ字も綴りの一部 — `n` のあとに `Kanji` と打てば `nKanji`。
+                self.spell = Some(format!("{}{c}", self.romaji.pending()));
                 let kana = self.romaji.feed(c.to_ascii_lowercase());
                 self.insert_reading(&kana);
                 Response::default()
@@ -1552,9 +1593,14 @@ impl Skk {
         let keep = self.cfg.complete.contains(&key)
             || self.cfg.complete_previous.contains(&key)
             || self.cfg.cancel.contains(&key);
+        // 大小の巡回が続くのは `latin` キーを押し続けている間だけ ([`Skk::latin_spelling`])
+        let keep_latin = self.cfg.latin.contains(&key);
         let r = self.composing_inner(key);
         if !keep {
             self.completion = None;
+        }
+        if !keep_latin {
+            self.latin_step = None;
         }
         r
     }
@@ -1565,6 +1611,12 @@ impl Skk {
                 // 補完の途中なら、まず補完を取り消して元の見出し語に戻す
                 if let Some(c) = self.completion.take() {
                     self.set_reading(c.original);
+                    return Response::default();
+                }
+                // ASCII の綴りに移ったあとなら、まず かな の見出し語へ戻す
+                // (もう一度押せば普段どおり ▽ ごと取り消す)
+                if let Some(b) = self.before_latin.take() {
+                    self.restore_before_latin(b);
                     return Response::default();
                 }
                 // 取り消して何も出さない
@@ -1584,43 +1636,58 @@ impl Skk {
                 Response::text(&text)
             }
             // 見出し語の中を動く。打ちかけのローマ字はその場に落としてから動かす。
+            //
+            // ここから先の直しは打った順から外れるので、控えていた綴りは捨てる
+            // (`latin` キーは何も起こさなくなる)。どの打鍵がどのかなになったかは
+            // 追えないため、途中を直したあとで綴りに戻す道は用意しない。
             k if self.cfg.move_left.contains(&k) => {
                 self.flush_pending();
+                self.spell = None;
                 self.move_cursor(-1);
                 Response::default()
             }
             k if self.cfg.move_right.contains(&k) => {
                 self.flush_pending();
+                self.spell = None;
                 self.move_cursor(1);
                 Response::default()
             }
             k if self.cfg.move_home.contains(&k) => {
                 self.flush_pending();
+                self.spell = None;
                 self.read_cursor = 0;
                 Response::default()
             }
             k if self.cfg.move_end.contains(&k) => {
                 self.flush_pending();
+                self.spell = None;
                 self.read_cursor = self.reading.len();
                 Response::default()
             }
             k if self.cfg.delete_forward.contains(&k) => {
                 // カーソルの乗っている一文字。末尾では何も起きない。
+                self.spell = None;
                 self.delete_at_cursor();
                 Response::default()
             }
             k if self.cfg.backspace.contains(&k) => {
                 if self.romaji.backspace() {
+                    self.pop_spell();
                 } else if self.cursor_inside_reading() {
                     // 途中へ動かしてある間は、送り仮名より先に見出し語のそこを直す
                     // (先頭にいるなら何も起きない)
                     self.delete_before_cursor();
+                    self.spell = None;
                 } else if !self.okuri_kana.is_empty() {
                     self.okuri_kana.pop();
+                    self.pop_spell();
                 } else if self.okuri_head.is_some() {
                     self.okuri_head = None;
+                    self.pop_spell();
                 } else if !self.delete_before_cursor() {
                     self.reset();
+                } else {
+                    self.pop_spell();
                 }
                 Response::default()
             }
@@ -1648,6 +1715,7 @@ impl Skk {
                 self.start_conversion();
                 Response::default()
             }
+            k if self.cfg.latin.contains(&k) => self.latin_spelling(),
             k if !self.abbrev && self.cfg.hankaku_katakana.contains(&k) => {
                 // 見出し語を半角カタカナにして確定する
                 self.flush_pending();
@@ -1686,6 +1754,7 @@ impl Skk {
                 // ここを送り仮名に入れると見出しが `かj` や `はs` になり、どの辞書にも
                 // 当たらない。どこで切るかは打つ人が決めていて、`KaTta` (見出し `かt`
                 // 送り「った」) と `KatTa` (見出し `かっt` 送り「た」) は別物になる。
+                self.push_spell(c);
                 let carry_to_reading = self.okuri_head.is_none() && !self.romaji.is_empty();
                 if self.okuri_head.is_none() {
                     self.okuri_head = Some(c.to_ascii_lowercase());
@@ -1702,11 +1771,13 @@ impl Skk {
                 Response::default()
             }
             Key::Char(c) if c.is_ascii_uppercase() => {
+                self.push_spell(c);
                 let kana = self.romaji.feed(c.to_ascii_lowercase());
                 self.insert_reading(&kana);
                 Response::default()
             }
             Key::Char(c) => {
+                self.push_spell(c);
                 let kana = self.romaji.feed(c);
                 if self.okuri_head.is_some() {
                     self.okuri_kana.push_str(&kana);
@@ -1714,7 +1785,9 @@ impl Skk {
                         self.start_conversion();
                     }
                 } else if self.auto_start(&kana) {
-                    // 区切りの文字が来たので、その手前までで変換を始めた
+                    // 区切りの文字が来たので、その手前までで変換を始めた。引き金の
+                    // 文字は見出し語の外へ出るので、綴りとは並びが揃わなくなる。
+                    self.spell = None;
                 } else {
                     self.insert_reading(&kana);
                 }
@@ -1733,6 +1806,91 @@ impl Skk {
                 }
             }
         }
+    }
+
+    /// 打った ASCII を控えに足す。追えなくなっていれば何もしない。
+    fn push_spell(&mut self, c: char) {
+        if let Some(s) = self.spell.as_mut() {
+            s.push(c);
+        }
+    }
+
+    /// 打鍵を一つ戻したぶん、控えも一つ短くする。
+    fn pop_spell(&mut self) {
+        if let Some(s) = self.spell.as_mut() {
+            s.pop();
+        }
+    }
+
+    /// 見出し語を、打った綴り (ASCII) に置き換えて `/` の ASCII 見出し語に移る
+    /// ([`Config::latin`])。
+    ///
+    /// 続けて押すと 小文字 → 先頭大文字 → 全て大文字 と巡る。**巡回は押した直後
+    /// だけ**で、間に何か打てば終わる — ASCII に移ったあとの打鍵は控えに入らない
+    /// ので、そこで巡り直すと打った続きが消えてしまう。
+    ///
+    /// 綴りを追えていないとき (カーソルを動かした、`TAB` で補完した、`/` で始めた)
+    /// は何も起こさない。
+    fn latin_spelling(&mut self) -> Response {
+        // 巡回の続きでなく、既に ASCII に移っているなら何もしない
+        if self.abbrev && self.latin_step.is_none() {
+            return Response::default();
+        }
+        let Some(spell) = self.spell.clone() else {
+            return Response::default();
+        };
+        if spell.is_empty() {
+            return Response::default();
+        }
+        let step = match self.latin_step {
+            Some(n) => (n + 1) % 3,
+            None => {
+                // 初めて移るところ。取り消しでそのままの姿へ戻せるよう控えておく。
+                // 打ちかけのローマ字も控える — かなに落としてしまうと `▽うご*k` の
+                // 送り仮名の頭文字が消えてしまう。
+                self.before_latin = Some(BeforeLatin {
+                    reading: self.reading.clone(),
+                    okuri_head: self.okuri_head,
+                    okuri_kana: self.okuri_kana.clone(),
+                    pending: self.romaji.pending().to_string(),
+                });
+                0
+            }
+        };
+        let lower = spell.to_ascii_lowercase();
+        let text = match step {
+            0 => lower,
+            1 => {
+                let mut s = lower;
+                s[..1].make_ascii_uppercase();
+                s
+            }
+            _ => spell.to_ascii_uppercase(),
+        };
+        // 打ちかけのローマ字も送り仮名も綴りの中に入っている
+        self.romaji.clear();
+        self.okuri_head = None;
+        self.okuri_kana.clear();
+        self.abbrev = true;
+        self.set_reading(text);
+        self.spell = Some(spell);
+        self.latin_step = Some(step);
+        Response::default()
+    }
+
+    /// ASCII に移る前の ▽ へ戻す ([`BeforeLatin`])。
+    ///
+    /// 綴りの控えはそのまま持っておく。戻したところからもう一度 `C-l` を押せば、
+    /// また ASCII へ移れる。
+    fn restore_before_latin(&mut self, b: BeforeLatin) {
+        let spell = self.spell.take();
+        self.romaji.set_pending(&b.pending);
+        self.abbrev = false;
+        self.okuri_head = b.okuri_head;
+        self.okuri_kana = b.okuri_kana;
+        self.set_reading(b.reading);
+        self.spell = spell;
+        self.latin_step = None;
     }
 
     /// ▽ の内容をそのまま (かなのまま) 確定させた文字列。
@@ -4463,5 +4621,252 @@ mod tests {
         skk.handle(Key::Ctrl(0x0a));
         typed(&mut skk, "L");
         assert_eq!(typed(&mut skk, "abc"), "ａｂｃ");
+    }
+
+    // ---- ▽ を打った綴り (ASCII) に戻す ([`Config::latin`]) ----
+
+    /// `latin` キー (既定 `C-l`)。
+    fn latin(skk: &mut Skk) -> String {
+        String::from_utf8(skk.handle(Key::Ctrl(0x0c)).to_child()).unwrap()
+    }
+
+    /// 見出し語が打った綴りに変わり、`/` と同じ ASCII 見出し語に移る。
+    #[test]
+    fn latin_turns_reading_into_the_typed_spelling() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji");
+        // ▽ に留まるので、そこから確定できる
+        assert_eq!(typed(&mut skk, "\n"), "kanji");
+    }
+
+    /// 続けて押すと 小文字 → 先頭大文字 → 全て大文字 と巡る。
+    #[test]
+    fn latin_cycles_through_letter_cases() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽Kanji");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽KANJI");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji");
+    }
+
+    /// **かなから逆算するのではなく、打鍵をそのまま覚えている。**
+    ///
+    /// かなにならない綴りは ▽ の中で崩れた姿になるが、戻せば打った通りに揃う。
+    /// 「し」を `si` と打ったか `shi` と打ったかも、かなを見ても分からない。
+    #[test]
+    fn latin_remembers_keystrokes_not_kana() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Hello");
+        assert_eq!(preedit_text(&skk), "▽へllお");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽hello");
+
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Shift");
+        assert_eq!(preedit_text(&skk), "▽しft");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽shift");
+    }
+
+    /// 移ったあとは `/` の ASCII 見出し語そのもの。続きを打てるし、変換もできる。
+    #[test]
+    fn latin_lands_in_abbrev() {
+        let mut skk = skk_with(&[("kanji", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        assert_eq!(typed(&mut skk, " "), "");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+
+        // 続きを打つ道も残っている
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        typed(&mut skk, "5");
+        assert_eq!(preedit_text(&skk), "▽kanji5");
+    }
+
+    /// **巡回が効くのは押した直後だけ。** 間に何か打てば終わる。
+    ///
+    /// ASCII に移ったあとの打鍵は控えに入らないので、そこで巡り直すと打った続きが
+    /// 消えてしまう。だから何も起こさない。`l` を含む語も普通に打てる。
+    #[test]
+    fn latin_cycle_ends_once_something_else_is_typed() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        typed(&mut skk, "5");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji5");
+    }
+
+    /// `/` で始めた ASCII 見出し語では何も起こさない (既に ASCII なので戻す先が無い)。
+    #[test]
+    fn latin_does_nothing_inside_slash_abbrev() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "/html");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽html");
+    }
+
+    /// Backspace で打鍵を戻せば、控えの綴りも一つ短くなる。
+    #[test]
+    fn latin_follows_backspace() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji\x7f");
+        assert_eq!(preedit_text(&skk), "▽かん");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanj");
+    }
+
+    /// カーソルを動かして途中を直したあとは、綴りを追えないので何も起こさない。
+    #[test]
+    fn latin_gives_up_after_the_cursor_moves() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        skk.handle(Key::Ctrl(0x02)); // C-b
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    /// `TAB` で補完したあとも同じ。見出し語は打鍵の並びと関わりが無くなっている。
+    #[test]
+    fn latin_gives_up_after_completion() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/"), ("かんじゃ", "/患者/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanj");
+        skk.handle(Key::Tab);
+        assert_eq!(preedit_text(&skk), "▽かんじ 漢字 [1/2]");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    /// 送り仮名を打ちかけの ▽ でも、そこまでの打鍵がそのまま戻る。
+    #[test]
+    fn latin_takes_the_okurigana_keystrokes_too() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "UgoK");
+        assert_eq!(preedit_text(&skk), "▽うご*k");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽ugok");
+    }
+
+    /// ▼ から `C-g` で ▽ へ戻れば、そこからでも綴りに戻せる。
+    #[test]
+    fn latin_works_after_stepping_back_from_a_candidate() {
+        let mut skk = skk_with(&[("かんじ", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        typed(&mut skk, "\x07"); // C-g
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji");
+    }
+
+    /// **取り消しは一段ずつ。** まず かな の見出し語へ戻り、もう一度で ▽ ごと消える。
+    ///
+    /// `TAB` の補完を `C-g` で元の見出し語に戻せるのと同じ流儀。ASCII に移ったのが
+    /// 勘違いだったとき、打ち直さずに済む。
+    #[test]
+    fn cancel_steps_back_from_latin_to_kana() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji");
+        typed(&mut skk, "\x07"); // C-g
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "");
+    }
+
+    /// 巡回したあとでも、続きを打ったあとでも、戻る先は同じ。
+    #[test]
+    fn cancel_steps_back_however_far_the_spelling_went() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        latin(&mut skk);
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽KANJI");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        typed(&mut skk, "5");
+        assert_eq!(preedit_text(&skk), "▽kanji5");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    /// 送り仮名を打ちかけの ▽ から移ったときも、その姿ごと戻る。
+    #[test]
+    fn cancel_brings_back_the_okurigana() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "UgoK");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽ugok");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽うご*k");
+    }
+
+    /// ASCII で変換したあとも一段ずつ。▼ → ▽ASCII → ▽かな と戻る。
+    #[test]
+    fn cancel_steps_back_through_the_candidate_too() {
+        let mut skk = skk_with(&[("kanji", "/漢字/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        typed(&mut skk, " ");
+        assert_eq!(preedit_text(&skk), "▼漢字");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽kanji");
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+    }
+
+    /// 戻したところから、もう一度 ASCII へ移れる。
+    #[test]
+    fn latin_can_be_used_again_after_cancel() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Kanji");
+        latin(&mut skk);
+        typed(&mut skk, "\x07");
+        assert_eq!(preedit_text(&skk), "▽かんじ");
+        latin(&mut skk);
+        assert_eq!(preedit_text(&skk), "▽kanji");
+    }
+
+    /// ▽ の外では素通し。shell の画面消去などはそのまま子アプリへ届く。
+    #[test]
+    fn latin_key_passes_through_outside_composing() {
+        let mut skk = skk_with(&[]);
+        assert_eq!(skk.handle(Key::Ctrl(0x0c)).to_child(), vec![0x0c]);
+        skk.handle(Key::Ctrl(0x0a)); // かなモードへ
+        assert_eq!(skk.handle(Key::Ctrl(0x0c)).to_child(), vec![0x0c]);
     }
 }
