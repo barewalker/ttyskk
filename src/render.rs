@@ -104,8 +104,13 @@ impl Overlay {
             // 全角の後続セルの上には敷かない (前半を断ち切ってしまう)
             return;
         }
-        // 記号を指定されていればそれを、無ければ控えの文字をそのまま出す
-        let (ch, w) = match t.glyph {
+        // 記号を指定されていればそれを、無ければ控えの文字をそのまま出す。
+        //
+        // **記号を出すのは空きセルの上だけ。** 打ち終えた文字の上へカーソルを
+        // 戻したとき、記号で置き換えるとその一文字が読めなくなる (`▽` を抜けた
+        // あとに C-b で行の途中へ戻ると起きる)。文字の上では色だけを敷いて、
+        // 下の文字を見せる — `cell` と同じ姿になるが、モードは色で分かる。
+        let (ch, w) = match t.glyph.filter(|_| cell.ch == ' ') {
             Some(g) => (g, 1),
             None => (cell.ch, (cell.width as usize).max(1)),
         };
@@ -256,6 +261,57 @@ mod tests {
             style,
             text: text.to_string(),
         }
+    }
+
+    /// カーソル位置に色 (と記号) を敷くだけの Preedit。
+    fn tint(glyph: Option<char>) -> Preedit {
+        Preedit {
+            cursor_tint: Some(Tint {
+                style: Style::ModeHiragana,
+                offset: 0,
+                glyph,
+            }),
+            ..Preedit::default()
+        }
+    }
+
+    /// 空きセルの上では記号を出す (`mode_marker = "symbol"`)。
+    #[test]
+    fn the_symbol_shows_on_an_empty_cell() {
+        let s = screen_with("$ ", 5, 20);
+        let mut o = Overlay::new();
+        let bytes = String::from_utf8(o.draw(&s, &tint(Some('~')))).unwrap();
+        assert!(bytes.contains('~'), "{bytes:?}");
+        assert_eq!(o.painted, vec![(0, 2, 1)]);
+    }
+
+    /// **打ち終えた文字の上では記号を出さない。** その一文字が読めなくなるため。
+    ///
+    /// 色は敷くので、モードは分かったまま。`cell` と同じ姿になる。
+    #[test]
+    fn the_symbol_gives_way_to_the_character_underneath() {
+        let mut s = screen_with("abcdef", 5, 20);
+        s.set_cursor(0, 3); // `d` の上
+        let mut o = Overlay::new();
+        let bytes = String::from_utf8(o.draw(&s, &tint(Some('~')))).unwrap();
+        assert!(
+            !bytes.contains('~'),
+            "記号が下の文字を隠している: {bytes:?}"
+        );
+        assert!(bytes.contains('d'), "{bytes:?}");
+        assert_eq!(o.painted, vec![(0, 3, 1)]);
+    }
+
+    /// 全角の上でも、その文字をそのまま出す (幅も保つ)。
+    #[test]
+    fn the_symbol_gives_way_to_a_wide_character() {
+        let mut s = screen_with("あいう", 5, 20);
+        s.set_cursor(0, 2); // `い` の上
+        let mut o = Overlay::new();
+        let bytes = String::from_utf8(o.draw(&s, &tint(Some('~')))).unwrap();
+        assert!(!bytes.contains('~'), "{bytes:?}");
+        assert!(bytes.contains('い'), "{bytes:?}");
+        assert_eq!(o.painted, vec![(0, 2, 2)]);
     }
 
     #[test]
