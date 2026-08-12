@@ -117,11 +117,10 @@ fn the_wrapper_follows_the_child_into_a_new_directory() {
     // 行末は CR。LF (0x0a) は Ctrl+J で、かなモードへ入る合図になってしまう。
     line("stty -echo\r");
     std::thread::sleep(Duration::from_millis(300));
+    // **`cd` を打ったきり放置する。** 続けて何か打てば、そのついでに気づく。
+    // 打たずに置いたときに追いつけるかが要 — 端末を放り出したまま席を立つのが、
+    // まさに端末多重化器がタブ一覧を作る場面。
     line(&format!("cd {}\r", moved.display()));
-    // 付いていくのは子が何か出したとき。プロンプトだけでも足りるが、確実に
-    // 出させておく。
-    std::thread::sleep(Duration::from_millis(300));
-    line("echo .\r");
 
     let after = wait_for_cwd(pid, &moved, 10);
 
@@ -173,8 +172,6 @@ fn a_relative_user_dict_stays_where_it_started() {
     key("stty -echo\r");
     std::thread::sleep(Duration::from_millis(300));
     key(&format!("cd {}\r", moved.display()));
-    std::thread::sleep(Duration::from_millis(300));
-    key("echo .\r");
 
     // 先に移っていることを確かめる。移っていなければ、この試験は何も見張れない。
     let followed = wait_for_cwd(pid, &moved, 10);
