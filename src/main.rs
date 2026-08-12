@@ -290,6 +290,69 @@ impl Kid {
     }
 }
 
+/// 子が居るディレクトリへ自分も移る。
+///
+/// **外から見える ttyskk の作業ディレクトリを、実際にシェルが居る場所に合わせる
+/// ためのもの。** ttyskk は擬似端末をもう一枚開いて子を動かすので、外側の端末の
+/// 前景プロセスグループには ttyskk しか居ない。端末多重化器 (herdr など) は
+/// そこから作業ディレクトリを取るため、何もしないと**起動した時点の場所に
+/// 貼り付いたまま**になり、タブ一覧やディレクトリ基準の移動が実態とずれる。
+/// OSC 7 で外へ伝える手もあるが、受け取らない多重化器もあるので自分で `chdir`
+/// する。
+///
+/// 見るのは**直下の子 (シェル)** の作業ディレクトリ。前景プロセスグループを
+/// `tcgetpgrp` で追う手もあるが、子が入れ替わるたびに対象が変わる。編集器や
+/// 対話ツールが前面に出ていても直下のシェルは `cd` した先に居るので、こちらの方が
+/// 落ち着く。
+///
+/// `chdir` した先はアンマウントや削除を妨げるが、同じ場所はシェル自身も掴んで
+/// いるので実質は変わらない。
+// `/proc` の無い環境では中身を使わないが、呼び手を `cfg` だらけにしないために形は残す。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct FollowCwd {
+    pid: libc::pid_t,
+    /// 前回確かめた時刻。子の出力のたびに `readlink` を叩かないための間引き。
+    last: Option<Instant>,
+}
+
+impl FollowCwd {
+    /// 確かめる間隔。子の出力は連続して届くので、毎回見にいくと無駄が多い。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    const INTERVAL: Duration = Duration::from_millis(500);
+
+    fn new(pid: libc::pid_t) -> Self {
+        FollowCwd { pid, last: None }
+    }
+
+    /// 子に付いていく。移ったときだけ移った先を返す。
+    ///
+    /// **読めなければ黙って諦める。** 子が居るディレクトリが消えていれば
+    /// `readlink` も `chdir` も失敗するが、そのときは前の場所を保てばよい。
+    #[cfg(target_os = "linux")]
+    fn tick(&mut self) -> Option<PathBuf> {
+        let now = Instant::now();
+        if let Some(last) = self.last
+            && now.duration_since(last) < Self::INTERVAL
+        {
+            return None;
+        }
+        self.last = Some(now);
+
+        let target = fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()?;
+        if std::env::current_dir().is_ok_and(|here| here == target) {
+            return None;
+        }
+        std::env::set_current_dir(&target).ok()?;
+        Some(target)
+    }
+
+    /// `/proc` の無い環境では何もしない。
+    #[cfg(not(target_os = "linux"))]
+    fn tick(&mut self) -> Option<PathBuf> {
+        None
+    }
+}
+
 /// 擬似端末と子を抱えたまま、自分だけを新しいバイナリへ入れ替える。
 ///
 /// **成功すれば戻らない。** 戻ってきたのは差し替えられなかったということなので、
@@ -299,12 +362,27 @@ impl Kid {
 /// `exe` は**起動時に控えておいたパス**を渡すこと。`/proc/self/exe` は入れ替え前の
 /// 実体を指し続けるので (`cargo install` は別のファイルを作って置き換える)、
 /// そこから取ると何度やっても古い版が起きる。
-fn hand_over(exe: &Path, master: &Master, pid: libc::pid_t, raw: &RawGuard) -> anyhow::Error {
+///
+/// `origin` は**起動した時点の作業ディレクトリ**。次の版は自分で環境変数や設定を
+/// 読み直すので、[`FollowCwd`] で移った先から `exec` すると、相対パスで書かれた
+/// 辞書や定型文の行き先が入れ替わってしまう。渡す前に起点へ戻しておく。
+fn hand_over(
+    exe: &Path,
+    master: &Master,
+    pid: libc::pid_t,
+    raw: &RawGuard,
+    origin: &Path,
+) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
 
     // 端末を元の設定へ戻す。**次の版は起動時に `tcgetattr` で原本を控える**ので、
     // raw のまま渡すと「raw が原本」になり、抜けたときに戻せなくなる。
     raw.suspend();
+
+    // 起点へ戻す。消えていたら諦める (次の版はいまの場所で読むことになるが、
+    // 差し替えを取りやめるほどのことではない)。差し替えられずに戻ってきた場合も、
+    // 次に子が何か出せば [`FollowCwd`] が追いかけ直す。
+    let _ = std::env::set_current_dir(origin);
 
     // `exec` をまたいで fd を残す
     let flags = unsafe { libc::fcntl(master.fd, libc::F_GETFD) };
@@ -526,12 +604,28 @@ fn winsize() -> (u16, u16) {
     }
 }
 
+/// 相対パスを**いまの**作業ディレクトリで畳んで絶対パスにする。
+///
+/// ttyskk は動いている間、子の `cd` に付いて自分も移る ([`FollowCwd`])。相対パスを
+/// そのまま抱えていると、辞書を書き出す頃には別の場所を指してしまうので、**追い
+/// かけ始める前に**起点を固めておく。作業ディレクトリが読めないときは諦めてその
+/// まま返す (どのみち直しようがない)。
+fn absolute(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    match std::env::current_dir() {
+        Ok(dir) => dir.join(path),
+        Err(_) => path,
+    }
+}
+
 fn default_system_jisyo() -> Vec<PathBuf> {
     if let Some(v) = config::env_os("TTYSKK_JISYO").and_then(|v| v.into_string().ok()) {
         return v
             .split(':')
             .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
+            .map(|s| absolute(PathBuf::from(s)))
             .collect();
     }
     // distrobox の中からはホスト側が /run/host 以下に見える
@@ -552,9 +646,11 @@ fn data_home() -> PathBuf {
 }
 
 fn user_jisyo() -> PathBuf {
-    config::env_os("TTYSKK_USER_JISYO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_home().join("ttyskk/user.dict"))
+    absolute(
+        config::env_os("TTYSKK_USER_JISYO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_home().join("ttyskk/user.dict")),
+    )
 }
 
 /// スニペットの置き場所。設定が空なら既定の一つだけを読む。
@@ -563,9 +659,9 @@ fn user_jisyo() -> PathBuf {
 /// 分け合っている場合、定型文もそのまま行き来する。
 fn snippet_paths(cfg: &Config) -> Vec<PathBuf> {
     if cfg.snippets.is_empty() {
-        vec![data_home().join("ttyskk/snippets.code-snippets")]
+        vec![absolute(data_home().join("ttyskk/snippets.code-snippets"))]
     } else {
-        cfg.snippets.clone()
+        cfg.snippets.iter().cloned().map(absolute).collect()
     }
 }
 
@@ -1205,7 +1301,8 @@ fn main() -> Result<()> {
     // 揃っているとは限らない (dotfiles だけ先に届く)。項目一つで日本語入力そのものが
     // 使えなくなるのは割に合わないので、読み飛ばして知らせるだけにする。
     // 打ち間違いを見つけたいときは `--check-config` を呼ぶ (あちらは誤りとして扱う)。
-    let config_path = config::config_path();
+    // 見張りは動いている間ずっと続くので、追いかけ始める前に絶対パスへ畳んでおく。
+    let config_path = absolute(config::config_path());
     let (cfg, notes) = Config::load_with(&config_path, config::OnUnknown::Skip)
         .with_context(|| format!("設定 {} を読み込めません", config_path.display()))?;
     for note in &notes {
@@ -1228,6 +1325,9 @@ fn main() -> Result<()> {
     // 続けるので (`cargo install` は別のファイルを作って置き換える)、差し替えの
     // ときにそこから取ると何度やっても古い版が起きる。
     let exe = std::env::current_exe().context("自分の置き場所が分かりません")?;
+    // 起動した時点の作業ディレクトリ。子に付いて移った後 ([`FollowCwd`]) でも、
+    // 差し替えのときはここへ戻してから次の版に渡す。
+    let start_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // いまの姿を書き留める。差し替えは見た目を変えないので、これが唯一の手応えになる
     // (`ttyskk --status`)。差し替えでも PID は変わらないので、同じ場所を上書きする。
     write_status(&exe);
@@ -1302,6 +1402,10 @@ fn main() -> Result<()> {
             (Master::opened(pair.master)?, Kid::Spawned(child))
         }
     };
+
+    // 子の `cd` に付いていく。差し替えで引き継いだ子でも PID は変わらないので、
+    // どちらの経路でも同じように追える。
+    let mut follow = child.pid().map(FollowCwd::new);
 
     let mut writer = master.stream().context("擬似端末に書き込めません")?;
     let mut reader = master.stream().context("擬似端末を読み込めません")?;
@@ -1489,6 +1593,13 @@ fn main() -> Result<()> {
         };
         match ev {
             Event::Child(data) => {
+                // 出力があったということは、子が何かした後。`cd` していれば
+                // ここで付いていく (中は間隔で間引く)。
+                if let Some(f) = follow.as_mut()
+                    && let Some(dir) = f.tick()
+                {
+                    trace.log(format_args!("--- 子に付いて {} へ移る", dir.display()));
+                }
                 context_stale = true;
                 let had_overlay = !overlay.is_empty();
                 // 消去は直前の切れ目 (安全な位置) で行う。**前回の出力が文字や
@@ -1779,7 +1890,7 @@ fn main() -> Result<()> {
                     // 戻ってきたのは差し替えられなかったということ。**子を道連れに
                     // するくらいなら、そのまま動き続ける。**
                     Some(pid) => {
-                        let e = hand_over(&exe, &master, pid, &raw);
+                        let e = hand_over(&exe, &master, pid, &raw, &start_dir);
                         trace.log(format_args!("--- 差し替えられない: {e:#}"));
                         // 消した重ね描きは次の打鍵で描き直される
                         overlay.forget();
