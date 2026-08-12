@@ -311,45 +311,77 @@ impl Kid {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct FollowCwd {
     pid: libc::pid_t,
-    /// 前回確かめた時刻。子の出力のたびに `readlink` を叩かないための間引き。
-    last: Option<Instant>,
+    /// 前回見にいった時刻。流し続けるアプリの下で `readlink` を叩き続けないための間引き。
+    looked: Option<Instant>,
+    /// 最後に子が何か出した時刻。**まだ見届けていない出力がある**印でもあり、
+    /// 静かになったところで見にいったら消す。
+    spoke: Option<Instant>,
 }
 
 impl FollowCwd {
-    /// 確かめる間隔。子の出力は連続して届くので、毎回見にいくと無駄が多い。
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// 見にいく間隔。出力のたびに見るのは無駄で、静かになる合図もこの長さで測る。
     const INTERVAL: Duration = Duration::from_millis(500);
 
-    fn new(pid: libc::pid_t) -> Self {
-        FollowCwd { pid, last: None }
+    /// `/proc` のある環境でだけ追いかける。それ以外では `None` を返すので、
+    /// 呼び手は何も持たないまま普段どおり動く。
+    #[cfg(target_os = "linux")]
+    fn new(pid: libc::pid_t) -> Option<Self> {
+        Some(FollowCwd {
+            pid,
+            looked: None,
+            spoke: None,
+        })
     }
 
-    /// 子に付いていく。移ったときだけ移った先を返す。
+    #[cfg(not(target_os = "linux"))]
+    fn new(_pid: libc::pid_t) -> Option<Self> {
+        None
+    }
+
+    /// 子が何か出した。**間引きに引っかからなければ、その場で見にいく。**
+    ///
+    /// 流し続けるアプリ (`cd foo && make` のような) の下でも追いつくための入口。
+    /// ここだけでは足りない — `cd` の直後の出力は、打鍵のこだまもプロンプトの
+    /// 描き直しも一続きに届くので、**`chdir` が済んだ後の分が必ず間引きに落ちる**。
+    /// 取りこぼしは [`FollowCwd::settled`] が拾う。
+    fn spoke(&mut self) -> Option<PathBuf> {
+        let now = Instant::now();
+        self.spoke = Some(now);
+        match self.looked {
+            Some(last) if now.duration_since(last) < Self::INTERVAL => None,
+            _ => self.look(),
+        }
+    }
+
+    /// 出力が途切れるまでの残り。見届けていない出力が無ければ `None`。
+    ///
+    /// 主ループはこれで待ちを区切り、途切れたところで [`FollowCwd::settled`] を呼ぶ。
+    fn quiet_in(&self) -> Option<Duration> {
+        self.spoke
+            .map(|t| Self::INTERVAL.saturating_sub(t.elapsed()))
+    }
+
+    /// 出力が途切れた。**`cd` を打ったきり放置されても、ここで追いつく。**
+    fn settled(&mut self) -> Option<PathBuf> {
+        if self.quiet_in()? > Duration::ZERO {
+            return None;
+        }
+        self.spoke = None;
+        self.look()
+    }
+
+    /// 子が居るところへ移る。移ったときだけ移った先を返す。
     ///
     /// **読めなければ黙って諦める。** 子が居るディレクトリが消えていれば
     /// `readlink` も `chdir` も失敗するが、そのときは前の場所を保てばよい。
-    #[cfg(target_os = "linux")]
-    fn tick(&mut self) -> Option<PathBuf> {
-        let now = Instant::now();
-        if let Some(last) = self.last
-            && now.duration_since(last) < Self::INTERVAL
-        {
-            return None;
-        }
-        self.last = Some(now);
-
+    fn look(&mut self) -> Option<PathBuf> {
+        self.looked = Some(Instant::now());
         let target = fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()?;
         if std::env::current_dir().is_ok_and(|here| here == target) {
             return None;
         }
         std::env::set_current_dir(&target).ok()?;
         Some(target)
-    }
-
-    /// `/proc` の無い環境では何もしない。
-    #[cfg(not(target_os = "linux"))]
-    fn tick(&mut self) -> Option<PathBuf> {
-        None
     }
 }
 
@@ -1405,7 +1437,7 @@ fn main() -> Result<()> {
 
     // 子の `cd` に付いていく。差し替えで引き継いだ子でも PID は変わらないので、
     // どちらの経路でも同じように追える。
-    let mut follow = child.pid().map(FollowCwd::new);
+    let mut follow = child.pid().and_then(FollowCwd::new);
 
     let mut writer = master.stream().context("擬似端末に書き込めません")?;
     let mut reader = master.stream().context("擬似端末を読み込めません")?;
@@ -1570,11 +1602,33 @@ fn main() -> Result<()> {
     // 叩きすぎるので、**入力が途切れてから**書く。
     const SAVE_AFTER: Duration = Duration::from_secs(3);
     let mut unsaved = false;
+    // 手が止まってからの経過。追従を見届けるために待ちを刻んでも、**これは数え
+    // 直さない** — 数え直すと、辞書の書き出しも位置報告の諦めも永久に来なくなる。
+    let mut quiet_since = Instant::now();
 
     loop {
-        let ev = match rx.recv_timeout(SAVE_AFTER) {
-            Ok(ev) => ev,
+        // 見届けていない出力があるなら、途切れる頃に一度起きる。
+        let wait = match follow.as_ref().and_then(FollowCwd::quiet_in) {
+            Some(d) => d.min(SAVE_AFTER.saturating_sub(quiet_since.elapsed())),
+            None => SAVE_AFTER.saturating_sub(quiet_since.elapsed()),
+        };
+        let ev = match rx.recv_timeout(wait) {
+            Ok(ev) => {
+                quiet_since = Instant::now();
+                ev
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 出力が途切れた。**`cd` を打ったきり放置されても、ここで追いつく。**
+                if let Some(f) = follow.as_mut()
+                    && let Some(dir) = f.settled()
+                {
+                    trace.log(format_args!("--- 子に付いて {} へ移る", dir.display()));
+                }
+                // 手が止まる前に起きただけなら、待ち直す
+                if quiet_since.elapsed() < SAVE_AFTER {
+                    continue;
+                }
+                quiet_since = Instant::now();
                 // 位置を尋ねたきり返事が来ない (報告に応えない端末もある)。
                 // 待ち続けると、子アプリが自分で尋ねた分の返事まで横取りして
                 // しまうので、手が止まったところで諦める。
@@ -1593,10 +1647,11 @@ fn main() -> Result<()> {
         };
         match ev {
             Event::Child(data) => {
-                // 出力があったということは、子が何かした後。`cd` していれば
-                // ここで付いていく (中は間隔で間引く)。
+                // 出力があったということは、子が何かした後。流し続けるアプリの
+                // 途中でも追いつけるよう、間引きに引っかからなければここで見る。
+                // `cd` の直後はここでは間に合わないので、途切れたところで拾い直す。
                 if let Some(f) = follow.as_mut()
-                    && let Some(dir) = f.tick()
+                    && let Some(dir) = f.spoke()
                 {
                     trace.log(format_args!("--- 子に付いて {} へ移る", dir.display()));
                 }
