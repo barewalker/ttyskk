@@ -332,6 +332,12 @@ void TtyskkEngine::updateUI(InputContext *ic) {
             /* 打つそばから見せている補完。**まだ打っていない文字**なので、下線を
              * 外して打った分と見分けが付くようにする (端末では薄字にあたる)。 */
             fmt = TextFormatFlag::NoFlag;
+        } else if (style == TTYSKK_STYLE_REGISTRATION) {
+            /* 辞書登録の見出し (`[登録:かんじ]`)。打った文字ではないので下線を外す。
+             *
+             * **候補が無くて登録に入ったことを示す唯一の手がかり。** 出さないと、
+             * 登録に入ったのか何も起きていないのかが分からない。 */
+            fmt = TextFormatFlag::NoFlag;
         }
         preedit.append(std::string(ttyskk_preedit_text(engine_, i)), fmt);
     }

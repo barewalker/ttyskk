@@ -418,3 +418,38 @@ fn a_bad_dictionary_path_is_not_fatal() {
         unsafe { ttyskk_free(p) };
     }
 }
+
+/// 候補が無くて辞書登録に入ったことが、GUI にも見えること。
+///
+/// **見出しは候補一覧と同じ薄字だが、行き先が違う。** 一覧は候補窓へ回すので入力中の
+/// 表示から外すが、見出しまで一緒に外すと**登録に入ったことが画面のどこにも出ない**。
+/// 利用者からは何も起きていないように見え、そこで変換キーをもう一度押すと
+/// 「定型文にしますか」だけが現れる (辞書登録のつもりが定型文登録に行ったように見える)。
+#[test]
+fn the_registration_prompt_reaches_the_gui() {
+    let p = engine(&[]);
+    unsafe { ttyskk_key(p, 'j' as u32, CTRL) };
+
+    typed(p, "Kanji ");
+    assert_eq!(
+        preedit(p),
+        "[登録:かんじ]",
+        "登録に入ったことが入力中の表示に出ていない"
+    );
+    assert_eq!(
+        unsafe { ttyskk_preedit_style(p, 0) },
+        TTYSKK_STYLE_REGISTRATION,
+        "登録の見出しだと分かる印が付いていない"
+    );
+
+    // 打ち込んだ内容は見出しの後ろに続く
+    typed(p, "kanji");
+    assert_eq!(preedit(p), "[登録:かんじ]かんじ");
+
+    // 確定すると子へ出て、表示は消える
+    unsafe { ttyskk_key(p, RETURN, 0) };
+    assert_eq!(commit(p), "かんじ");
+    assert_eq!(preedit(p), "");
+
+    unsafe { ttyskk_free(p) };
+}

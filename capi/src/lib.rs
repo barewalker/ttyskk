@@ -57,6 +57,10 @@ pub const TTYSKK_STYLE_READING_CURSOR: i32 = 3;
 /// 打つそばから見せている補完。**まだ打っていない文字**なので、打った分と
 /// 見分けの付く見た目にする (端末では薄字)。
 pub const TTYSKK_STYLE_COMPLETION: i32 = 4;
+/// 辞書登録の見出し (`[登録:かんじ]`)。**候補が無くて登録に入ったことを示す唯一の
+/// 手がかり**なので、必ず画面に出すこと。出さないと、登録に入ったのか何も起きて
+/// いないのかが利用者に分からない。
+pub const TTYSKK_STYLE_REGISTRATION: i32 = 5;
 
 fn mode_code(m: Mode) -> i32 {
     match m {
@@ -80,6 +84,8 @@ fn style_code(s: Style) -> Option<i32> {
         Style::Candidate => Some(TTYSKK_STYLE_CANDIDATE),
         // 補完は入力中の表示に混ぜる。打っている場所の続きとして見えないと読めない。
         Style::Completion => Some(TTYSKK_STYLE_COMPLETION),
+        // 登録の見出しも混ぜる。**捨てると登録に入ったことが画面に出ない。**
+        Style::Registration => Some(TTYSKK_STYLE_REGISTRATION),
         Style::ListItem | Style::ListSelected => None,
         Style::ModeHiragana | Style::ModeKatakana | Style::ModeHankaku | Style::ModeZenkaku => None,
     }

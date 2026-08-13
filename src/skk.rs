@@ -106,6 +106,13 @@ pub enum Style {
     ListItem,
     /// 候補一覧で選択中の項目
     ListSelected,
+    /// 辞書登録の見出し (`[登録:かんじ]`)。
+    ///
+    /// **一覧と同じ薄字で描くが、行き先が違う。** GUI の入力メソッドは一覧を候補窓へ
+    /// 回して入力中の表示には混ぜないので、[`Style::ListItem`] のままだとここも
+    /// 一緒に捨てられ、**登録に入ったことが画面のどこにも出なくなる**。何も起きて
+    /// いないように見えるので、[`Style::Completion`] と同じく別の印を立てておく。
+    Registration,
     /// 打つそばから見せている補完。**まだ打っていない文字**。
     ///
     /// 候補一覧と同じ薄字で描くが、一覧とは行き先が違う。GUI の入力メソッドでは
@@ -729,7 +736,7 @@ impl Skk {
         if let Some(reg) = self.regs.last() {
             let depth = self.regs.len();
             segs.push(Segment {
-                style: Style::ListItem,
+                style: Style::Registration,
                 text: format!(
                     "{}登録:{}{}",
                     "[".repeat(depth),
