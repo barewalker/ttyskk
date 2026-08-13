@@ -21,6 +21,8 @@ fn style_sgr(style: Style) -> &'static str {
         // 選択中の候補は太字 + 下線 + 赤
         Style::Candidate => "\x1b[0;1;4;31m",
         Style::ListItem => "\x1b[0;2m",
+        // 辞書登録の見出しも薄字。端末では一覧と同じ見た目でよい。
+        Style::Registration => "\x1b[0;2m",
         // 打つそばから見せる補完も薄字。打った分 (太字 + 下線) と見分けが付く。
         Style::Completion => "\x1b[0;2m",
         Style::ListSelected => "\x1b[0;7m",

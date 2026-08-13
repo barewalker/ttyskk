@@ -46,6 +46,13 @@
 #define TTYSKK_STYLE_COMPLETION 4
 
 /**
+ * 辞書登録の見出し (`[登録:かんじ]`)。**候補が無くて登録に入ったことを示す唯一の
+ * 手がかり**なので、必ず画面に出すこと。出さないと、登録に入ったのか何も起きて
+ * いないのかが利用者に分からない。
+ */
+#define TTYSKK_STYLE_REGISTRATION 5
+
+/**
  * 変換エンジンひとつ分。C 側からは不透明な入れ物として扱う。
  */
 typedef struct TtyskkEngine TtyskkEngine;
