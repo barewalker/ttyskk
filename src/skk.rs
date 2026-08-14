@@ -1259,7 +1259,17 @@ impl Skk {
             return self.dispatch(key);
         }
         // 登録中。子へ出るはずだった文字は登録内容に溜める。
-        if matches!(key, Key::Raw(_)) {
+        if let Key::Raw(seq) = &key {
+            // **端末の応答だけは通す。** 子アプリが自分で尋ねた結果なので、ここで
+            // 捨てると問い合わせた側が待ちぼうけになる (画像を描く仕組みは応答を
+            // 待って次に進む)。登録に入っているかどうかは子の知らない事情で、
+            // その間だけ応答が消えるのは筋が通らない。
+            if is_terminal_reply(seq) {
+                return Response {
+                    passthrough: Some(key),
+                    ..Response::default()
+                };
+            }
             // 矢印などは受け付けない。挟むと登録内容が壊れる。
             return Response::default();
         }
@@ -2501,6 +2511,36 @@ impl Skk {
             edit_snippet: None,
         }
         .with_cursor_back(back)
+    }
+}
+
+/// 端末が**返してきた**列か。押された鍵ではないので、打鍵として扱ってはいけない。
+///
+/// 見分けるのは、辞書登録の途中で捨ててよいかを決めるため。矢印や機能キーは
+/// 登録内容を壊すので捨てるが、応答は子アプリが自分で尋ねた結果なので、捨てると
+/// 問い合わせた側が待ちぼうけになる。
+///
+/// 拾うのは三種類。
+///
+/// - 文字列を伴う列 (`OSC` / `DCS` / `SOS` / `PM` / `APC`)。色や版、kitty graphics の
+///   応答がここに来る。**押して出る形ではない。**
+/// - `CSI ?` で始まるもの。`DECRPM` や kitty の鍵盤問い合わせの答えで、`?` が付く
+///   ぶん打鍵の形 (`CSI 106;5u` など) と紛れない。
+/// - 終端が `R` `c` `n` `t` `y` `S` の `CSI`。位置報告・装置属性・窓の大きさなどの
+///   答えで、いずれも鍵盤からは出てこない終端。
+fn is_terminal_reply(seq: &[u8]) -> bool {
+    if seq.len() < 2 || seq[0] != 0x1b {
+        return false;
+    }
+    match seq[1] {
+        b']' | b'P' | b'X' | b'^' | b'_' => true,
+        b'[' => {
+            if seq.get(2) == Some(&b'?') {
+                return true;
+            }
+            matches!(seq.last(), Some(b'R' | b'c' | b'n' | b't' | b'y' | b'S'))
+        }
+        _ => false,
     }
 }
 

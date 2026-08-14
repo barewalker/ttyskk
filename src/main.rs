@@ -620,6 +620,22 @@ impl RawGuard {
         cfmakeraw(&mut raw);
         let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, &raw);
     }
+
+    /// 控えてある**上流の原本**を、開いたばかりの擬似端末へ写す。
+    ///
+    /// ttyskk は自分の端末を raw にしてしまうので、渡さないと子は `openpty` の
+    /// 既定値で始まる。`stty` で消し文字や改行の扱いを変えてから起こしても
+    /// 引き継がれず、包んだ途端に設定が戻ったように見える。
+    ///
+    /// **Linux では親側 (`ptmx`) への `tcsetattr` が子側の設定になる。** 子を起こす
+    /// 前に呼ぶこと — 起こしてからでは、子が読み始めた後の変更になる。
+    fn hand_down(&self, fd: std::os::fd::RawFd) {
+        use nix::sys::termios::{SetArg, tcsetattr};
+        use std::os::fd::BorrowedFd;
+        // 借りるだけ。閉じるのは擬似端末を持っている側。
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let _ = tcsetattr(borrowed, SetArg::TCSANOW, &self.original);
+    }
 }
 
 impl Drop for RawGuard {
@@ -1442,6 +1458,12 @@ fn main() -> Result<()> {
                     pixel_height: size.ypixel,
                 })
                 .context("擬似端末を開けません")?;
+
+            // 上流の端末の設定を子へ写す。**起こす前に。** 渡さないと子は openpty の
+            // 既定値で始まり、`stty` で整えてから包んでも設定が戻ったように見える。
+            if let Some(fd) = pair.master.as_raw_fd() {
+                raw.hand_down(fd);
+            }
 
             let mut cmd = CommandBuilder::new(&command[0]);
             for a in &command[1..] {

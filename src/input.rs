@@ -182,8 +182,18 @@ fn parse_escape(buf: &[u8], bound: &[Key]) -> (usize, Key) {
             }
             (3, Key::Raw(buf[..3].to_vec()))
         }
-        b']' => {
-            // OSC: BEL か ST で終わる
+        // 文字列を伴う列。**OSC だけでなく DCS / SOS / PM / APC も同じ扱い。**
+        //
+        // これらは端末が返してくる応答の形でもある — `ESC _` は kitty graphics の
+        // 応答、`ESC P` は XTVERSION の応答。**中身まで一つの塊として切り出さないと、
+        // 本体が普通の打鍵として変換にかかる** (`ESC P >|kitty(0.42.2) ESC \` が
+        // `ESC P >|きっty(0。42。2) ESC \` になって届く)。`ESC _` に至っては本体が
+        // 辞書登録の見出し語として吸い込まれ、画面まで荒れる。
+        //
+        // 出力を追う側 ([`SeqTracker::sequence_complete`]) は初めからこの五つを
+        // 同じに扱っている。**揃っていなかったのは入力側だけ。**
+        b']' | b'P' | b'X' | b'^' | b'_' => {
+            // BEL か ST で終わる
             let mut i = 2;
             while i < buf.len() {
                 if buf[i] == 0x07 {
