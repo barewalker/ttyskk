@@ -347,8 +347,16 @@ pub struct SeqTracker {
     tail: Vec<u8>,
 }
 
-/// 持ち越しの上限。これを超える列は事実上ないので、越えたら諦めて完了扱いにする。
-const MAX_TAIL: usize = 4096;
+/// 一つの列を追い続ける上限。越えたら諦めて完了扱いにする。
+///
+/// **窓のように先頭を切ってはいけない。** 切ると列の開始 (`ESC`) が落ちて「途中では
+/// ない」と誤って判ずる。そうなると重ね描きの書き戻しが列の真ん中へ刺さり、端末は
+/// そこで壊れる。kitty graphics の画像データのように長い列で現実に起きる — 読み込みは
+/// 一回 8192 バイトなので、持ち越しが無くても一回で 4096 を越えていた。
+///
+/// ここは歯止めであって窓ではない。終端の来ない壊れた列で際限なく溜めないためのもの
+/// で、貼り付けの [`MAX_PASTE`] と同じ考え方。
+const MAX_TAIL: usize = 1 << 20;
 
 impl SeqTracker {
     pub fn new() -> Self {
@@ -359,14 +367,15 @@ impl SeqTracker {
     pub fn feed(&mut self, data: &[u8]) -> bool {
         let mut buf = std::mem::take(&mut self.tail);
         buf.extend_from_slice(data);
-        if buf.len() > MAX_TAIL {
-            let cut = buf.len() - MAX_TAIL;
-            buf.drain(..cut);
-        }
 
         if let Some(i) = buf.iter().rposition(|&b| b == 0x1b)
             && !sequence_complete(&buf[i..])
         {
+            // 追い切れないほど長い。ここで持ち越しを捨てないと、終端の来ない
+            // 壊れた列で際限なく溜まる。
+            if buf.len() - i > MAX_TAIL {
+                return false;
+            }
             self.tail = buf[i..].to_vec();
             return true;
         }
@@ -742,5 +751,49 @@ mod tests {
         let bytes = "あ".as_bytes();
         assert!(t.feed(&bytes[..2]));
         assert!(!t.feed(&bytes[2..]));
+    }
+
+    /// 長い列を、途切れず最後まで「途中」と見続けること。
+    ///
+    /// kitty graphics の画像データは一つの `APC` が数十 KB になる。持ち越しを窓で
+    /// 切っていた頃は列の開始 (`ESC`) が落ち、**まだ続いているのに「切れ目だ」と
+    /// 誤って判ずる**。そこで重ね描きの書き戻しが割り込むと、画像データの真ん中に
+    /// カーソル移動の列が刺さって端末が壊れる。
+    ///
+    /// 読み込みは一回 8192 バイトなので、**持ち越しが無くても一回で 4096 を越えて
+    /// いた**。ここでは 1KB ずつ 20 回に分けて与え、終端が来るまで一度も「切れ目」に
+    /// ならないことを見る。
+    #[test]
+    fn tracker_follows_a_long_apc_to_the_end() {
+        let mut t = SeqTracker::new();
+        t.feed(b"\x1b_Gf=100,a=T;");
+        // base64 の中身のつもり。ESC は現れない。
+        let chunk = vec![b'A'; 1024];
+        for round in 0..20 {
+            assert!(
+                t.feed(&chunk),
+                "{round} 個目の断片で切れ目と誤判定した (画像データの途中に割り込む)"
+            );
+        }
+        // 終端が来て初めて切れ目になる
+        assert!(!t.feed(b"\x1b\\"));
+    }
+
+    /// 終端の来ない列は、歯止めの上限で諦めること。
+    ///
+    /// 溜め続けると際限が無い。上限を越えたら完了扱いにして持ち越しを捨てる。
+    #[test]
+    fn tracker_gives_up_on_a_runaway_sequence() {
+        let mut t = SeqTracker::new();
+        t.feed(b"\x1b_G");
+        let chunk = vec![b'A'; 1 << 16];
+        let mut gave_up = false;
+        for _ in 0..24 {
+            if !t.feed(&chunk) {
+                gave_up = true;
+                break;
+            }
+        }
+        assert!(gave_up, "終端の来ない列を追い続けている");
     }
 }
