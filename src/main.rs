@@ -237,12 +237,15 @@ impl Master {
     }
 
     /// 大きさを教える。子には `SIGWINCH` が飛ぶ。
-    fn resize(&self, rows: u16, cols: u16) {
+    ///
+    /// **画素の寸法もそのまま渡す。** 落とすと、画像を描くアプリが一マスの大きさを
+    /// 出せず黙って何も描かなくなる ([`WinSize`])。
+    fn resize(&self, size: WinSize) {
         let ws = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+            ws_row: size.rows,
+            ws_col: size.cols,
+            ws_xpixel: size.xpixel,
+            ws_ypixel: size.ypixel,
         };
         unsafe { libc::ioctl(self.fd, libc::TIOCSWINSZ, &ws) };
     }
@@ -626,13 +629,41 @@ impl Drop for RawGuard {
     }
 }
 
-fn winsize() -> (u16, u16) {
+/// 端末の大きさ。**桁と行だけでなく画素の寸法も持つ。**
+///
+/// 画像を描くアプリ (kitty graphics を使う nvim の画像表示など) は、`TIOCGWINSZ` の
+/// 画素の寸法を桁数で割って一マスの大きさを出し、画像を何マス分に描くかを決める。
+/// **0 だと寸法が 0 になり、黙って何も描かない** — 誤りも警告も出ないので、包んだ
+/// 途端に画像だけが消えたように見える。
+///
+/// ttyskk はこの値の意味を知る必要がない。上流から受け取ってそのまま子へ流す。
+#[derive(Clone, Copy)]
+struct WinSize {
+    rows: u16,
+    cols: u16,
+    /// 画面全体の幅 (画素)。端末が教えなければ 0。
+    xpixel: u16,
+    /// 画面全体の高さ (画素)。端末が教えなければ 0。
+    ypixel: u16,
+}
+
+fn winsize() -> WinSize {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &raw mut ws) };
     if rc != 0 || ws.ws_row == 0 || ws.ws_col == 0 {
-        (24, 80)
+        WinSize {
+            rows: 24,
+            cols: 80,
+            xpixel: 0,
+            ypixel: 0,
+        }
     } else {
-        (ws.ws_row, ws.ws_col)
+        WinSize {
+            rows: ws.ws_row,
+            cols: ws.ws_col,
+            xpixel: ws.ws_xpixel,
+            ypixel: ws.ws_ypixel,
+        }
     }
 }
 
@@ -1364,7 +1395,8 @@ fn main() -> Result<()> {
     // (`ttyskk --status`)。差し替えでも PID は変わらないので、同じ場所を上書きする。
     write_status(&exe);
 
-    let (rows, cols) = winsize();
+    let size = winsize();
+    let (rows, cols) = (size.rows, size.cols);
 
     // 子を起こす前に、raw モードにしてカーソル位置を尋ねる。
     // 応答は必ずこちらの stdin に来るので、子の出力と混ざる余地がない。
@@ -1402,11 +1434,12 @@ fn main() -> Result<()> {
         None => {
             let pty = native_pty_system();
             let pair = pty
+                // 画素の寸法もそのまま渡す。落とすと子が画像を描けなくなる ([`WinSize`])。
                 .openpty(PtySize {
                     rows,
                     cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
+                    pixel_width: size.xpixel,
+                    pixel_height: size.ypixel,
                 })
                 .context("擬似端末を開けません")?;
 
@@ -1906,8 +1939,9 @@ fn main() -> Result<()> {
                 }
             }
             Event::Winch => {
-                let (r, c) = winsize();
-                master.resize(r, c);
+                let now = winsize();
+                let (r, c) = (now.rows, now.cols);
+                master.resize(now);
                 screen.resize(r as usize, c as usize);
                 // 座標が意味を失うので、消さずに忘れる (子が描き直す)
                 overlay.forget();
