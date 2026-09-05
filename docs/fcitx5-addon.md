@@ -223,6 +223,63 @@ distrobox-host-exec bash -lc 'cd ~/Projects/ttyskk/fcitx5 && cmake --build build
 
 Rust 側は cargo でビルドし、CMake から呼ぶ (`corrosion` か、単に `add_custom_command`)。
 
+### fcitx5 の版によって二か所ずれる
+
+2026-09-06 に Arch (omarchy, fcitx5 **5.1.21**) で建てたときに踏んだ。
+Ubuntu 24.04 は **5.1.7** で、どちらも同じソースから建つようにしてある。
+
+**① C++20 が要る。** 5.1.21 の `FCITX_INFO` は `std::source_location` を使う。
+`CMAKE_CXX_STANDARD 17` のままだと `'source_location' is not a member of 'std'` で
+止まる。20 に上げた。Ubuntu の g++ 13.2 も C++20 を完全に通せるので、
+版で分けずに 20 で揃えてよい。
+
+**② addon の入口の記号名が変わった。** 5.1.21 は
+`fcitx_addon_factory_instance_<アドオン名>` を探す。5.1.7 は名前なしの
+`fcitx_addon_factory_instance`。確かめ方は他の addon を見るのが早い。
+
+```sh
+nm -D --defined-only /usr/lib/fcitx5/libclipboard.so | grep fcitx_addon
+#=> fcitx_addon_factory_instance_clipboard
+```
+
+`FCITX_ADDON_FACTORY_V2_BACKWARDS(AddonName, ClassName)` が**両方の記号を出す**が、
+**古い側のヘッダには存在しない**ので `#ifdef` で分ける。
+
+```cpp
+#ifdef FCITX_ADDON_FACTORY_V2_BACKWARDS
+FCITX_ADDON_FACTORY_V2_BACKWARDS(ttyskk, fcitx::TtyskkEngineFactory)
+#else
+FCITX_ADDON_FACTORY(fcitx::TtyskkEngineFactory)
+#endif
+```
+
+⚠ **記号が合わないときの壊れ方が悪質。** `dlopen` は成功し、`GetAddons` にも
+出てくるのに factory が取れず、**fcitx5 は何も言わずに `~/.config/fcitx5/profile` から
+入力メソッドの行を消す。**エラーもログも出ない。「登録したのに消える」という
+症状だけが残る。
+
+### Arch で建てるとき
+
+`libfcitx5core-dev` に当たるものは無く、`fcitx5` 本体が
+`/usr/include/Fcitx5/` と `/usr/lib/cmake/Fcitx5Core/` を持っている。
+別に要るのは `cmake` と `extra-cmake-modules` (ECM) だけ。
+
+```sh
+sudo pacman -S cmake extra-cmake-modules
+cmake -S ~/Projects/ttyskk/fcitx5 -B ~/.cache/ttyskk/fcitx5-build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build ~/.cache/ttyskk/fcitx5-build -j"$(nproc)"
+sudo cmake --install ~/.cache/ttyskk/fcitx5-build
+```
+
+**`CMAKE_INSTALL_PREFIX=/usr` を明示すること。** 既定の `/usr/local` だと
+`.conf` は `XDG_DATA_DIRS` 越しに見つかるのに、**共有ライブラリの方は見つからない**
+(fcitx5 が addon を探すのは `/usr/lib/fcitx5`)。
+
+**build ディレクトリは木の外に置く。** `fcitx5/build/` には Ubuntu の
+`CMakeCache.txt` が入っており、パスが焼かれている。`~/Projects` を二つの機械で
+共有している場合はなおさら、相乗りすると壊す。
+
 ## 段階
 
 1. ~~**capi を作る**~~ — **済**。`capi/` に一式ある。Rust のテスト 9 件に加えて、
