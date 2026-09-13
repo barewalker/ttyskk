@@ -171,6 +171,12 @@ fn parse_escape(buf: &[u8], bound: &[Key]) -> (usize, Key) {
             if seq == SHIFT_TAB {
                 return (i + 1, Key::ShiftTab);
             }
+            // 離した報告は解読しない。押した報告が同じ形で先に来ていて、そちらで
+            // 済んでいる。解読すると割り当てキーは二度押されたことになり、割り当ての
+            // 無いキーは Raw として `▽` を確定させてしまう。
+            if kitty_event_type(seq) == Some(3) {
+                return (i + 1, Key::Release(seq.to_vec()));
+            }
             match decode_extended_key(seq, bound) {
                 Some(k) => (i + 1, k),
                 None => (i + 1, Key::Raw(seq.to_vec())),
@@ -256,6 +262,20 @@ fn decode_extended_key(seq: &[u8], bound: &[Key]) -> Option<Key> {
 
     let k = named_key(code, mods.unwrap_or(1))?;
     bound.contains(&k).then_some(k)
+}
+
+/// kitty 鍵盤プロトコルの `CSI 記号 ; 修飾 : 種別 u` から種別を取り出す。
+///
+/// 1 = 押した、2 = 押し続けている、3 = 離した。種別が無ければ押したと同じ (None)。
+/// アプリが `CSI > 2 u` (イベント種別の報告) を求めたときだけ端末が付ける。
+/// nvim 0.11 は `CSI > 3 u` を送るのでこれが付く。
+fn kitty_event_type(seq: &[u8]) -> Option<u32> {
+    if *seq.last()? != b'u' || seq.len() < 4 {
+        return None;
+    }
+    let mods = seq[2..seq.len() - 1].split(|&b| b == b';').nth(1)?;
+    let event = mods.split(|&b| b == b':').nth(1)?;
+    std::str::from_utf8(event).ok()?.parse().ok()
 }
 
 /// 拡張鍵盤プロトコルの (記号, 修飾) を、素の形のキーに直す。
@@ -497,6 +517,22 @@ mod tests {
         assert_eq!(d.feed(b"\x1b[113;5u"), vec![Key::Ctrl(0x11)]); // Ctrl+Q
         // 下位引数 (イベント種別) が付いていても読める
         assert_eq!(d.feed(b"\x1b[106;5:1u"), vec![Key::Ctrl(0x0a)]);
+        // 押し続けている (2) も押したのと同じ
+        assert_eq!(d.feed(b"\x1b[106;5:2u"), vec![Key::Ctrl(0x0a)]);
+    }
+
+    /// 離した報告 (種別 3) は押したことにしない。割り当てキーでも、無いキーでも。
+    ///
+    /// nvim 0.11 は `CSI > 3 u` で離した報告まで求める。`Ctrl+J` を離した報告を
+    /// もう一度 `Ctrl+J` と読めばモードが二度切り替わり、素の `h` を離した報告を
+    /// `Raw` と読めば `▽` の途中で見出し語が確定する。
+    #[test]
+    fn a_key_release_is_not_a_press() {
+        let mut d = decoder();
+        assert_eq!(d.feed(b"\x1b[106;5:3u"), vec![Key::Release(b"\x1b[106;5:3u".to_vec())]);
+        assert_eq!(d.feed(b"\x1b[104;1:3u"), vec![Key::Release(b"\x1b[104;1:3u".to_vec())]);
+        // 種別の無い形と、押した (1) は今までどおり
+        assert_eq!(d.feed(b"\x1b[104;1u"), vec![Key::Raw(b"\x1b[104;1u".to_vec())]);
     }
 
     /// C-h は制御キーのまま切り出す。backspace として扱うかは設定が決める。
