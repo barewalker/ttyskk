@@ -80,6 +80,15 @@ pub enum Key {
     ///
     /// 矢印や機能キーがここに入る。エンジンは中身を見ず、そのまま返すだけ。
     Raw(Vec<u8>),
+    /// キーを**離した**という報告 (kitty 鍵盤プロトコルの `CSI 記号 ; 修飾 : 3 u`)。
+    ///
+    /// 打鍵ではないので、エンジンの状態には一切触れず、子へそのまま渡すだけ。
+    /// [`Key::Raw`] と分けてあるのは、Raw が `▽` の途中に来ると見出し語を確定して
+    /// しまうから — nvim (0.11 以降は `CSI > 3 u` で離した報告まで求める) の下で
+    /// `hi` と続けて打ち、`i` を押してから `h` を離すと、`h` の離した報告が `▽` の
+    /// 途中に割り込み、`ちょくざいひ` がかなのまま確定されていた (2026-09-13)。
+    /// 離す報告が来るかは打鍵の重なり次第なので、症状は不定期に見えた。
+    Release(Vec<u8>),
     /// 括弧付き貼り付けで届いた中身 (開始・終了の列は含まない)。
     ///
     /// 貼り付けは「打鍵」ではないので、ローマ字変換にもモード切り替えにも回さない。
@@ -1231,6 +1240,14 @@ impl Skk {
     }
 
     fn handle_key(&mut self, key: Key) -> Response {
+        // 離した報告は打鍵ではない。何をしている最中でも状態には触れず、子へ返す。
+        // 登録中でも通す — 子が自分で求めた報告で、押した側は既に届いている。
+        if let Key::Release(_) = key {
+            return Response {
+                passthrough: Some(key),
+                ..Response::default()
+            };
+        }
         // 定型文の編集はどの段からでも呼べる。割り当てが無ければ何も起きない。
         // ASCII モードでは効かせない — 子アプリの持ち物であるキーを奪ってしまう。
         if self.mode != Mode::Ascii
@@ -2554,7 +2571,7 @@ fn raw_bytes(k: &Key) -> Vec<u8> {
         Key::Tab => vec![0x09],
         Key::ShiftTab => SHIFT_TAB.to_vec(),
         Key::Esc => vec![0x1b],
-        Key::Raw(v) => v.clone(),
+        Key::Raw(v) | Key::Release(v) => v.clone(),
         // 括弧付き貼り付けは子アプリも括弧で受け取る前提なので、囲みごと組み直す
         Key::Paste(v) => {
             let mut out = Vec::with_capacity(v.len() + PASTE_START.len() + PASTE_END.len());
@@ -3091,6 +3108,28 @@ mod tests {
         // 確定だけの場合は素通しが無い
         let r = skk.handle(Key::Char('a'));
         assert_eq!((r.commit.as_str(), r.passthrough), ("あ", None));
+    }
+
+    /// 離した報告は `▽` の途中に来ても何も確定させず、素通しするだけ。
+    ///
+    /// 2026-09-13 に nvim の入力欄で `Chokuzaihi` と打つと `ちょくざいひ` がかなの
+    /// まま確定した。`i` を押してから `h` を離したので、`h` の離した報告が `▽` の
+    /// 途中に割り込み、Raw と同じ扱い (確定して素通し) を受けていた。
+    #[test]
+    fn a_release_in_the_middle_of_a_reading_changes_nothing() {
+        let mut skk = skk_with(&[("ちょくざいひ", "/直材費/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Chokuzaihi");
+        let release = Key::Release(b"\x1b[104;1:3u".to_vec());
+        let r = skk.handle(release.clone());
+        assert_eq!(r.commit, "");
+        assert_eq!(r.passthrough, Some(release));
+        assert_eq!(r.to_child(), b"\x1b[104;1:3u");
+        // 見出し語はそのまま残っていて、変換に進める
+        assert_eq!(preedit_text(&skk), "▽ちょくざいひ");
+        let r = skk.handle(Key::Char(' '));
+        assert!(r.commit.is_empty());
+        assert!(preedit_text(&skk).starts_with('▼'), "{}", preedit_text(&skk));
     }
 
     /// 登録の途中で ASCII モードにして打った英字も、登録内容に入る。
