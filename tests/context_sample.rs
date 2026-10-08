@@ -75,10 +75,18 @@ fn each_section_picks_its_own_homophone() {
             assert_eq!(reading, want_reading, "{section} の読みが変わっている");
 
             let ctx = Context::new(&text, at);
+            // **本番と同じ点の付け方にする** (`Context::explain_at`)。位置を踏まえるので、
+            // `score` だけで見ていると本番とずれた基準になる。
             let mut cands: Vec<(f64, String)> = dict
                 .lookup(reading)
                 .into_iter()
-                .map(|c| (ctx.score(&c.text, c.annotation.as_deref()), c.text))
+                .enumerate()
+                .map(|(i, c)| {
+                    (
+                        ctx.explain_at(i, &c.text, c.annotation.as_deref()).0,
+                        c.text,
+                    )
+                })
                 .collect();
             // 点数の降順。同点は辞書の順のまま (安定)。
             cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));

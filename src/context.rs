@@ -163,20 +163,23 @@ impl Context {
 
     /// いまの並びでの位置を踏まえた点数と、効いた語。`index` は並べ替える前の位置。
     ///
-    /// **下位にある一文字の候補では「候補そのものが画面にある」を数えない。** 画面に「行」と
-    /// あることはその字についての証拠で、**読みについての証拠ではない** — 画面の「行」はまず
-    /// 「ぎょう」「こう」「いく」で、「あん」(行脚) であることは稀だ。上位の候補なら字の一致で
-    /// 足りる (ふつうに使う読みだから) が、下位ではその字が別の読みで使われていると見るのが
-    /// 自然になる。
+    /// **一文字の候補は「その字が画面にある」を手掛かりにしない。** 画面に「行」とあることは
+    /// その字についての証拠で、**読みについての証拠ではない** — 画面の「行」はまず「ぎょう」
+    /// 「こう」「いく」で、「あん」(行脚) であることは稀だ。証拠の強さの問題ではないので、点数を
+    /// 足し引きしても分けられない。**自分で打った字が画面に残って次を引きずる**形でも起きる
+    /// (「一」を打った直後に「いち」で位置が出なくなる)。
     ///
-    /// **二文字以上の語は下位でも字の一致を数える。** 「鋼製」のように読みがほぼ一つに決まる
-    /// 語では、画面にあることがそのまま読みの証拠になる (辞書 11 番目・注釈なしでも、鋼製の
-    /// 話が続く画面では先頭に来る)。落とすのを一文字に絞らないと、こういう語が学習するまで
-    /// 出てこなくなる。
+    /// **これは細かい規則を吸収している。** 以前は「数字に続く漢字一文字は助数詞」「同じ字種の
+    /// 連なりがちょうどその一文字のときだけ」という条件で雑音を落としていたが、一文字では字の
+    /// 一致そのものを使わないので要らなくなった。
     ///
-    /// **注釈の用例語は下位でも信用する。** 「較正;calibrate.「計器の-」」の計器は読みと
-    /// 意味に結び付いているので、画面にそれがあれば辞書 15 番目でも先頭へ来てよい。これが
-    /// 「行」と「較正」を分ける境目になる。
+    /// **二文字以上の語は下位でも字の一致を数える。** 「鋼製」のように読みがほぼ一つに決まる語
+    /// では、画面にあることがそのまま読みの証拠になる (辞書 11 番目・注釈なしでも、鋼製の話が
+    /// 続く画面では先頭に来る)。
+    ///
+    /// **注釈の用例語は一文字でも下位でも信用する。** 「較正;calibrate.「計器の-」」の計器は
+    /// 読みと意味に結び付いているので、画面にそれがあれば辞書 15 番目でも先頭へ来てよい。
+    /// 「行」も、画面に「行脚」とあれば上がる。
     ///
     /// 位置そのものの罰も掛ける ([`RANK_PENALTY`])。
     pub fn explain_at(
@@ -185,14 +188,14 @@ impl Context {
         text: &str,
         annotation: Option<&str>,
     ) -> (f64, Vec<(String, f64)>) {
-        if index <= FREE_RANK {
-            return self.explain(text, annotation);
-        }
-        // 一文字の候補だけ、字の一致を落とす。
+        // **一文字の候補は、位置に関わらず字の一致を落とす。**
         let surface = text.chars().count() > 1;
         let (score, hits) = self.explain_with(text, annotation, surface);
         if score <= 0.0 {
             return (0.0, hits);
+        }
+        if index <= FREE_RANK {
+            return (score, hits);
         }
         let penalty = RANK_PENALTY * ((1 + index) as f64 / (1 + FREE_RANK) as f64).ln();
         ((score - penalty).max(0.0), hits)
@@ -266,66 +269,21 @@ impl Context {
 
     /// その出方を数えてよいか。
     ///
-    /// **一文字の候補は、同じ字種の連なりがちょうどその一文字であること**を求める。
-    /// 「公」が「公園」「公演」の中に当たってしまうと信号にならない。漢字以外の文字を
-    /// 区切りとみなせば、「公とする」だけを拾える。一文字の変換は実際よく使うので、
-    /// まとめて対象外にはしない。
+    /// **英字は語の境界で見る。識別子やパスの一部は数えない** — 端末の画面は `src/main.rs` や
+    /// `--config-example` で埋まっていて、人の文章ではない。
     ///
-    /// 英字は語の境界で見る。**識別子やパスの一部は数えない** — 端末の画面は
-    /// `src/main.rs` や `--config-example` で埋まっていて、人の文章ではない。
+    /// 日本語は連なりを見ない。一文字の候補は字の一致そのものを使わないので
+    /// ([`Context::explain_at`])、「公」が「公園」の中に当たる心配がもう無い。注釈から取る
+    /// 手掛かりは二文字以上なので、連なりの途中に当たっても語として意味がある。
     fn boundary_ok(&self, at: usize, len: usize, ascii: bool) -> bool {
-        let before = at.checked_sub(1).map(|i| self.chars[i]);
-        let after = self.chars.get(at + len).copied();
-        if ascii {
-            let joined = |c: Option<char>| {
-                c.is_some_and(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
-            };
-            return !joined(before) && !joined(after);
-        }
-        if len > 1 {
+        if !ascii {
             return true;
         }
-        let class = class_of(self.chars[at]);
-        // **数字に続く漢字一文字は助数詞として扱い、数えない。** 端末の画面は
-        // 「180 行」「41 件」「3 回」で埋まっていて、この「行」は漢字の連なりとして
-        // ちょうど一文字なので上の規則をそのまま通ってしまう。実際に「あん」と打つと
-        // 案より「行」(行脚) が先に出た。数を数えている字は話題を示さない。
-        //
-        // 助数詞の一覧は持たない。語の表を抱えることになるので位置だけで見る。
-        if class == Class::Kanji && self.follows_a_number(at) {
-            return false;
-        }
-        let same = |c: Option<char>| c.is_some_and(|c| class_of(c) == class);
-        !same(before) && !same(after)
-    }
-
-    /// その位置の直前が数字か (間の空白は読み飛ばす)。
-    ///
-    /// 端末は桁を揃えるために空白を入れるので (`  1467 src/config.rs`)、空白の数を
-    /// 問わずに遡る。
-    ///
-    /// **「第1案」「第2章」は数えてよい。** 数字の前に「第」があれば、数を数えている
-    /// のではなく番号を振った語なので、本物の手掛かりとして働く。
-    fn follows_a_number(&self, at: usize) -> bool {
-        let back = |from: usize, f: &dyn Fn(char) -> bool| {
-            let mut i = from;
-            while let Some(prev) = i.checked_sub(1) {
-                if !f(self.chars[prev]) {
-                    break;
-                }
-                i = prev;
-            }
-            i
-        };
-        let i = back(at, &|c| matches!(c, ' ' | '\t' | '\u{3000}'));
-        let Some(last) = i.checked_sub(1) else {
-            return false;
-        };
-        if !self.chars[last].is_numeric() {
-            return false;
-        }
-        let head = back(last, &|c| c.is_numeric());
-        head.checked_sub(1).map(|k| self.chars[k]) != Some('第')
+        let before = at.checked_sub(1).map(|i| self.chars[i]);
+        let after = self.chars.get(at + len).copied();
+        let joined =
+            |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || "/._-".contains(c));
+        !joined(before) && !joined(after)
     }
 
     /// カーソルからの距離 (文字数)。範囲に入っていれば 0。
@@ -478,29 +436,50 @@ mod tests {
         assert_eq!(order("まったく別の話題です", 10, &cands)[0], "構成");
     }
 
-    /// 一文字の候補は、漢字の連なりがちょうどその一文字のときだけ当たる。
+    /// 一文字の候補は、画面にその字があっても上がらない。
+    ///
+    /// **字の一致は読みの証拠にならない。** 画面の「行」はまず「ぎょう」「こう」「いく」で、
+    /// 「あん」(行脚) であることは稀。この規則が、以前の「助数詞は数えない」「連なりがちょうど
+    /// 一文字のときだけ数える」という細かい条件を吸収している。
     #[test]
-    fn a_single_kanji_needs_the_whole_run() {
-        let cands = [("好", None), ("公", None)];
-        // 「公園」の中の「公」は数えない。並びは元のまま。
-        assert_eq!(order("公園であそぶ", 6, &cands), ["好", "公"]);
-        // 単独で立っていれば数える
-        assert_eq!(order("公とする", 4, &cands), ["公", "好"]);
+    fn a_single_character_is_not_promoted_by_its_own_character() {
+        let screen = "memo.md [+] 42 行目 / 180 行\n「行」の話をしている。行は二番目。来月の進め方について、三つの";
+        let ctx = Context::new(screen, screen.chars().count());
+        // 字としては画面にある (素の点数は付く)
+        assert!(ctx.score("行", Some("行脚")) > 0.0);
+        // 位置に関わらず手掛かりにしない
+        assert_eq!(ctx.explain_at(15, "行", Some("行脚")).0, 0.0);
+        assert_eq!(ctx.explain_at(0, "行", Some("行脚")).0, 0.0);
+        // **自分で打った字が画面に残っても引きずらない。**
+        let typed = "行 一 直っていないよ";
+        let t = Context::new(typed, typed.chars().count());
+        assert_eq!(t.explain_at(0, "一", None).0, 0.0);
     }
 
-    /// 辞書の後ろにある稀な読みは、画面に字があるだけでは先頭に来ない。
+    /// 数字だけの候補は手掛かりにしない。辞書には `10` や `１２` のように二文字のものもある。
     #[test]
-    fn a_rare_reading_does_not_jump_to_the_front() {
-        // 「あん」は SKK-JISYO.L で 17 件あり、案が 1 番目、行 (行脚) が 16 番目。
-        // 「行」という語について書いている画面では、字としては何度も出てくる。
-        let screen = "`An` → **案**が 1 番目 (以前は「行」でした)。行は 2 番目には来ます";
+    fn a_digit_candidate_is_never_a_hint() {
+        let screen = "test result: ok. 10 passed; 1 ignored";
         let ctx = Context::new(screen, screen.chars().count());
-        // 字の一致だけなら「行」の方が重い (二度出てくる)
-        assert!(ctx.score("行", Some("行脚")) > ctx.score("案", None));
-        // **位置を踏まえると「行」には点が付かない。** 画面の「行」はこの読みの証拠ではない。
-        assert_eq!(ctx.explain_at(15, "行", Some("行脚")).0, 0.0);
-        // 上位の候補は字の一致で足りる
-        assert!(ctx.explain_at(0, "案", None).0 > 0.0);
+        assert_eq!(ctx.explain_at(0, "10", None).0, 0.0);
+        // 一文字の数字は上の規則でも落ちる
+        assert_eq!(ctx.explain_at(9, "1", None).0, 0.0);
+    }
+
+    /// 鉤括弧付きの注釈があれば、一文字の候補でも上がる。
+    ///
+    /// **逆に言えば、注釈に用例を持たない一文字の候補は文脈では上がらない。**「行;行脚」のように
+    /// 鉤括弧の無い注釈は手掛かりにしないので (語の説明と区別できない)、そういう語は学習で
+    /// 先に出すことになる。
+    #[test]
+    fn a_single_character_can_still_rise_on_a_quoted_hint() {
+        // 「かたi」の「硬;(カチコチ)「硬い石／演奏」」
+        let annot = Some("(カチコチ)「硬い石／演奏」");
+        let screen = "演奏の前に弦を張り替える。音の立ち上がりが";
+        let ctx = Context::new(screen, screen.chars().count());
+        assert!(ctx.explain_at(1, "硬", annot).0 > 0.0);
+        // 注釈が無ければ上がらない
+        assert_eq!(ctx.explain_at(1, "硬", None).0, 0.0);
     }
 
     /// 二文字以上の語は、辞書の後ろでも字の一致を数える。読みがほぼ一つに決まるから。
@@ -525,41 +504,6 @@ mod tests {
         // 位置の罰は掛かるので、上位にあるときより軽い
         assert!(ctx.explain_at(14, "較正", annot).0 < ctx.explain_at(0, "較正", annot).0);
     }
-
-    /// 数字だけの候補は手掛かりにしない。辞書には `１` や `1` が候補として入っている。
-    #[test]
-    fn a_digit_candidate_is_never_a_hint() {
-        let cands = [("位置", None), ("1", None), ("１", None)];
-        // 端末の画面は数字で埋まっている。これで `1` が先頭に来てはいけない。
-        let screen = "test result: ok. 41 passed; 1 ignored\nカーソルの";
-        assert_eq!(
-            order(screen, screen.chars().count(), &cands),
-            ["位置", "1", "１"]
-        );
-        // 画面にその数字しか無くても変わらない
-        assert_eq!(order("1", 1, &cands), ["位置", "1", "１"]);
-    }
-
-    /// 数字に続く漢字一文字は助数詞。話題を示さないので数えない。
-    #[test]
-    fn a_counter_after_a_number_is_not_a_hint() {
-        let cands = [("案", None), ("行", Some("行脚"))];
-        // 編集器の状態表示や試験の結果に必ず出る形
-        assert_eq!(
-            order("memo.md [+] 42 行目 / 180 行", 27, &cands),
-            ["案", "行"]
-        );
-        // 桁を揃える空白を挟んでも同じ
-        assert_eq!(order("  1467 行", 8, &cands), ["案", "行"]);
-        // 数字と関わりなく立っている「行」は今までどおり数える
-        assert_eq!(order("行をあらためる", 7, &cands), ["行", "案"]);
-        // 「第1案」は数を数えているのではない。番号付きの語なので手掛かりに残す。
-        // **候補の並びを逆にして確かめる** — 「案」が元から先頭だと、点が付かなくても
-        // 通ってしまい、何も試していないことになる。
-        let reversed = [("行", Some("行脚")), ("案", None)];
-        assert_eq!(order("第1案と第2案をくらべる", 11, &reversed), ["案", "行"]);
-    }
-
     /// 英字は語の境界で見る。識別子やパスの一部は数えない。
     #[test]
     fn english_matches_only_whole_words() {
