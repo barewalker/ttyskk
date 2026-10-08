@@ -1144,28 +1144,37 @@ const ACTIVE_ENV: &str = "TTYSKK_ACTIVE";
 ///
 /// 重ね描きは「控えのカーソル位置」に全面的に依存する。ずれた瞬間を後から
 /// 突き止められるよう、位置と描いた範囲を追えるようにしておく。
-struct Trace(Option<std::fs::File>);
+struct Trace {
+    file: Option<std::fs::File>,
+    /// 起動からの経過を各行に添える。**待ち時間は時刻がないと読めない** — 打鍵の
+    /// 行と重ね描きの行が何 ms 離れているかが、もっさりの正体を分ける。
+    started: Instant,
+}
 
 impl Trace {
     fn new() -> Self {
-        Trace(config::env_os("TTYSKK_DEBUG").and_then(|p| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-        }))
+        Trace {
+            file: config::env_os("TTYSKK_DEBUG").and_then(|p| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(p)
+                    .ok()
+            }),
+            started: Instant::now(),
+        }
     }
 
     fn log(&mut self, args: std::fmt::Arguments) {
-        if let Some(f) = self.0.as_mut() {
-            let _ = writeln!(f, "{args}");
+        if let Some(f) = self.file.as_mut() {
+            let t = self.started.elapsed();
+            let _ = writeln!(f, "{:>4}.{:03} {args}", t.as_secs(), t.subsec_millis());
             let _ = f.flush();
         }
     }
 
     fn on(&self) -> bool {
-        self.0.is_some()
+        self.file.is_some()
     }
 }
 
