@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ttyskk::{
-    context::{self, Context},
+    context::Context,
     dict::{Candidate, Dict},
 };
 
@@ -96,7 +96,7 @@ fn load_items() -> Vec<Item> {
 /// `skk.rs` の `sort_by_context` と同じ並べ替えを、辞書の候補に対して行う。
 ///
 /// **本番と同じにしておくこと。** 点が全部 0 なら触らない、同点は辞書の順のまま
-/// (安定な並べ替え)、いまの並びでの位置を罰として引く、の三点が合否をそのまま決める。
+/// (安定な並べ替え)、いまの並びでの位置を踏まえて点を付ける、の三点が合否をそのまま決める。
 fn reorder(ctx: &Context, cands: &[Candidate]) -> Vec<usize> {
     let order: Vec<usize> = (0..cands.len()).collect();
     if ctx.is_empty() || cands.len() < 2 {
@@ -105,9 +105,7 @@ fn reorder(ctx: &Context, cands: &[Candidate]) -> Vec<usize> {
     let scored: Vec<f64> = cands
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            context::with_rank_penalty(ctx.score(&c.text, c.annotation.as_deref()), i)
-        })
+        .map(|(i, c)| ctx.explain_at(i, &c.text, c.annotation.as_deref()).0)
         .collect();
     if scored.iter().all(|s| *s <= 0.0) {
         return order;

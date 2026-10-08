@@ -62,18 +62,6 @@ const FREE_RANK: usize = 4;
 /// どの値でも先頭に来る。
 const RANK_PENALTY: f64 = 0.3;
 
-/// 文脈の点数に、いまの並びでの位置の罰を加える。`index` は並べ替える前の位置。
-///
-/// **押し下げには使わない。** 罰で負になるものは 0 で止めるので、手掛かりが弱い候補は
-/// 元の位置に留まるだけで、辞書順より下がることはない。
-pub fn with_rank_penalty(score: f64, index: usize) -> f64 {
-    if score <= 0.0 || index <= FREE_RANK {
-        return score.max(0.0);
-    }
-    let penalty = RANK_PENALTY * ((1 + index) as f64 / (1 + FREE_RANK) as f64).ln();
-    (score - penalty).max(0.0)
-}
-
 /// 重みが半分になる距離 (文字数) の既定値。
 ///
 /// **行数ではなく文字数で数える。** 一行の文字数はフォントの大きさや多重化器の分割で
@@ -170,8 +158,55 @@ impl Context {
     ///
     /// 返す語は重い順。点の付かなかった語は含まない。
     pub fn explain(&self, text: &str, annotation: Option<&str>) -> (f64, Vec<(String, f64)>) {
+        self.explain_with(text, annotation, true)
+    }
+
+    /// いまの並びでの位置を踏まえた点数と、効いた語。`index` は並べ替える前の位置。
+    ///
+    /// **下位にある一文字の候補では「候補そのものが画面にある」を数えない。** 画面に「行」と
+    /// あることはその字についての証拠で、**読みについての証拠ではない** — 画面の「行」はまず
+    /// 「ぎょう」「こう」「いく」で、「あん」(行脚) であることは稀だ。上位の候補なら字の一致で
+    /// 足りる (ふつうに使う読みだから) が、下位ではその字が別の読みで使われていると見るのが
+    /// 自然になる。
+    ///
+    /// **二文字以上の語は下位でも字の一致を数える。** 「鋼製」のように読みがほぼ一つに決まる
+    /// 語では、画面にあることがそのまま読みの証拠になる (辞書 11 番目・注釈なしでも、鋼製の
+    /// 話が続く画面では先頭に来る)。落とすのを一文字に絞らないと、こういう語が学習するまで
+    /// 出てこなくなる。
+    ///
+    /// **注釈の用例語は下位でも信用する。** 「較正;calibrate.「計器の-」」の計器は読みと
+    /// 意味に結び付いているので、画面にそれがあれば辞書 15 番目でも先頭へ来てよい。これが
+    /// 「行」と「較正」を分ける境目になる。
+    ///
+    /// 位置そのものの罰も掛ける ([`RANK_PENALTY`])。
+    pub fn explain_at(
+        &self,
+        index: usize,
+        text: &str,
+        annotation: Option<&str>,
+    ) -> (f64, Vec<(String, f64)>) {
+        if index <= FREE_RANK {
+            return self.explain(text, annotation);
+        }
+        // 一文字の候補だけ、字の一致を落とす。
+        let surface = text.chars().count() > 1;
+        let (score, hits) = self.explain_with(text, annotation, surface);
+        if score <= 0.0 {
+            return (0.0, hits);
+        }
+        let penalty = RANK_PENALTY * ((1 + index) as f64 / (1 + FREE_RANK) as f64).ln();
+        ((score - penalty).max(0.0), hits)
+    }
+
+    /// `surface` は、候補そのものの一致を数えるかどうか。
+    fn explain_with(
+        &self,
+        text: &str,
+        annotation: Option<&str>,
+        surface: bool,
+    ) -> (f64, Vec<(String, f64)>) {
         let mut hits: Vec<(String, f64)> = Vec::new();
-        let w = self.weight_of(text);
+        let w = if surface { self.weight_of(text) } else { 0.0 };
         if w > 0.0 {
             hits.push((text.to_string(), w));
         }
@@ -401,7 +436,7 @@ mod tests {
         let mut v: Vec<(f64, usize, &str)> = cands
             .iter()
             .enumerate()
-            .map(|(i, (t, a))| (with_rank_penalty(ctx.score(t, *a), i), i, *t))
+            .map(|(i, (t, a))| (ctx.explain_at(i, t, *a).0, i, *t))
             .collect();
         // 点数の降順、同点なら元の順 (安定)
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
@@ -453,24 +488,42 @@ mod tests {
         assert_eq!(order("公とする", 4, &cands), ["公", "好"]);
     }
 
-    /// 辞書の後ろにある稀な読みは、手掛かり一つでは先頭に来ない。
+    /// 辞書の後ろにある稀な読みは、画面に字があるだけでは先頭に来ない。
     #[test]
     fn a_rare_reading_does_not_jump_to_the_front() {
         // 「あん」は SKK-JISYO.L で 17 件あり、案が 1 番目、行 (行脚) が 16 番目。
-        // 「行」という語について書いている画面では、どちらも画面にある。
-        let screen = "`An` → 案が「行」に抜かれないこと";
+        // 「行」という語について書いている画面では、字としては何度も出てくる。
+        let screen = "`An` → **案**が 1 番目 (以前は「行」でした)。行は 2 番目には来ます";
         let ctx = Context::new(screen, screen.chars().count());
-        let an = ctx.score("案", None);
-        let gyou = ctx.score("行", Some("行脚"));
-        assert!(gyou > an, "行の方がカーソルに近いので、点数だけなら上に来る");
-        // 位置の罰を入れると、1 番目の案が残る
-        assert!(with_rank_penalty(an, 0) > with_rank_penalty(gyou, 15));
-        // **押し下げには使わない。** 罰が勝つときは 0 で止まり、元の位置に留まる。
-        assert_eq!(with_rank_penalty(0.1, 15), 0.0);
-        assert_eq!(with_rank_penalty(0.0, 0), 0.0);
-        // 上位は手を付けない (ふつうの選び分けはここで起きる)
-        assert_eq!(with_rank_penalty(0.5, 4), 0.5);
-        assert!(with_rank_penalty(0.5, 5) < 0.5);
+        // 字の一致だけなら「行」の方が重い (二度出てくる)
+        assert!(ctx.score("行", Some("行脚")) > ctx.score("案", None));
+        // **位置を踏まえると「行」には点が付かない。** 画面の「行」はこの読みの証拠ではない。
+        assert_eq!(ctx.explain_at(15, "行", Some("行脚")).0, 0.0);
+        // 上位の候補は字の一致で足りる
+        assert!(ctx.explain_at(0, "案", None).0 > 0.0);
+    }
+
+    /// 二文字以上の語は、辞書の後ろでも字の一致を数える。読みがほぼ一つに決まるから。
+    #[test]
+    fn a_longer_word_far_down_still_counts_its_own_surface() {
+        // 「鋼製」は「こうせい」の 11 番目あたりで、注釈を持たない
+        let screen = "この部品は鋼製です。鋼製の枠に樹脂の板を張る。図面では鋼製の厚みを 3 mm とした。全体の";
+        let ctx = Context::new(screen, screen.chars().count());
+        assert!(ctx.explain_at(10, "鋼製", None).0 > 0.0);
+        // 一文字の候補は同じ位置でも数えない
+        assert_eq!(ctx.explain_at(10, "鋼", None).0, 0.0);
+    }
+
+    /// 注釈の用例語は、辞書の後ろの候補でも信用する。これが「行」と「較正」を分ける。
+    #[test]
+    fn an_annotation_hint_still_counts_far_down() {
+        let annot = Some("calibrate.「計器の-」");
+        let screen = "計器の針が狂っていたので、基準器と突き合わせて直す。";
+        let ctx = Context::new(screen, screen.chars().count());
+        // 「較正」は画面に書かれていないが、注釈の用例語で点が付く
+        assert!(ctx.explain_at(14, "較正", annot).0 > 0.0);
+        // 位置の罰は掛かるので、上位にあるときより軽い
+        assert!(ctx.explain_at(14, "較正", annot).0 < ctx.explain_at(0, "較正", annot).0);
     }
 
     /// 数字だけの候補は手掛かりにしない。辞書には `１` や `1` が候補として入っている。
