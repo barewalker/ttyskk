@@ -41,6 +41,39 @@
 //!
 //! どちらも実際に外した例から来ている (`tests/data/context-eval.toml` の `reported`)。
 
+/// 罰を掛けない上位の件数 (この位置までは従来どおり)。
+///
+/// **ふつうの同音異義語の選び分けは上位数件で起きる。** 画面に「構成」と「校正」が
+/// 両方あってカーソルが校正寄り、という場面では距離の差が 0.03 しかなく、罰を掛けると
+/// 潰れてしまう。辞書の並びを尊重したいのは「ほとんど使わない読み」に対してだけなので、
+/// 上位は手を付けない。
+const FREE_RANK: usize = 4;
+
+/// 辞書の後ろにある候補に掛ける罰の強さ。
+///
+/// **稀な読みは、画面に一度出ただけで先頭に来るべきではない。**「あん」の「行」は
+/// `SKK-JISYO.L` で 17 件中 16 番目、注釈も `行脚` だけで、この読みはそこでしか使わない。
+/// それが「行」の話をしている画面で 1 番目に来ると案を押しのける (実測で案 0.844 対
+/// 行 0.855 の僅差だった)。
+///
+/// 値は測って決めた。0.15・0.3・0.5 のいずれでも、問題集 39 件 (1 位 22・余分な打鍵 24・
+/// 悪化 0)、既存の見張り 6 件、上の僅差の場面、すべて同じ結果になる。効き方が鈍いところ
+/// なので中間を採った。**強い証拠があれば今までどおり上がる** — 「較正」(辞書 15 番目) は
+/// どの値でも先頭に来る。
+const RANK_PENALTY: f64 = 0.3;
+
+/// 文脈の点数に、いまの並びでの位置の罰を加える。`index` は並べ替える前の位置。
+///
+/// **押し下げには使わない。** 罰で負になるものは 0 で止めるので、手掛かりが弱い候補は
+/// 元の位置に留まるだけで、辞書順より下がることはない。
+pub fn with_rank_penalty(score: f64, index: usize) -> f64 {
+    if score <= 0.0 || index <= FREE_RANK {
+        return score.max(0.0);
+    }
+    let penalty = RANK_PENALTY * ((1 + index) as f64 / (1 + FREE_RANK) as f64).ln();
+    (score - penalty).max(0.0)
+}
+
 /// 重みが半分になる距離 (文字数) の既定値。
 ///
 /// **行数ではなく文字数で数える。** 一行の文字数はフォントの大きさや多重化器の分割で
@@ -368,7 +401,7 @@ mod tests {
         let mut v: Vec<(f64, usize, &str)> = cands
             .iter()
             .enumerate()
-            .map(|(i, (t, a))| (ctx.score(t, *a), i, *t))
+            .map(|(i, (t, a))| (with_rank_penalty(ctx.score(t, *a), i), i, *t))
             .collect();
         // 点数の降順、同点なら元の順 (安定)
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
@@ -418,6 +451,26 @@ mod tests {
         assert_eq!(order("公園であそぶ", 6, &cands), ["好", "公"]);
         // 単独で立っていれば数える
         assert_eq!(order("公とする", 4, &cands), ["公", "好"]);
+    }
+
+    /// 辞書の後ろにある稀な読みは、手掛かり一つでは先頭に来ない。
+    #[test]
+    fn a_rare_reading_does_not_jump_to_the_front() {
+        // 「あん」は SKK-JISYO.L で 17 件あり、案が 1 番目、行 (行脚) が 16 番目。
+        // 「行」という語について書いている画面では、どちらも画面にある。
+        let screen = "`An` → 案が「行」に抜かれないこと";
+        let ctx = Context::new(screen, screen.chars().count());
+        let an = ctx.score("案", None);
+        let gyou = ctx.score("行", Some("行脚"));
+        assert!(gyou > an, "行の方がカーソルに近いので、点数だけなら上に来る");
+        // 位置の罰を入れると、1 番目の案が残る
+        assert!(with_rank_penalty(an, 0) > with_rank_penalty(gyou, 15));
+        // **押し下げには使わない。** 罰が勝つときは 0 で止まり、元の位置に留まる。
+        assert_eq!(with_rank_penalty(0.1, 15), 0.0);
+        assert_eq!(with_rank_penalty(0.0, 0), 0.0);
+        // 上位は手を付けない (ふつうの選び分けはここで起きる)
+        assert_eq!(with_rank_penalty(0.5, 4), 0.5);
+        assert!(with_rank_penalty(0.5, 5) < 0.5);
     }
 
     /// 数字だけの候補は手掛かりにしない。辞書には `１` や `1` が候補として入っている。

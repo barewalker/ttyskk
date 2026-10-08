@@ -5,7 +5,7 @@
 //! 解釈しなかったキーは [`Response::passthrough`] としてそのまま返す。
 
 use crate::config::{Config, DynamicCompletion, Layout, Marker, OkuriMatch};
-use crate::context::Context;
+use crate::context::{self, Context};
 use crate::dict::{Candidate, Dict};
 
 /// 括弧付き貼り付け (bracketed paste) の囲み。
@@ -2139,16 +2139,24 @@ impl Skk {
             .iter()
             .map(|c| ctx.explain(&c.cand.text, c.cand.annotation.as_deref()))
             .collect();
-        let scored: Vec<f64> = explained.iter().map(|(s, _)| *s).collect();
+        // **いまの並びでの位置を罰として引く** ([`context::with_rank_penalty`])。辞書の
+        // 後ろにある稀な読みが、画面に一度出ただけで先頭へ飛ぶのを防ぐ。
+        let scored: Vec<f64> = explained
+            .iter()
+            .enumerate()
+            .map(|(i, (s, _))| context::with_rank_penalty(*s, i))
+            .collect();
         if scored.iter().all(|s| *s <= 0.0) {
             return;
         }
         // 点の付いたものを、**効いた語を添えて**重い順に記録へ残す
         let mut note: Vec<(f64, String)> = explained
             .iter()
+            .map(|(_, hits)| hits)
+            .zip(&scored)
             .zip(&self.candidates)
-            .filter(|((s, _), _)| *s > 0.0)
-            .map(|((s, hits), c)| {
+            .filter(|((_, s), _)| **s > 0.0)
+            .map(|((hits, s), c)| {
                 let why: Vec<String> = hits.iter().take(3).map(|(w, _)| w.clone()).collect();
                 (*s, format!("{} {s:.2}[{}]", c.cand.text, why.join(",")))
             })

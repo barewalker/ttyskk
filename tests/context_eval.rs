@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ttyskk::{
-    context::Context,
+    context::{self, Context},
     dict::{Candidate, Dict},
 };
 
@@ -96,7 +96,7 @@ fn load_items() -> Vec<Item> {
 /// `skk.rs` の `sort_by_context` と同じ並べ替えを、辞書の候補に対して行う。
 ///
 /// **本番と同じにしておくこと。** 点が全部 0 なら触らない、同点は辞書の順のまま
-/// (安定な並べ替え) という二点が、`control` 群の合否をそのまま決める。
+/// (安定な並べ替え)、いまの並びでの位置を罰として引く、の三点が合否をそのまま決める。
 fn reorder(ctx: &Context, cands: &[Candidate]) -> Vec<usize> {
     let order: Vec<usize> = (0..cands.len()).collect();
     if ctx.is_empty() || cands.len() < 2 {
@@ -104,7 +104,10 @@ fn reorder(ctx: &Context, cands: &[Candidate]) -> Vec<usize> {
     }
     let scored: Vec<f64> = cands
         .iter()
-        .map(|c| ctx.score(&c.text, c.annotation.as_deref()))
+        .enumerate()
+        .map(|(i, c)| {
+            context::with_rank_penalty(ctx.score(&c.text, c.annotation.as_deref()), i)
+        })
         .collect();
     if scored.iter().all(|s| *s <= 0.0) {
         return order;
@@ -159,8 +162,10 @@ fn measure_context_order() {
     let mut measured_total = 0usize;
 
     for it in &items {
-        // 作り方の見張り: 正解の表記を文章に書いてよいのは surface 群だけ。
-        if it.kind != "surface"
+        // 作り方の見張り: `pair` の文章には正解の表記を書かない (難しさが消える)。
+        // `surface` は見えていること自体が試すところで、`reported` は実際の画面を
+        // そのまま写したものなので、どちらも対象にしない。
+        if it.kind == "pair"
             && let Some(e) = &it.expect
             && it.context.contains(e)
         {
