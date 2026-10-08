@@ -1,0 +1,488 @@
+# 画面の文脈で候補を選び分ける力を測る問題集。
+#
+# 測るのは一つだけ。**正解の候補が何番目に出るか** = 空白を余計に何回押すか。
+# 走らせ方と数字の読み方は `tests/context_eval.rs` の冒頭に書いてある。
+#
+# ## 書くときの決まり
+#
+# - **候補の一覧はここに書かない。** 辞書 (SKK-JISYO.L) から引く。書き写すと辞書が
+#   育ったときに嘘になる
+# - `context` は画面に見えている文章。**前後の空白を落とした末尾がカーソル位置**
+# - `expect` は辞書の候補そのまま。送りありは語幹だけ書く (「切」)
+# - **`pair` の文脈に正解の表記をそのまま書かない** (書くと `surface` と同じ問題に
+#   なり、難しさが消える)。試験がこれを見張る
+# - **同じ読みを、正解が入れ替わる二つの文脈で持つ** (`pair` が同じ組)。こうしないと
+#   「こうせいは常に校正」と決め打ちした実装でも満点が出てしまう
+# - **実装の出力を見てから文脈を書き換えない。** 先に文章を書き、後で測る
+# - 長さは 80〜400 字ほど。短すぎると手掛かりが無く、長すぎると距離の重みが見えない
+#
+# ## 入れてはいけないもの
+#
+# 文章はすべて架空の自作。実在の人名・社名・製品名・住所・連絡先・ホスト名・実在の
+# 経路・業務の内容は書かない。題材は公共の話題に限る。
+
+[meta]
+jisyo = "SKK-JISYO.L"
+origin = "全文自作"
+forbid_means = "並べ替えで順位を上げてはいけない候補 (辞書順との比較で判定する)"
+
+# ---- 対 (pair) ----------------------------------------------------------
+
+[[item]]
+id = "kousei-proofread"
+pair = "kousei"
+kind = "pair"
+reading = "こうせい"
+expect = "校正"
+context = """
+新聞の紙面は一度刷ってしまえば直せない。だから整理の係は、日付の曜日、人の肩書、数字の桁を一つずつ見て回る。締切に追われていても、この工程だけは省けない。印刷機を回す前に、もう一度
+"""
+
+[[item]]
+id = "kousei-structure"
+pair = "kousei"
+kind = "pair"
+reading = "こうせい"
+expect = "構成"
+context = """
+発表の筋道を組み直した。最初に結論を置き、次に数字、最後に残った課題という順にする。十五分では三つが限界だろう。図は二枚に絞った。これで全体の
+"""
+
+[[item]]
+id = "kikan-period"
+pair = "kikan"
+kind = "pair"
+reading = "きかん"
+expect = "期間"
+context = """
+図書館の貸出は二週間までで、続けて借りたいときは窓口に本を持っていく。予約が入っている本は延ばせない。延滞すると次に借りられる
+"""
+
+[[item]]
+id = "kikan-organization"
+pair = "kikan"
+kind = "pair"
+reading = "きかん"
+expect = "機関"
+context = """
+この調査に費用を出しているのは国の
+"""
+
+[[item]]
+id = "ishi-doctor"
+pair = "ishi"
+kind = "pair"
+reading = "いし"
+expect = "医師"
+context = """
+受付で保険証を出し、待合室で名前を呼ばれるまで座っていた。先に体温と血圧を測る。それから診察室に入って、
+"""
+
+[[item]]
+id = "ishi-intent"
+pair = "ishi"
+kind = "pair"
+reading = "いし"
+expect = "意思"
+context = """
+話し合いは平行線のまま終わった。どちらも譲る気がないというより、そもそも相手に伝わっていないのだろう。まず自分の
+"""
+
+[[item]]
+id = "seisan-fare"
+pair = "seisan"
+kind = "pair"
+reading = "せいさん"
+expect = "精算"
+context = """
+乗り越したことに気づいたのは改札に切符を入れてからだった。駅員のいる窓口に回って、運賃の足りない分を
+"""
+
+[[item]]
+id = "seisan-produce"
+pair = "seisan"
+kind = "pair"
+reading = "せいさん"
+expect = "生産"
+context = """
+機械の止まっていた時間が先月より短くなり、材料の無駄も減った。人手を増やしたわけではない。この調子なら来月の
+"""
+
+[[item]]
+id = "kanshin-interest"
+pair = "kanshin"
+kind = "pair"
+reading = "かんしん"
+expect = "関心"
+context = """
+同じ説明をしても、聞く側がその話題を自分のこととして見ているかどうかで残り方が違う。だから最初に、相手の
+"""
+
+[[item]]
+id = "kanshin-admire"
+pair = "kanshin"
+kind = "pair"
+reading = "かんしん"
+expect = "感心"
+context = """
+初めて包丁を持った子が、りんごの皮を薄く長くむいていく。危なっかしいのに手が止まらない。横で見ていて
+"""
+
+[[item]]
+id = "kouen-lecture"
+pair = "kouen"
+kind = "pair"
+reading = "こうえん"
+expect = "講演"
+context = """
+会場は三百席で、後ろの方まで声が届くか心配だったが、用意された音響で問題なかった。話す人は原稿を持たずに来るという。質疑を含めて九十分の
+"""
+
+[[item]]
+id = "kouen-park"
+pair = "kouen"
+kind = "pair"
+reading = "こうえん"
+expect = "公園"
+context = """
+滑り台と砂場と水飲み場しかないが、夕方になると子どもの声でいっぱいになる。桜が三本だけ植わっていて、春は弁当を持った人が座っている。家から歩いて五分の
+"""
+
+[[item]]
+id = "kitei-default"
+pair = "kitei"
+kind = "pair"
+reading = "きてい"
+expect = "既定"
+context = """
+設定を書かないまま使い始めても困らないようにしてある。書き換えたい人だけが見本を書き出せばよい。何も触らないときの値、つまり
+"""
+
+[[item]]
+id = "kitei-rules"
+pair = "kitei"
+kind = "pair"
+reading = "きてい"
+expect = "規定"
+context = """
+会則の第三章に、集まりの開き方と議決の数え方が書いてある。会費の納め方も同じ章だ。これに外れた進め方はできない。会則の
+"""
+
+[[item]]
+id = "youki-vessel"
+pair = "youki"
+kind = "pair"
+reading = "ようき"
+expect = "容器"
+context = """
+煮たものを冷ましてから移す。ふたの閉まるものを選び、汁気の多いものは浅いものに分ける。冷蔵庫に入れる
+"""
+
+[[item]]
+id = "youki-cheerful"
+pair = "youki"
+kind = "pair"
+reading = "ようき"
+expect = "陽気"
+context = """
+雨が上がって気温が上がり、上着を脱いで歩く人が増えた。桜のつぼみもふくらんでいる。四月とは思えない
+"""
+
+[[item]]
+id = "taishou-target"
+pair = "taishou"
+kind = "pair"
+reading = "たいしょう"
+expect = "対象"
+context = """
+今回の調べは、市内に住む十八歳以上の人から千人を選んで尋ねた。年齢と住む地域で偏らないように選んである。調べの
+"""
+
+[[item]]
+id = "taishou-contrast"
+pair = "taishou"
+kind = "pair"
+reading = "たいしょう"
+expect = "対照"
+context = """
+片方の鉢だけ肥料をやり、もう片方は水だけで育てた。置き場所と水の量は同じにしてある。比べる相手として置いた鉢、つまり
+"""
+
+[[item]]
+id = "heikou-parallel"
+pair = "heikou"
+kind = "pair"
+reading = "へいこう"
+expect = "平行"
+context = """
+定規を当てて線を二本引く。間は五ミリで、どこまで伸ばしても間が変わらないようにしたい。この二本は
+"""
+
+[[item]]
+id = "heikou-concurrent"
+pair = "heikou"
+kind = "pair"
+reading = "へいこう"
+expect = "並行"
+context = """
+煮込んでいる間に洗い物を済ませておけば、食べ終わってからが楽になる。火の前を離れすぎないのが条件だ。二つを
+"""
+
+[[item]]
+id = "katei-home"
+pair = "katei"
+kind = "pair"
+reading = "かてい"
+expect = "家庭"
+context = """
+夕食の時間がそろわないので、作ったものを温め直して食べる日が増えた。皿を下げる順番も決まっていない。それぞれの
+"""
+
+[[item]]
+id = "katei-process"
+pair = "katei"
+kind = "pair"
+reading = "かてい"
+expect = "過程"
+context = """
+出てきた数字だけ見ても、なぜそうなったのかは分からない。途中でどんな手順を踏み、どこで値を丸めたのか。結果ではなく
+"""
+
+[[item]]
+id = "kougi-lecture"
+pair = "kougi"
+kind = "pair"
+reading = "こうぎ"
+expect = "講義"
+context = """
+大きな教室で九十分、黒板に板書しながら進む。出席は取らないが、三回に一度は小さな課題が出る。前期の
+"""
+
+[[item]]
+id = "kougi-protest"
+pair = "kougi"
+kind = "pair"
+reading = "こうぎ"
+expect = "抗議"
+context = """
+決まり方に納得できないという声が何通も届いた。説明の場を設けないまま進めたことが理由だという。寄せられた
+"""
+
+[[item]]
+id = "souzou-imagine"
+pair = "souzou"
+kind = "pair"
+reading = "そうぞう"
+expect = "想像"
+context = """
+文章だけで読んでいると、部屋の広さも光の入り方も自分で思い浮かべることになる。人によって見える景色が違う。読む側の
+"""
+
+[[item]]
+id = "souzou-create"
+pair = "souzou"
+kind = "pair"
+reading = "そうぞう"
+expect = "創造"
+context = """
+今まで無かったものを一から作り出す仕事は、真似をするより時間がかかる。失敗の数も比べものにならない。それでも
+"""
+
+[[item]]
+id = "shuushuu-collect"
+pair = "shuushuu"
+kind = "pair"
+reading = "しゅうしゅう"
+expect = "収集"
+context = """
+燃えるものは火曜と金曜、瓶と缶は第二水曜に出す。前の晩に出すとねこに荒らされる。ごみの
+"""
+
+[[item]]
+id = "shuushuu-settle"
+pair = "shuushuu"
+kind = "pair"
+reading = "しゅうしゅう"
+expect = "収拾"
+context = """
+言い分が入り乱れて、誰が何を決めたのかも分からなくなった。先に話を整える人を立てないと進まない。事態の
+"""
+
+[[item]]
+id = "kiru-cut"
+pair = "kiru"
+kind = "pair"
+reading = "きr"
+okuri = "る"
+expect = "切"
+context = """
+鍋に湯を沸かしている間に、人参を薄い輪に
+"""
+
+[[item]]
+id = "kiru-wear"
+pair = "kiru"
+kind = "pair"
+reading = "きr"
+okuri = "る"
+expect = "着"
+context = """
+朝から風が冷たい。シャツの下にもう一枚
+"""
+
+[[item]]
+id = "hakaru-length"
+pair = "hakaru"
+kind = "pair"
+reading = "はかr"
+okuri = "る"
+expect = "測"
+context = """
+棚を入れる前に、壁から柱までの長さを
+"""
+
+[[item]]
+id = "hakaru-time"
+pair = "hakaru"
+kind = "pair"
+reading = "はかr"
+okuri = "る"
+expect = "計"
+context = """
+麺を入れてから三分きっかりで上げたいので、湯が沸いたら時間を
+"""
+
+[[item]]
+id = "atsui-hot"
+pair = "atsui"
+kind = "pair"
+reading = "あつi"
+okuri = "い"
+expect = "熱"
+context = """
+やかんから湯を注いだばかりなので、湯のみがまだ
+"""
+
+[[item]]
+id = "atsui-thick"
+pair = "atsui"
+kind = "pair"
+reading = "あつi"
+okuri = "い"
+expect = "厚"
+context = """
+辞書を枕にして寝ている。背が五センチほどあるので、ちょうどよいらしい。この本は
+"""
+
+# ---- 画面に候補そのものがある (surface) ---------------------------------
+
+[[item]]
+id = "surface-kouen"
+kind = "surface"
+reading = "こうえん"
+expect = "講演"
+context = """
+講演の記録を文字に起こす作業を分担した。音声は一時間ぶんある。担当を決めたら、まず冒頭の
+"""
+note = "直接の証拠。候補そのものが画面にある"
+
+# ---- 注釈の英語が効く (annotation-en) -----------------------------------
+
+[[item]]
+id = "annot-en-proofread"
+kind = "annotation-en"
+reading = "こうせい"
+expect = "校正"
+context = """
+Please proofread the draft before we send it to the printer. There are a few typos in the second paragraph, and the date in the header looks wrong.
+原稿が戻ってきたので、これから
+"""
+note = "注釈の訳語が英文として画面にある場合"
+
+# ---- 偽の手掛かり (trap) ------------------------------------------------
+
+[[item]]
+id = "trap-identifier-config"
+kind = "trap"
+reading = "こうせい"
+forbid = ["構成"]
+context = """
+$ ttyskk --config-example > ~/.config/ttyskk/config.toml
+$ ls ~/.config/ttyskk
+config.toml
+原稿が戻ってきた。朱の入ったところを一つずつ見ていく。印刷に回す前の最後の
+"""
+note = "識別子や経路の中の config を語として数えてはいけない"
+
+[[item]]
+id = "trap-one-char-inside-word"
+kind = "trap"
+reading = "こう"
+forbid = ["公"]
+context = """
+公園の桜が咲いた。公演の日程も決まった。
+"""
+note = "一文字の候補は、同じ字種の連なりがその一文字のときだけ数える"
+
+# ---- 対照 (control) -----------------------------------------------------
+# 手掛かりの無い画面。並びを変えてはいけない (辞書順と完全一致)。
+
+[[item]]
+id = "control-weather"
+kind = "control"
+reading = "こうせい"
+context = """
+明け方まで雨が残り、昼前から風が強まる見込みです。沿岸では波が高くなります。山沿いではにわか雨の所があります。
+"""
+
+[[item]]
+id = "control-cooking"
+kind = "control"
+reading = "きかん"
+context = """
+玉ねぎをあめ色になるまで炒めるのに二十分かかった。焦がさないように火は弱めのまま、木べらで時々混ぜる。
+"""
+
+[[item]]
+id = "control-empty"
+kind = "control"
+reading = "せいさん"
+context = ""
+note = "画面が空のとき。何も起きないことの確認"
+
+# ---- 実際に外した例 (reported) ------------------------------------------
+# 使っていて頻発した取りこぼし。正解を上げたいだけでなく、`forbid` の候補を
+# 上げてはいけない。端末らしい画面を再現してある。
+
+[[item]]
+id = "reported-ichi-position"
+kind = "reported"
+reading = "いち"
+expect = "位置"
+forbid = ["1", "１", "一"]
+context = """
+$ wc -l src/*.rs
+  1467 src/config.rs
+   451 src/context.rs
+  1299 src/dict.rs
+   835 src/input.rs
+ 15605 total
+src/render.rs|212 col 8| warning: unused variable
+test result: ok. 41 passed; 1 ignored
+カーソルの
+"""
+note = "画面が数字だらけのとき。辞書には候補として 1 と １ がある"
+
+[[item]]
+id = "reported-an-plan"
+kind = "reported"
+reading = "あん"
+expect = "案"
+forbid = ["行"]
+context = """
+memo.md [+] 42 行目 / 180 行    80%
+  38 行目から 41 行目を書き直した
+  空行を一行入れる
+来月の進め方について、三つの
+"""
+note = "端末の画面に「行」が助数詞として頻出するとき"

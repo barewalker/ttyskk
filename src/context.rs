@@ -31,6 +31,15 @@
 //! ```
 //!
 //! 同じ語が何度も出てくれば足し合わせる。「近くにある」と「よく出てくる」が混ざる。
+//!
+//! # 端末の画面に特有の雑音
+//!
+//! **一文字の候補が、端末ならどこにでもある字と当たる。** 数えないものを二つ置いた。
+//!
+//! - **数字だけの候補** (`いち /…/１/1/`)。画面は数字で埋まっている
+//! - **数字に続く漢字一文字** (`180 行`、`41 件`)。助数詞は話題を示さない
+//!
+//! どちらも実際に外した例から来ている (`tests/data/context-eval.toml` の `reported`)。
 
 /// 重みが半分になる距離 (文字数) の既定値。
 ///
@@ -151,6 +160,13 @@ impl Context {
         if n.is_empty() || n.len() > self.chars.len() {
             return 0.0;
         }
+        // **数字だけの候補は手掛かりにしない。** 辞書には数字そのものが候補として
+        // 入っている (`いち /一/位置/市/壱/…/１/1/`)。端末の画面は数字で埋まって
+        // いるので必ず当たり、「いち」と打つと位置より `1` が先に出てしまう。
+        // そもそも数字は話題を示さないので、手掛かりとして何の意味も持たない。
+        if n.iter().all(|c| c.is_numeric()) {
+            return 0.0;
+        }
         // 英字の語は大文字小文字を無視して照合する
         let ascii = n.iter().all(|c| c.is_ascii_alphabetic());
         let mut total = 0.0;
@@ -202,8 +218,46 @@ impl Context {
             return true;
         }
         let class = class_of(self.chars[at]);
+        // **数字に続く漢字一文字は助数詞として扱い、数えない。** 端末の画面は
+        // 「180 行」「41 件」「3 回」で埋まっていて、この「行」は漢字の連なりとして
+        // ちょうど一文字なので上の規則をそのまま通ってしまう。実際に「あん」と打つと
+        // 案より「行」(行脚) が先に出た。数を数えている字は話題を示さない。
+        //
+        // 助数詞の一覧は持たない。語の表を抱えることになるので位置だけで見る。
+        if class == Class::Kanji && self.follows_a_number(at) {
+            return false;
+        }
         let same = |c: Option<char>| c.is_some_and(|c| class_of(c) == class);
         !same(before) && !same(after)
+    }
+
+    /// その位置の直前が数字か (間の空白は読み飛ばす)。
+    ///
+    /// 端末は桁を揃えるために空白を入れるので (`  1467 src/config.rs`)、空白の数を
+    /// 問わずに遡る。
+    ///
+    /// **「第1案」「第2章」は数えてよい。** 数字の前に「第」があれば、数を数えている
+    /// のではなく番号を振った語なので、本物の手掛かりとして働く。
+    fn follows_a_number(&self, at: usize) -> bool {
+        let back = |from: usize, f: &dyn Fn(char) -> bool| {
+            let mut i = from;
+            while let Some(prev) = i.checked_sub(1) {
+                if !f(self.chars[prev]) {
+                    break;
+                }
+                i = prev;
+            }
+            i
+        };
+        let i = back(at, &|c| matches!(c, ' ' | '\t' | '\u{3000}'));
+        let Some(last) = i.checked_sub(1) else {
+            return false;
+        };
+        if !self.chars[last].is_numeric() {
+            return false;
+        }
+        let head = back(last, &|c| c.is_numeric());
+        head.checked_sub(1).map(|k| self.chars[k]) != Some('第')
     }
 
     /// カーソルからの距離 (文字数)。範囲に入っていれば 0。
@@ -364,6 +418,40 @@ mod tests {
         assert_eq!(order("公園であそぶ", 6, &cands), ["好", "公"]);
         // 単独で立っていれば数える
         assert_eq!(order("公とする", 4, &cands), ["公", "好"]);
+    }
+
+    /// 数字だけの候補は手掛かりにしない。辞書には `１` や `1` が候補として入っている。
+    #[test]
+    fn a_digit_candidate_is_never_a_hint() {
+        let cands = [("位置", None), ("1", None), ("１", None)];
+        // 端末の画面は数字で埋まっている。これで `1` が先頭に来てはいけない。
+        let screen = "test result: ok. 41 passed; 1 ignored\nカーソルの";
+        assert_eq!(
+            order(screen, screen.chars().count(), &cands),
+            ["位置", "1", "１"]
+        );
+        // 画面にその数字しか無くても変わらない
+        assert_eq!(order("1", 1, &cands), ["位置", "1", "１"]);
+    }
+
+    /// 数字に続く漢字一文字は助数詞。話題を示さないので数えない。
+    #[test]
+    fn a_counter_after_a_number_is_not_a_hint() {
+        let cands = [("案", None), ("行", Some("行脚"))];
+        // 編集器の状態表示や試験の結果に必ず出る形
+        assert_eq!(
+            order("memo.md [+] 42 行目 / 180 行", 27, &cands),
+            ["案", "行"]
+        );
+        // 桁を揃える空白を挟んでも同じ
+        assert_eq!(order("  1467 行", 8, &cands), ["案", "行"]);
+        // 数字と関わりなく立っている「行」は今までどおり数える
+        assert_eq!(order("行をあらためる", 7, &cands), ["行", "案"]);
+        // 「第1案」は数を数えているのではない。番号付きの語なので手掛かりに残す。
+        // **候補の並びを逆にして確かめる** — 「案」が元から先頭だと、点が付かなくても
+        // 通ってしまい、何も試していないことになる。
+        let reversed = [("行", Some("行脚")), ("案", None)];
+        assert_eq!(order("第1案と第2案をくらべる", 11, &reversed), ["案", "行"]);
     }
 
     /// 英字は語の境界で見る。識別子やパスの一部は数えない。
