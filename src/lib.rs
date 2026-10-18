@@ -32,6 +32,7 @@ pub mod context;
 pub mod dict;
 pub mod migemo;
 pub mod num;
+pub mod rank;
 pub mod romaji;
 pub mod skk;
 pub mod snippet;

@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use ttyskk::{
     context::Context,
     dict::{Candidate, Dict},
+    rank::{self, DictOrder, Ranker, ScreenHints},
 };
 
 /// 共有辞書。無ければ何も測れないので、断って通す。
@@ -93,30 +94,32 @@ fn load_items() -> Vec<Item> {
         .collect()
 }
 
-/// `skk.rs` の `sort_by_context` と同じ並べ替えを、辞書の候補に対して行う。
+/// 測る方式。`TTYSKK_EVAL_RANKER` で選ぶ (`screen` が既定、`dict` は何もしない相手)。
 ///
-/// **本番と同じにしておくこと。** 点が全部 0 なら触らない、同点は辞書の順のまま
-/// (安定な並べ替え)、いまの並びでの位置を踏まえて点を付ける、の三点が合否をそのまま決める。
-fn reorder(ctx: &Context, cands: &[Candidate]) -> Vec<usize> {
-    let order: Vec<usize> = (0..cands.len()).collect();
+/// **本番と同じ実装を呼ぶ。** 以前はここに `sort_by_context` の写しを置いていたが、本番が
+/// 差し替え口を持ったので写す必要が無くなった。写しがあると、本番だけ直したときに台が
+/// 古い基準で通ってしまう。
+fn ranker() -> Box<dyn Ranker> {
+    match std::env::var("TTYSKK_EVAL_RANKER").unwrap_or_default().as_str() {
+        "" | "screen" => Box::new(ScreenHints),
+        "dict" => Box::new(DictOrder),
+        other => panic!("知らない方式: {other} (screen / dict)"),
+    }
+}
+
+/// 候補を並べ替えて、新しい並び (元の添字) を返す。
+fn reorder(ranker: &dyn Ranker, ctx: &Context, key: &str, cands: &[Candidate]) -> Vec<usize> {
     if ctx.is_empty() || cands.len() < 2 {
-        return order;
+        return (0..cands.len()).collect();
     }
-    let scored: Vec<f64> = cands
+    let handed: Vec<rank::Candidate<'_>> = cands
         .iter()
-        .enumerate()
-        .map(|(i, c)| ctx.explain_at(i, &c.text, c.annotation.as_deref()).0)
+        .map(|c| rank::Candidate {
+            text: &c.text,
+            annotation: c.annotation.as_deref(),
+        })
         .collect();
-    if scored.iter().all(|s| *s <= 0.0) {
-        return order;
-    }
-    let mut order = order;
-    order.sort_by(|a, b| {
-        scored[*b]
-            .partial_cmp(&scored[*a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    order
+    ranker.rank(ctx, key, &handed).order
 }
 
 /// 並びの中で何番目か (1 から数える)。無ければ `None`。
@@ -148,6 +151,7 @@ fn measure_context_order() {
     // **利用者辞書は使わない。** 走らせる人の学習に左右されると基準にならない。
     let dict = Dict::load(&[jisyo], PathBuf::from("/nonexistent/user.dict"), None)
         .expect("辞書を読めない");
+    let ranker = ranker();
     let items = load_items();
 
     let mut tally: BTreeMap<String, Tally> = BTreeMap::new();
@@ -173,7 +177,7 @@ fn measure_context_order() {
         let cands = dict.lookup(&it.reading);
         let ctx = Context::new(&it.context, it.context.chars().count());
         let dict_order: Vec<usize> = (0..cands.len()).collect();
-        let ctx_order = reorder(&ctx, &cands);
+        let ctx_order = reorder(ranker.as_ref(), &ctx, &it.reading, &cands);
 
         let t = tally.entry(it.kind.clone()).or_default();
         t.items += 1;
@@ -244,7 +248,7 @@ fn measure_context_order() {
         }
     }
 
-    println!("\n== 群ごと ==");
+    println!("\n== 群ごと (方式: {}) ==", ranker.name());
     println!(
         "{:<14} {:>4} {:>4} {:>9} {:>9} {:>9} {:>9} {:>5} {:>5}",
         "群",
@@ -330,12 +334,13 @@ fn reported_cases() {
     let dict = Dict::load(&[jisyo], PathBuf::from("/nonexistent/user.dict"), None)
         .expect("辞書を読めない");
 
+    let ranker = ranker();
     let mut bad: Vec<String> = Vec::new();
     for it in load_items().iter().filter(|it| it.kind == "reported") {
         let cands = dict.lookup(&it.reading);
         let ctx = Context::new(&it.context, it.context.chars().count());
         let dict_order: Vec<usize> = (0..cands.len()).collect();
-        let ctx_order = reorder(&ctx, &cands);
+        let ctx_order = reorder(ranker.as_ref(), &ctx, &it.reading, &cands);
         let expect = it.expect.as_deref().expect("reported には expect が要る");
 
         // **求めるのは「文脈のせいで下がらないこと」**。先頭に出すことは求めない —

@@ -6,6 +6,7 @@
 
 use crate::config::{Config, DynamicCompletion, Layout, Marker, OkuriMatch};
 use crate::context::Context;
+use crate::rank::{self, Ranker};
 use crate::dict::{Candidate, Dict};
 
 /// 括弧付き貼り付け (bracketed paste) の囲み。
@@ -536,6 +537,11 @@ pub struct Skk {
     /// **点数が見えないと、狙いと違う候補が出た理由を追えない。** 画面のどの語が
     /// 効いたのかは、点数を並べて初めて分かる。
     context_note: Option<String>,
+    /// 候補の並べ替え方 ([`rank::Ranker`])。**差し替えられる。**
+    ///
+    /// 既定は画面の文章から手掛かりを探す方式。手元の模型に点を付けさせる方式を試す
+    /// ときは、ここを入れ替える ([`Skk::set_ranker`])。
+    ranker: Box<dyn Ranker>,
     /// いまの日時 ([`Skk::set_now`])。定型文の変数を開くのに使う。
     now: snippet::Now,
     /// 定型文の埋める場所を埋めている途中 ([`Filling`])。
@@ -580,6 +586,7 @@ impl Skk {
             last_commit: None,
             context: None,
             context_note: None,
+            ranker: Box::new(rank::ScreenHints),
             now: snippet::Now::default(),
             filling: None,
             fill_suffix: String::new(),
@@ -2108,6 +2115,15 @@ impl Skk {
         self.cfg.context_order
     }
 
+    /// 候補の並べ替え方を入れ替える。
+    ///
+    /// **試すための口。** 既定の [`rank::ScreenHints`] のほかに、何もしない
+    /// [`rank::DictOrder`] や、手元の模型に問い合わせる実装を差せる。`context_order` が
+    /// 無効なら、どれを差しても呼ばれない。
+    pub fn set_ranker(&mut self, ranker: Box<dyn Ranker>) {
+        self.ranker = ranker;
+    }
+
     /// 画面に見えている文章を渡す。`cursor` は文字数での位置。
     ///
     /// 変換を始めるたびに見るので、画面が変わったときだけ渡し直せばよい。
@@ -2134,50 +2150,32 @@ impl Skk {
         if ctx.is_empty() || self.candidates.len() < 2 {
             return;
         }
-        // **いまの並びでの位置を踏まえて点を付ける** ([`Context::explain_at`])。辞書の
-        // 後ろにある稀な読みが、画面に字があるだけで先頭へ飛ぶのを防ぐ。
-        let explained: Vec<(f64, Vec<(String, f64)>)> = self
-            .candidates
-            .iter()
-            .enumerate()
-            .map(|(i, c)| ctx.explain_at(i, &c.cand.text, c.cand.annotation.as_deref()))
-            .collect();
-        let scored: Vec<f64> = explained.iter().map(|(s, _)| *s).collect();
-        if scored.iter().all(|s| *s <= 0.0) {
+        // **並べ替えそのものは差し替えられる** ([`rank::Ranker`])。既定は画面の文章から
+        // 手掛かりを探す方式で、手元の模型に点を付けさせる方式を後ろに置く余地を残す。
+        let ranking = {
+            let cands: Vec<rank::Candidate<'_>> = self
+                .candidates
+                .iter()
+                .map(|c| rank::Candidate {
+                    text: &c.cand.text,
+                    annotation: c.cand.annotation.as_deref(),
+                })
+                .collect();
+            self.ranker.rank(ctx, &self.dict_key, &cands)
+        };
+        if ranking.note.is_some() {
+            self.context_note = ranking.note;
+        }
+        // 触らないと言われたら触らない (借用も並べ替えも省く)。
+        if ranking.order.iter().enumerate().all(|(at, i)| at == *i) {
             return;
         }
-        // 点の付いたものを、**効いた語を添えて**重い順に記録へ残す
-        let mut note: Vec<(f64, String)> = explained
-            .iter()
-            .map(|(_, hits)| hits)
-            .zip(&scored)
-            .zip(&self.candidates)
-            .filter(|((_, s), _)| **s > 0.0)
-            .map(|((hits, s), c)| {
-                let why: Vec<String> = hits.iter().take(3).map(|(w, _)| w.clone()).collect();
-                (*s, format!("{} {s:.2}[{}]", c.cand.text, why.join(",")))
-            })
-            .collect();
-        note.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        self.context_note = Some(format!(
-            "{} → {}\n    画面 {}",
-            self.dict_key,
-            note.iter()
-                .take(5)
-                .map(|(_, t)| t.clone())
-                .collect::<Vec<_>>()
-                .join(" / "),
-            ctx.digest(60)
-        ));
-        // 点数の降順。**安定な並べ替え**なので、同点のものは元の順 (最近使った順) を保つ。
-        let mut order: Vec<usize> = (0..self.candidates.len()).collect();
-        order.sort_by(|a, b| {
-            scored[*b]
-                .partial_cmp(&scored[*a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
         let mut taken: Vec<Option<Choice>> = self.candidates.drain(..).map(Some).collect();
-        self.candidates = order.into_iter().filter_map(|i| taken[i].take()).collect();
+        self.candidates = ranking
+            .order
+            .into_iter()
+            .filter_map(|i| taken[i].take())
+            .collect();
     }
 
     /// 送り仮名ごとの宛先で候補を並べ替える。

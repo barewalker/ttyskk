@@ -149,6 +149,16 @@ impl Context {
         )
     }
 
+    /// カーソルより前の文章 (末尾 `limit` 文字まで)。
+    ///
+    /// **別の並べ替え方に渡すためのもの** ([`crate::rank::Ranker`])。画面から手掛かりを
+    /// 探す方式は語の一致だけを見るが、模型に点を付けさせる方式には**文章そのもの**が要る
+    /// (skk-zenz は前後 40 文字を送っている)。
+    pub fn left(&self, limit: usize) -> String {
+        let lo = self.cursor.saturating_sub(limit);
+        self.chars[lo..self.cursor].iter().collect()
+    }
+
     /// 候補ひとつの点数。手掛かりが無ければ 0。
     pub fn score(&self, text: &str, annotation: Option<&str>) -> f64 {
         self.explain(text, annotation).0
@@ -454,6 +464,16 @@ mod tests {
         let typed = "行 一 直っていないよ";
         let t = Context::new(typed, typed.chars().count());
         assert_eq!(t.explain_at(0, "一", None).0, 0.0);
+    }
+
+    /// カーソルより前の文章を、別の並べ替え方へ渡せる。
+    #[test]
+    fn the_text_before_the_cursor_can_be_handed_over() {
+        let ctx = Context::new("来月の進め方について、三つの", 14);
+        assert_eq!(ctx.left(5), "て、三つの");
+        assert_eq!(ctx.left(100), "来月の進め方について、三つの");
+        // カーソルが先頭なら空
+        assert_eq!(Context::new("あいうえお", 0).left(10), "");
     }
 
     /// 数字だけの候補は手掛かりにしない。辞書には `10` や `１２` のように二文字のものもある。
