@@ -599,17 +599,55 @@ fn ask_the_wrapper_to_reload() -> Result<()> {
 /// 端末を raw モードにし、終了時に必ず元へ戻す。
 struct RawGuard {
     original: nix::sys::termios::Termios,
+    /// raw にする前から端末に溜まっていたバイト数と、そこで CR が LF に
+    /// 変えられていたか。[`RawGuard::cooked_typeahead`] で使う。
+    cooked: (usize, bool),
 }
 
 impl RawGuard {
     fn new() -> Result<Self> {
-        use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
+        use nix::sys::termios::{InputFlags, SetArg, cfmakeraw, tcgetattr, tcsetattr};
         let stdin = std::io::stdin();
         let original = tcgetattr(&stdin).context("端末属性を取得できません")?;
+        // **raw にする前に、溜まっている分を数える。** その分は元の設定のまま
+        // 受け付けられていて、`ICRNL` なら Enter (CR) が LF に変わっている。
+        let mut pending: libc::c_int = 0;
+        if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut pending) } != 0 {
+            pending = 0;
+        }
+        let icrnl = original.input_flags.contains(InputFlags::ICRNL);
         let mut raw = original.clone();
         cfmakeraw(&mut raw);
         tcsetattr(&stdin, SetArg::TCSANOW, &raw).context("端末を raw モードにできません")?;
-        Ok(RawGuard { original })
+        Ok(RawGuard {
+            original,
+            cooked: (pending.max(0) as usize, icrnl),
+        })
+    }
+
+    /// 起動前に打たれた分の Enter を元へ戻す。
+    ///
+    /// herdr は再起動のあと、ペインのシェルを起こすと同時に `claude --resume <ID>`
+    /// と Enter を書き込む。ttyskk が raw にする前なので、端末は Enter (CR) を LF に
+    /// 変えて溜める。**ttyskk にとって LF は Ctrl+J (かなモードへ入るキー)** なので、
+    /// そのまま流すと命令は実行されず、かなモードに切り替わるだけになる。
+    ///
+    /// raw にした後の分には手を付けない。そこでの LF は本当に Ctrl+J が押されたもの。
+    fn cooked_typeahead(&self, typeahead: &mut [u8]) {
+        let (pending, icrnl) = self.cooked;
+        if icrnl {
+            undo_icrnl(typeahead, pending);
+        }
+    }
+}
+
+/// 先頭の `pending` バイトの LF を CR へ戻す。
+fn undo_icrnl(buf: &mut [u8], pending: usize) {
+    let end = pending.min(buf.len());
+    for b in &mut buf[..end] {
+        if *b == b'\n' {
+            *b = b'\r';
+        }
     }
 }
 
@@ -1454,7 +1492,8 @@ fn main() -> Result<()> {
     // 取りこぼす。取りこぼすと控えの原点がずれ、重ね描きの消去が無関係のセルを
     // 潰したうえ、物理カーソルも誤った場所へ動くのでシェルの出力までそこへ落ちる。
     // 答えが来た時点で戻るので、速い端末では待ち時間にならない。
-    let (origin, typeahead) = read_cursor_report(Duration::from_millis(1500));
+    let (origin, mut typeahead) = read_cursor_report(Duration::from_millis(1500));
+    raw.cooked_typeahead(&mut typeahead);
 
     let mut trace = Trace::new();
     trace.log(format_args!(
@@ -2113,6 +2152,18 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn only_the_cooked_part_gets_its_enter_back() {
+        // 先に溜まっていた 5 バイトは CR に戻し、raw にした後の Ctrl+J は残す
+        let mut buf = b"ls\nx\nab\n".to_vec();
+        undo_icrnl(&mut buf, 5);
+        assert_eq!(buf, b"ls\rx\rab\n");
+        // 溜まっていた分が読んだ分より多いと言われても、はみ出さない
+        let mut short = b"a\n".to_vec();
+        undo_icrnl(&mut short, 10);
+        assert_eq!(short, b"a\r");
+    }
 
     /// 使い方はいまの割り当てを見せる。書き置きではないので、設定を変えれば変わる。
     #[test]
