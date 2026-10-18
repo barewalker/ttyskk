@@ -4,6 +4,7 @@
 //! 未確定の文字は端末へ直接重ね描きするので、子アプリの画面には現れない。
 
 // 端末に載せる部分だけがここにある。変換エンジンは lib (ttyskk) の側。
+mod herdr_hint;
 mod input;
 mod render;
 mod screen;
@@ -407,6 +408,7 @@ fn hand_over(
     pid: libc::pid_t,
     raw: &RawGuard,
     origin: &Path,
+    slot: bool,
 ) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
 
@@ -426,10 +428,15 @@ fn hand_over(
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let err = std::process::Command::new(exe)
-        .args(&args)
-        .env(HANDOVER_ENV, format!("{}:{}", master.fd, pid))
-        .exec();
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args)
+        .env(HANDOVER_ENV, format!("{}:{}", master.fd, pid));
+    // herdr へ知らせる枠は、いまは名前が書き込まれていて短い。次の版が同じ枠を
+    // 取れるよう、空き枠を付け直して渡す ([`herdr_hint`])。
+    if slot {
+        cmd.env(herdr_hint::AGENT_ENV, herdr_hint::empty_slot());
+    }
+    let err = cmd.exec();
 
     // ここへ来たのは失敗したとき。開いたものを元の閉じ方に戻し、raw へ戻る。
     if flags >= 0 {
@@ -1375,6 +1382,21 @@ fn main() -> Result<()> {
         bail!("標準入力が端末ではありません");
     }
 
+    // herdr のペインの中なら、中で動いているものを知らせる枠を取るために一度だけ
+    // 起こし直す ([`herdr_hint`])。枠は起動時に渡された環境変数の中にしか作れない。
+    // 起こし直せなければ、知らせないまま続ける (日本語入力には関わらない)。
+    if herdr_hint::wants_slot()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        use std::os::unix::process::CommandExt;
+        let _ = std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .env(herdr_hint::AGENT_ENV, herdr_hint::empty_slot())
+            .exec();
+    }
+    // **環境変数を書き換える前に探す** (差し替えの申し送りを消すより前に)。
+    let mut hint = herdr_hint::AgentHint::find();
+
     let import =
         config::env_os("HOME").map(|h| PathBuf::from(h).join(".local/share/fcitx5/skk/user.dict"));
     let mut dict = Dict::load(&default_system_jisyo(), user_jisyo(), import.as_deref())?;
@@ -1480,6 +1502,12 @@ fn main() -> Result<()> {
             }
             for (k, v) in std::env::vars_os() {
                 cmd.env(k, v);
+            }
+            // 枠は ttyskk のもの。子に渡すと、子がさらに何かを包んだときに
+            // 中身と食い違う名前を名乗ることになる。`CommandBuilder` は始めから
+            // 親の環境を抱えているので、写さないだけでは足りず消す必要がある。
+            if hint.is_some() {
+                cmd.env_remove(herdr_hint::AGENT_ENV);
             }
             // 子の中でうっかり ttyskk を起こしても包み直さないための目印。
             //
@@ -1688,6 +1716,12 @@ fn main() -> Result<()> {
                 {
                     trace.log(format_args!("--- 子に付いて {} へ移る", dir.display()));
                 }
+                // 中の前景が入れ替わっていれば herdr へ知らせ直す
+                if let Some(h) = hint.as_mut()
+                    && let Some(name) = h.look(master.fd)
+                {
+                    trace.log(format_args!("--- herdr へ前景を知らせる: {name:?}"));
+                }
                 // 手が止まる前に起きただけなら、待ち直す
                 if quiet_since.elapsed() < SAVE_AFTER {
                     continue;
@@ -1718,6 +1752,11 @@ fn main() -> Result<()> {
                     && let Some(dir) = f.spoke()
                 {
                     trace.log(format_args!("--- 子に付いて {} へ移る", dir.display()));
+                }
+                if let Some(h) = hint.as_mut()
+                    && let Some(name) = h.spoke(master.fd)
+                {
+                    trace.log(format_args!("--- herdr へ前景を知らせる: {name:?}"));
                 }
                 context_stale = true;
                 let had_overlay = !overlay.is_empty();
@@ -2010,7 +2049,7 @@ fn main() -> Result<()> {
                     // 戻ってきたのは差し替えられなかったということ。**子を道連れに
                     // するくらいなら、そのまま動き続ける。**
                     Some(pid) => {
-                        let e = hand_over(&exe, &master, pid, &raw, &start_dir);
+                        let e = hand_over(&exe, &master, pid, &raw, &start_dir, hint.is_some());
                         trace.log(format_args!("--- 差し替えられない: {e:#}"));
                         // 消した重ね描きは次の打鍵で描き直される
                         overlay.forget();
