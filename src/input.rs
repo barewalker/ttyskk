@@ -529,10 +529,19 @@ mod tests {
     #[test]
     fn a_key_release_is_not_a_press() {
         let mut d = decoder();
-        assert_eq!(d.feed(b"\x1b[106;5:3u"), vec![Key::Release(b"\x1b[106;5:3u".to_vec())]);
-        assert_eq!(d.feed(b"\x1b[104;1:3u"), vec![Key::Release(b"\x1b[104;1:3u".to_vec())]);
+        assert_eq!(
+            d.feed(b"\x1b[106;5:3u"),
+            vec![Key::Release(b"\x1b[106;5:3u".to_vec())]
+        );
+        assert_eq!(
+            d.feed(b"\x1b[104;1:3u"),
+            vec![Key::Release(b"\x1b[104;1:3u".to_vec())]
+        );
         // 種別の無い形と、押した (1) は今までどおり
-        assert_eq!(d.feed(b"\x1b[104;1u"), vec![Key::Raw(b"\x1b[104;1u".to_vec())]);
+        assert_eq!(
+            d.feed(b"\x1b[104;1u"),
+            vec![Key::Raw(b"\x1b[104;1u".to_vec())]
+        );
     }
 
     /// C-h は制御キーのまま切り出す。backspace として扱うかは設定が決める。

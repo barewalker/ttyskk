@@ -70,7 +70,9 @@ fn child_of(pid: u32, secs: u64) -> Option<u32> {
             .arg(pid.to_string())
             .output()
             .ok()?;
-        if let Some(first) = String::from_utf8_lossy(&out.stdout).split_whitespace().next()
+        if let Some(first) = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
             && let Ok(p) = first.parse()
         {
             return Some(p);

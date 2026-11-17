@@ -140,7 +140,9 @@ fn argv0_name(cmdline: &[u8]) -> Option<String> {
     let argv0 = cmdline.split(|&b| b == 0).next()?;
     let argv0 = std::str::from_utf8(argv0).ok()?;
     // ログインシェルは `-zsh` のように頭に `-` が付く
-    let name = Path::new(argv0.trim_start_matches('-')).file_name()?.to_str()?;
+    let name = Path::new(argv0.trim_start_matches('-'))
+        .file_name()?
+        .to_str()?;
     (!name.is_empty()).then(|| name.to_owned())
 }
 

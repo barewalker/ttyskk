@@ -71,5 +71,8 @@ fn a_command_typed_before_startup_runs() {
     let _ = child.kill();
     let _ = child.wait();
 
-    assert!(ran, "起動前に打たれた命令が実行されない (Enter が Ctrl+J になっている)");
+    assert!(
+        ran,
+        "起動前に打たれた命令が実行されない (Enter が Ctrl+J になっている)"
+    );
 }

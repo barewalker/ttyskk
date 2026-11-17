@@ -648,8 +648,7 @@ mod tests {
     #[test]
     fn joins_the_body_lines_with_newlines() {
         let s =
-            parse(r#"{"署名": {"prefix": "しょめい", "body": ["素足 太郎", "所属名"]}}"#)
-                .unwrap();
+            parse(r#"{"署名": {"prefix": "しょめい", "body": ["素足 太郎", "所属名"]}}"#).unwrap();
         assert_eq!(s[0].body, "素足 太郎\n所属名");
         // 注釈が無ければ項目の名前を使う
         assert_eq!(s[0].description.as_deref(), Some("署名"));

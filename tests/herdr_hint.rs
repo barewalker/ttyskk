@@ -126,7 +126,10 @@ fn the_foreground_agent_is_told_to_herdr() {
     key("stty -echo\r");
     std::thread::sleep(Duration::from_millis(300));
     // 子に枠が漏れていないかを、ついでに書き出させる
-    key(&format!("echo \"[$HERDR_AGENT]\" > {}\r", base.join("seen").display()));
+    key(&format!(
+        "echo \"[$HERDR_AGENT]\" > {}\r",
+        base.join("seen").display()
+    ));
     std::thread::sleep(Duration::from_millis(300));
     key(&format!("{} 30\r", fake.display()));
     let running = wait_for(pid, 10, |v| v == Some("claude"));
@@ -139,9 +142,21 @@ fn the_foreground_agent_is_told_to_herdr() {
     let _ = child.kill();
     let _ = child.wait();
 
-    assert_eq!(idle.as_deref(), Some("sh"), "herdr のペインの中なのに前景を知らせていない");
-    assert_eq!(running.as_deref(), Some("claude"), "前景の claude が知らされない");
-    assert_eq!(back.as_deref(), Some("sh"), "claude が止まったのに名乗り続けている");
+    assert_eq!(
+        idle.as_deref(),
+        Some("sh"),
+        "herdr のペインの中なのに前景を知らせていない"
+    );
+    assert_eq!(
+        running.as_deref(),
+        Some("claude"),
+        "前景の claude が知らされない"
+    );
+    assert_eq!(
+        back.as_deref(),
+        Some("sh"),
+        "claude が止まったのに名乗り続けている"
+    );
     assert_eq!(seen.trim(), "[]", "枠が子に漏れている");
 }
 
@@ -186,6 +201,14 @@ fn the_slot_survives_a_reload() {
     let _ = child.kill();
     let _ = child.wait();
 
-    assert_eq!(before.as_deref(), Some("sh"), "差し替える前から知らせていない");
-    assert_eq!(after.as_deref(), Some("claude"), "差し替えた後に知らせなくなった");
+    assert_eq!(
+        before.as_deref(),
+        Some("sh"),
+        "差し替える前から知らせていない"
+    );
+    assert_eq!(
+        after.as_deref(),
+        Some("claude"),
+        "差し替えた後に知らせなくなった"
+    );
 }

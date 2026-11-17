@@ -100,7 +100,10 @@ fn load_items() -> Vec<Item> {
 /// 差し替え口を持ったので写す必要が無くなった。写しがあると、本番だけ直したときに台が
 /// 古い基準で通ってしまう。
 fn ranker() -> Box<dyn Ranker> {
-    match std::env::var("TTYSKK_EVAL_RANKER").unwrap_or_default().as_str() {
+    match std::env::var("TTYSKK_EVAL_RANKER")
+        .unwrap_or_default()
+        .as_str()
+    {
         "" | "screen" => Box::new(ScreenHints),
         "dict" => Box::new(DictOrder),
         other => panic!("知らない方式: {other} (screen / dict)"),

@@ -6,8 +6,8 @@
 
 use crate::config::{Config, DynamicCompletion, Layout, Marker, OkuriMatch};
 use crate::context::Context;
-use crate::rank::{self, Ranker};
 use crate::dict::{Candidate, Dict};
+use crate::rank::{self, Ranker};
 
 /// 括弧付き貼り付け (bracketed paste) の囲み。
 ///
@@ -3132,7 +3132,11 @@ mod tests {
         assert_eq!(preedit_text(&skk), "▽ちょくざいひ");
         let r = skk.handle(Key::Char(' '));
         assert!(r.commit.is_empty());
-        assert!(preedit_text(&skk).starts_with('▼'), "{}", preedit_text(&skk));
+        assert!(
+            preedit_text(&skk).starts_with('▼'),
+            "{}",
+            preedit_text(&skk)
+        );
     }
 
     /// 登録の途中で ASCII モードにして打った英字も、登録内容に入る。
