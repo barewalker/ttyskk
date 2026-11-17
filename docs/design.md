@@ -1,7 +1,7 @@
 # 設計
 
 README の「仕組み」で触れた決まりの詳細と、部品の分かれ方です。なぜこの作りにしたかという
-記録は [`NOTES.md`](../NOTES.md) にあります。
+記録はリポジトリの [`NOTES.md`](https://github.com/barewalker/ttyskk/blob/main/NOTES.md) にあります。
 
 ## 画面に対して守っていること
 

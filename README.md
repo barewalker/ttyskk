@@ -925,7 +925,7 @@ ttyskk = { version = "0.3", default-features = false }
 ```
 
 内訳と、エンジンを直接使うときの呼び方は [`docs/design.md`](docs/design.md) にあります。
-なぜこの作りにしたかの記録は [`NOTES.md`](NOTES.md) です。
+なぜこの作りにしたかの記録は、リポジトリの [`NOTES.md`](https://github.com/barewalker/ttyskk/blob/main/NOTES.md) です。
 
 ## 入れないもの
 
@@ -955,8 +955,8 @@ ttyskk = { version = "0.3", default-features = false }
 MIT または Apache-2.0 のどちらかを選べます (`LICENSE-MIT` / `LICENSE-APACHE`)。
 
 先行実装の [sentimental-skk](https://github.com/saitoha/sentimental-skk) (GPL-3.0) は設計の
-参考にしましたが、**移植ではありません**。`NOTES.md` にあるのは読み解いた内容を説明するため
-の短い引用で、コードは Rust で新しく書いています。
+参考にしましたが、**移植ではありません**。リポジトリの `NOTES.md` にあるのは読み解いた内容を
+説明するための短い引用で、コードは Rust で新しく書いています。
 
 `tests/kensaku-reference.json` だけは別扱いです。[kensaku.vim](https://github.com/lambdalisue/vim-kensaku)
 の出力を試験の突き合わせ用に控えたもので、並んでいる語は
