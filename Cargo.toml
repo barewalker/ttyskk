@@ -11,6 +11,8 @@ description = "In-terminal SKK Japanese input method. Wraps a child process in a
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/barewalker/ttyskk"
 readme = "README.md"
+# 開発の記録は包みに入れない (リポジトリで読めれば足りる)。
+exclude = ["NOTES.md"]
 keywords = ["skk", "ime", "japanese", "terminal", "pty"]
 categories = ["command-line-utilities", "text-processing"]
 
