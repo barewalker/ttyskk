@@ -958,6 +958,12 @@ MIT または Apache-2.0 のどちらかを選べます (`LICENSE-MIT` / `LICENS
 参考にしましたが、**移植ではありません**。`NOTES.md` にあるのは読み解いた内容を説明するため
 の短い引用で、コードは Rust で新しく書いています。
 
+`tests/kensaku-reference.json` だけは別扱いです。[kensaku.vim](https://github.com/lambdalisue/vim-kensaku)
+の出力を試験の突き合わせ用に控えたもので、並んでいる語は
+[migemo-compact-dict](https://github.com/oguna/migemo-compact-dict-latest) (GPL-3.0、SKK 辞書から
+生成) から来ています。**このファイルには GPL-3.0 が適用されます。** 試験でしか読まず、
+crates.io の包みと実行ファイルには入りません。
+
 ## English
 
 `ttyskk` is an SKK Japanese input method that lives entirely inside your terminal.

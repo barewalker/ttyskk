@@ -11,8 +11,15 @@ description = "In-terminal SKK Japanese input method. Wraps a child process in a
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/barewalker/ttyskk"
 readme = "README.md"
-# 開発の記録は包みに入れない (リポジトリで読めれば足りる)。
-exclude = ["NOTES.md"]
+# 包みに入れないもの。どれもリポジトリで読めれば足りる。
+# - NOTES.md … 開発の記録
+# - kensaku の実測出力と、それを読む試験 … 出力に含まれる語が GPL-3.0 の辞書
+#   (migemo-compact-dict) から来ているので、MIT / Apache-2.0 の包みでは配らない
+exclude = [
+    "NOTES.md",
+    "tests/kensaku-reference.json",
+    "tests/migemo_reference.rs",
+]
 keywords = ["skk", "ime", "japanese", "terminal", "pty"]
 categories = ["command-line-utilities", "text-processing"]
 
