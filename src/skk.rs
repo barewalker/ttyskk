@@ -4,7 +4,7 @@
 //! 途中経過は [`Skk::preedit`] が返す区間列、候補は [`Skk::candidates`] に回す。
 //! 解釈しなかったキーは [`Response::passthrough`] としてそのまま返す。
 
-use crate::config::{Config, DynamicCompletion, Layout, Marker, OkuriMatch};
+use crate::config::{Chouon, Config, DynamicCompletion, Layout, Marker, OkuriMatch};
 use crate::context::Context;
 use crate::dict::{Candidate, Dict};
 use crate::rank::{self, Ranker};
@@ -527,6 +527,13 @@ pub struct Skk {
     /// 直接入力で何か文字を出したら捨てる。接頭辞と次の語が画面上で隣り合って
     /// いることが繋げる条件なので (ddskk は `looking-at` で同じことを確かめる)。
     last_commit: Option<(String, String)>,
+    /// 直前に子へ出した文字。`-` を長音にするかどうかを決めるのに使う
+    /// ([`Skk::after_kana`])。
+    ///
+    /// **画面より先にこちらを見る。** 続けて打った打鍵は一度にまとめて届くことが
+    /// あり、そのとき画面にはまだ手前の文字が映っていない。カーソルを動かすキーを
+    /// 子へ渡したら、どこに居るか分からなくなるので捨てる (その先は画面に聞く)。
+    tail: Option<char>,
     /// 画面に見えている文章。同音異義語の順序を決めるのに使う。
     ///
     /// **エンジンは画面を知らない。** 端末の側が控えから組んで渡す。GUI の入力
@@ -584,6 +591,7 @@ impl Skk {
             completion: None,
             suggestion: Vec::new(),
             last_commit: None,
+            tail: None,
             context: None,
             context_note: None,
             ranker: Box::new(rank::ScreenHints),
@@ -669,6 +677,9 @@ impl Skk {
         if !text.is_empty() {
             self.last_commit = None;
         }
+        if let Some(c) = text.chars().next_back() {
+            self.tail = Some(c);
+        }
         text
     }
 
@@ -680,6 +691,7 @@ impl Skk {
     pub fn clear(&mut self) {
         self.regs.clear();
         self.last_commit = None;
+        self.tail = None;
         self.reset();
     }
 
@@ -1240,10 +1252,64 @@ impl Skk {
 
     pub fn handle(&mut self, key: Key) -> Response {
         let r = self.handle_key(key);
+        self.note_tail(&r);
         // 動的補完は「いまの見出し語」に紐づくので、状態が動いたあとに引き直す。
         // 入り口を一つに絞ってあるので、どの経路を通っても取り残されない。
         self.refresh_suggestion();
         r
+    }
+
+    /// 子へ出したものの末尾を控える ([`Skk::tail`])。
+    fn note_tail(&mut self, r: &Response) {
+        match &r.passthrough {
+            // 離した報告と端末の応答は、打った文字でもカーソルの移動でもない
+            Some(Key::Release(_)) => {}
+            Some(Key::Raw(seq)) if is_terminal_reply(seq) => {}
+            Some(Key::Char(c)) => self.tail = Some(*c),
+            // 矢印・改行・消去など。カーソルの手前はもう分からない
+            Some(_) => self.tail = None,
+            None if r.cursor_back > 0 => self.tail = None,
+            None => {
+                if let Some(c) = r.commit.chars().next_back() {
+                    self.tail = Some(c);
+                }
+            }
+        }
+    }
+
+    /// カーソルの手前の一文字。分からなければ `None`。
+    ///
+    /// 打っている先が ttyskk の中 (▽ の見出し語・定型文の埋める場所・辞書登録) なら
+    /// その中身を見る。子へ直に出しているときは、自分が直前に出した文字、それも
+    /// 分からなければ画面を見る。
+    fn before_cursor(&self) -> Option<char> {
+        if self.phase == Phase::Composing {
+            return self.reading[..self.read_cursor].chars().next_back();
+        }
+        if let Some(f) = &self.filling {
+            return f.value().chars().next_back();
+        }
+        if let Some(reg) = self.regs.last() {
+            return reg.buffer.chars().next_back();
+        }
+        self.tail
+            .or_else(|| self.context.as_ref()?.left(1).chars().next_back())
+    }
+
+    /// ローマ字を一文字送る。`-` だけは手前を見て、長音にするかどうかを決める
+    /// ([`Chouon`])。
+    ///
+    /// 打ちかけのローマ字があるときは表に任せる — `z-` は `〜` で、`n-` は
+    /// 「ん」が先に出るので長音で合っている。
+    fn feed_romaji(&mut self, c: char) -> String {
+        if c == '-'
+            && self.cfg.chouon == Chouon::Auto
+            && self.romaji.is_empty()
+            && !self.before_cursor().is_some_and(takes_chouon)
+        {
+            return "-".to_string();
+        }
+        self.romaji.feed(c)
     }
 
     fn handle_key(&mut self, key: Key) -> Response {
@@ -1609,7 +1675,7 @@ impl Skk {
                 Response::default()
             }
             Key::Char(c) => {
-                let out = self.romaji.feed(c);
+                let out = self.feed_romaji(c);
                 Response::text(&self.shape(&out))
             }
             k => {
@@ -1819,7 +1885,11 @@ impl Skk {
             }
             Key::Char(c) => {
                 self.push_spell(c);
-                let kana = self.romaji.feed(c);
+                let kana = if self.okuri_head.is_some() {
+                    self.romaji.feed(c)
+                } else {
+                    self.feed_romaji(c)
+                };
                 if self.okuri_head.is_some() {
                     self.okuri_kana.push_str(&kana);
                     if !self.okuri_kana.is_empty() && self.romaji.is_empty() {
@@ -2111,8 +2181,10 @@ impl Skk {
     }
 
     /// 文脈を渡す意味があるか。無効なら組み立て自体を省ける。
+    ///
+    /// 候補の並べ替えのほか、`-` を長音にするかどうかにも使う ([`Chouon::Auto`])。
     pub fn wants_context(&self) -> bool {
-        self.cfg.context_order
+        self.cfg.context_order || self.cfg.chouon == Chouon::Auto
     }
 
     /// 候補の並べ替え方を入れ替える。
@@ -2532,6 +2604,17 @@ impl Skk {
         }
         .with_cursor_back(back)
     }
+}
+
+/// 後ろに長音 `ー` が続きうる文字か。ひらがな・カタカナ (半角も) と長音そのもの。
+///
+/// 漢字や英数字の後ろに長音は来ない。中黒 `・` と二重ハイフン `゠` はカタカナの
+/// 区画にあるが、かなではないので除く。
+fn takes_chouon(c: char) -> bool {
+    matches!(c,
+        '\u{3041}'..='\u{3096}' | '\u{309d}'..='\u{309f}'
+        | '\u{30a1}'..='\u{30fa}' | '\u{30fc}'..='\u{30ff}'
+        | '\u{ff66}'..='\u{ff9f}')
 }
 
 /// 端末が**返してきた**列か。押された鍵ではないので、打鍵として扱ってはいけない。
@@ -4340,6 +4423,116 @@ mod tests {
         // 送り仮名を見ないので、直前に確定した「大」が「おおく」にも出る
         typed(&mut skk, "OoKu");
         assert_eq!(preedit_text(&skk), "▼大く");
+    }
+
+    /// `-` は、かなの後ろでだけ長音になる。
+    #[test]
+    fn hyphen_becomes_chouon_only_after_kana() {
+        let kana = |s: &str| {
+            let mut skk = skk_with(&[]);
+            skk.handle(Key::Ctrl(0x0a));
+            typed(&mut skk, s)
+        };
+        assert_eq!(kana("ra-menn"), "らーめん");
+        assert_eq!(kana("ko-hi-"), "こーひー");
+        assert_eq!(kana("a--"), "あーー");
+        // カタカナでも同じ
+        assert_eq!(kana("qde-ta"), "データ");
+        // 手前がかなでなければ、打ったままの `-`
+        assert_eq!(kana("-1"), "-1");
+        assert_eq!(kana("---"), "---");
+        assert_eq!(kana("2026-11-17"), "2026-11-17");
+        assert_eq!(kana("a -1"), "あ -1");
+        assert_eq!(kana("a.-"), "あ。-");
+        // 打ちかけのローマ字があるときは表のまま
+        assert_eq!(kana("z-"), "〜");
+        assert_eq!(kana("kan-"), "かんー");
+    }
+
+    /// 漢字の後ろに長音は来ない。
+    #[test]
+    fn hyphen_stays_after_kanji() {
+        let mut skk = skk_with(&[("とうきょう", "/東京/"), ("おおさか", "/大阪/")]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "Toukyou \n-Oosaka \n"), "東京-大阪");
+    }
+
+    /// ▽ の中では見出し語の手前の文字で決める。
+    #[test]
+    fn hyphen_in_the_reading_follows_the_reading() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Ra-menn");
+        assert_eq!(preedit_text(&skk), "▽らーめん");
+
+        // 見出し語の中へ戻って打っても、カーソルの手前で決まる
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "Ra1");
+        skk.handle(Key::Ctrl(0x02));
+        typed(&mut skk, "-");
+        assert_eq!(preedit_text(&skk), "▽らー1");
+        typed(&mut skk, "\x7f");
+        skk.handle(Key::Ctrl(0x06));
+        typed(&mut skk, "-");
+        assert_eq!(preedit_text(&skk), "▽ら1-");
+    }
+
+    /// カーソルを動かすキーを渡したあとは、画面を見て決める。
+    #[test]
+    fn hyphen_asks_the_screen_after_the_cursor_moved() {
+        let after_enter = |screen: &str| {
+            let mut skk = skk_with(&[]);
+            skk.handle(Key::Ctrl(0x0a));
+            typed(&mut skk, "a\r");
+            skk.set_context(screen, screen.chars().count());
+            typed(&mut skk, "-")
+        };
+        // 自分が出した「あ」はもう手前に無い
+        assert_eq!(after_enter(""), "-");
+        assert_eq!(after_enter("$ ls"), "-");
+        assert_eq!(after_enter("サーバ"), "ー");
+
+        // 自分が出した文字が分かっているうちは、画面が古くてもそちらを採る
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        skk.set_context("$ ", 2);
+        assert_eq!(typed(&mut skk, "sa-ba"), "さーば");
+        skk.set_context("サーバ", 3);
+        assert_eq!(typed(&mut skk, "1-"), "1-");
+    }
+
+    /// ASCII モードで打った英字の後ろも `-` のまま。
+    #[test]
+    fn hyphen_stays_after_ascii_typed_in_ascii_mode() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "alfoo\n-"), "あfoo-");
+    }
+
+    /// 辞書登録の途中は、登録内容の末尾で決める。
+    #[test]
+    fn hyphen_in_a_registration_follows_the_buffer() {
+        let mut skk = skk_with(&[]);
+        skk.handle(Key::Ctrl(0x0a));
+        typed(&mut skk, "a");
+        // 未知語なので登録に入る。外で出した「あ」は見ない
+        typed(&mut skk, "Mishigo -sa-");
+        assert!(
+            preedit_text(&skk).ends_with("-さー"),
+            "登録内容: {}",
+            preedit_text(&skk)
+        );
+    }
+
+    /// `chouon = "always"` なら従来どおり、いつでも長音。
+    #[test]
+    fn hyphen_is_always_chouon_when_asked() {
+        let mut skk = skk_with(&[]);
+        skk.set_config(Config::parse("[behavior]\nchouon = \"always\"\n").unwrap());
+        skk.handle(Key::Ctrl(0x0a));
+        assert_eq!(typed(&mut skk, "-1-"), "ー1ー");
+        assert!(Config::parse("[behavior]\nchouon = \"never\"\n").is_err());
     }
 
     /// 画面の文脈で同音異義語の順序が変わる。

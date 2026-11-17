@@ -14,6 +14,20 @@ use crate::romaji::Kutouten;
 use crate::skk::Key;
 use unicode_width::UnicodeWidthChar;
 
+/// かなモードの `-` から何を出すか。
+///
+/// SKK の `-` は長音 `ー` だが、それだと日本語の合間に打つ `-` (日付・範囲・
+/// 命令の引数) のたびに ASCII モードへ降りることになる。**長音はかなの後ろにしか
+/// 来ない**ので、手前の文字で決められる。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chouon {
+    /// 手前がかな (ひらがな・カタカナ・`ー`) なら `ー`、それ以外は `-` (既定)。
+    #[default]
+    Auto,
+    /// いつでも `ー` (従来の SKK と同じ)。
+    Always,
+}
+
 /// 設定ファイルを見張る間隔。
 const POLL: Duration = Duration::from_secs(1);
 
@@ -270,6 +284,8 @@ pub struct Config {
     pub mode_marker: Marker,
     /// `.` と `,` から出す句読点の組。
     pub kutouten: Kutouten,
+    /// `-` から長音 `ー` を出す条件 ([`Chouon`])。
+    pub chouon: Chouon,
     /// AZIK (拡張ローマ字入力) を使うか。
     ///
     /// 「2 文字めに《ん》が来る」「二重母音」の並びを 2 打で打てるようにする方式。
@@ -406,6 +422,7 @@ impl Default for Config {
             mode_symbols: ['~', '+', '-', '@'],
             mode_marker: Marker::Cell,
             kutouten: Kutouten::Jp,
+            chouon: Chouon::Auto,
             azik: false,
             dynamic_completion: DynamicCompletion::Off,
             // ddskk の skk-auto-start-henkan-keyword-list と同じ顔ぶれ
@@ -663,6 +680,13 @@ impl Config {
                             Some("default") => false,
                             Some("azik") => true,
                             _ => bail!("behavior.romaji は \"default\" か \"azik\" で書きます"),
+                        }
+                    }
+                    "chouon" => {
+                        cfg.chouon = match value.as_str() {
+                            Some("auto") => Chouon::Auto,
+                            Some("always") => Chouon::Always,
+                            _ => bail!("behavior.chouon は \"auto\" か \"always\" で書きます"),
                         }
                     }
                     "kutouten" => {
