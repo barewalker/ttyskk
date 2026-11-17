@@ -27,11 +27,11 @@
 依存するもの: POSIX の擬似端末、VT100 系エスケープ列を解する端末。Linux / macOS。
 依存しないもの: herdr, tmux, kitty 固有機能, X11 / Wayland, fcitx, D-Bus。
 
-副次的な利点として、mosh 越しの利用ではリモート側で動くため辞書と学習履歴が NUC に集約され、どこから繋いでも同じ変換になる。
+副次的な利点として、mosh 越しの利用ではリモート側で動くため辞書と学習履歴がリモート側の一台に集約され、どこから繋いでも同じ変換になる。
 
 ## 実装言語
 
-Rust。単一バイナリで配布でき、`portable-pty` / `vte` が使える。`~/.cargo` は共有ホームにあるので distrobox 不要。
+Rust。単一バイナリで配布でき、`portable-pty` / `vte` が使える。
 
 ## 先行実装の調査
 
@@ -246,7 +246,7 @@ fcitx5 の利用者辞書は送りありの見出し語が `わるs /悪/` と t
 
 ## 環境
 
-- 辞書: `/usr/share/skk/SKK-JISYO.L` ほか一式 (ホスト側。distrobox 内からは `/run/host/usr/share/skk/`)
+- 辞書: `/usr/share/skk/SKK-JISYO.L` ほか一式 (コンテナの中からホスト側を見るときは `/run/host/usr/share/skk/`)
 - 既存のユーザー辞書: `~/.local/share/fcitx5/skk/user.dict` (EUC-JP)。学習内容を引き継げる
 - fcitx5 の入力メソッド切替は `Control+space` / `Zenkaku_Hankaku` / `Alt+grave`
 

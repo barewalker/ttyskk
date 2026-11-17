@@ -214,11 +214,11 @@ fcitx5 の addon は共有ライブラリ (`libttyskk.so`) と二つの `.conf` 
 
 **この addon をビルドするのはホスト (Ubuntu) 側。** fcitx5 そのものが動いているのが
 ホストなので、開発用のパッケージもそちらに入っている (`build/CMakeCache.txt` の
-`Fcitx5Core_DIR` が `/usr/lib/x86_64-linux-gnu/…` を指している)。distrobox の中から
-触るときは `distrobox-host-exec` を通す。
+`Fcitx5Core_DIR` が `/usr/lib/x86_64-linux-gnu/…` を指している)。コンテナの中で開発して
+いる場合も、ビルドはホスト側で走らせる。
 
 ```sh
-distrobox-host-exec bash -lc 'cd ~/Projects/ttyskk/fcitx5 && cmake --build build'
+cd fcitx5 && cmake --build build
 ```
 
 Rust 側は cargo でビルドし、CMake から呼ぶ (`corrosion` か、単に `add_custom_command`)。

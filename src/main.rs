@@ -752,7 +752,7 @@ fn default_system_jisyo() -> Vec<PathBuf> {
             .map(|s| absolute(PathBuf::from(s)))
             .collect();
     }
-    // distrobox の中からはホスト側が /run/host 以下に見える
+    // コンテナの中からはホスト側が /run/host 以下に見える
     [
         "/usr/share/skk/SKK-JISYO.L",
         "/run/host/usr/share/skk/SKK-JISYO.L",
@@ -1026,7 +1026,7 @@ fn tell_before_returning(stdout: &mut impl Write, msg: &str, wait: bool) {
 /// 編集器を起動して待つ。行を指定できる編集器には行も渡す。
 ///
 /// `$VISUAL` → `$EDITOR` → `vi` の順に試し、**見つからないものは飛ばして次へ落とす**。
-/// 端末の中と外で入っているものが違うことがあり (distrobox の中には nvim があるが
+/// 端末の中と外で入っているものが違うことがあり (コンテナの中には nvim があるが
 /// ホストには無い、など)、指定が空振りするだけで何も書けなくなるのは困る。
 ///
 /// 落としたことは呼んだ側へ返す。黙って別の編集器が開くと驚くので、後で知らせる。
