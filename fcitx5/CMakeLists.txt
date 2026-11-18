@@ -13,7 +13,7 @@ project(fcitx5-ttyskk VERSION 0.3.0 LANGUAGES CXX)
 
 # fcitx5 5.1.21 (Arch) の FCITX_INFO は std::source_location を使うので C++20 が要る。
 # 5.1.7 (Ubuntu 24.04) では 17 で通っていた。Ubuntu の g++ 13.2 も C++20 を
-# 完全に通せるので、両方で 20 にしてよい。2026-09-06 に omarchy で踏んだ。
+# 完全に通せるので、両方で 20 にしてよい。2026-09-06 に Arch で踏んだ。
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

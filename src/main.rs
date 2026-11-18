@@ -779,7 +779,7 @@ fn user_jisyo() -> PathBuf {
 
 /// スニペットの置き場所。設定が空なら既定の一つだけを読む。
 ///
-/// 既定を利用者辞書と同じところに置くので、辞書を git に載せて職場と自宅で
+/// 既定を利用者辞書と同じところに置くので、辞書を git に載せて複数の機械で
 /// 分け合っている場合、定型文もそのまま行き来する。
 fn snippet_paths(cfg: &Config) -> Vec<PathBuf> {
     if cfg.snippets.is_empty() {

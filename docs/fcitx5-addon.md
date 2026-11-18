@@ -225,7 +225,7 @@ Rust 側は cargo でビルドし、CMake から呼ぶ (`corrosion` か、単に
 
 ### fcitx5 の版によって二か所ずれる
 
-2026-09-06 に Arch (omarchy, fcitx5 **5.1.21**) で建てたときに踏んだ。
+2026-09-06 に Arch (fcitx5 **5.1.21**) で建てたときに踏んだ。
 Ubuntu 24.04 は **5.1.7** で、どちらも同じソースから建つようにしてある。
 
 **① C++20 が要る。** 5.1.21 の `FCITX_INFO` は `std::source_location` を使う。

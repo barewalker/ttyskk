@@ -461,7 +461,7 @@ std::string TtyskkEngine::subModeIconImpl(const InputMethodEntry &,
 // _V2_BACKWARDS は両方の記号を出すが、**古い側のヘッダには存在しない**ので分ける。
 //
 // ⚠ 記号が合わないと dlopen は成功するのに factory が取れず、fcitx5 は
-//   何も言わずに profile から入力方式の行を消す。2026-09-06 に omarchy で踏んだ。
+//   何も言わずに profile から入力方式の行を消す。2026-09-06 に Arch で踏んだ。
 #ifdef FCITX_ADDON_FACTORY_V2_BACKWARDS
 FCITX_ADDON_FACTORY_V2_BACKWARDS(ttyskk, fcitx::TtyskkEngineFactory)
 #else
